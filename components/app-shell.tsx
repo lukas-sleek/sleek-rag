@@ -488,7 +488,18 @@ export function App() {
         ) : (
           <>
             <div ref={threadOuterRef} className="flex-1 overflow-y-auto flex flex-col">
-              <div ref={threadInnerRef} className="w-full max-w-[760px] mx-auto pt-8 pb-[60vh] px-6 flex flex-col gap-7">
+              {/* While the assistant is streaming, leave 60vh of bottom
+                  padding so the new message can be scrolled to ~40% from
+                  the top with room to grow into. Once streaming is done,
+                  shrink back to the small gutter so leaving and coming
+                  back to the chat doesn't show empty space. */}
+              <div
+                ref={threadInnerRef}
+                className={
+                  "w-full max-w-[760px] mx-auto pt-8 px-6 flex flex-col gap-7 " +
+                  (streaming ? "pb-[60vh]" : "pb-[120px]")
+                }
+              >
                 {messages.map((m, i) => (
                   <Message
                     key={i}
