@@ -11,7 +11,6 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
 
     openai_api_key: str = ""
-    vector_store_id: str = ""
     supabase_url: str = ""
     supabase_service_role_key: str = ""
     supabase_jwt_secret: str = ""

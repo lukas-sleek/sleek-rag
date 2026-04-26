@@ -38,3 +38,15 @@ RAG app with chat (default) and document ingestion interfaces. Config via env va
 
 ## Progress
 Check PROGRESS.md for current module status. Update it as you complete tasks.
+
+## Local Test Credentials
+
+For local dev / smoke testing the auth flow, a test user is pre-seeded in the
+"RAG" Supabase project:
+
+- Email: `test@test.com`
+- Password: `12345678`
+
+Created with email confirmation pre-applied — works for `signInWithPassword`
+without needing to confirm an email. Has a default "My Project" via the signup
+trigger. Use this account when testing chat / file upload end-to-end.

@@ -5,7 +5,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.auth import current_user_id
-from app.config import settings
 from app.db import supabase
 from app.openai_client import openai_client
 
@@ -145,12 +144,21 @@ async def send_message(
         ).execute()
         chat["openai_thread_id"] = conv.id
 
+    project = (
+        supabase()
+        .table("projects")
+        .select("openai_vector_store_id")
+        .eq("id", chat["project_id"])
+        .single()
+        .execute()
+        .data
+    )
     tools = []
-    if settings.vector_store_id:
+    if project and project.get("openai_vector_store_id"):
         tools.append(
             {
                 "type": "file_search",
-                "vector_store_ids": [settings.vector_store_id],
+                "vector_store_ids": [project["openai_vector_store_id"]],
             }
         )
 

@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.auth import current_user_id
-from app.config import settings
 from app.db import supabase
 from app.openai_client import openai_client
 
@@ -17,11 +16,11 @@ class FileOut(BaseModel):
     openai_file_id: str | None = None
 
 
-def _assert_project_owned(project_id: str, user_id: str) -> None:
+def _load_project(project_id: str, user_id: str) -> dict:
     res = (
         supabase()
         .table("projects")
-        .select("id")
+        .select("id,name,openai_vector_store_id")
         .eq("id", project_id)
         .eq("user_id", user_id)
         .limit(1)
@@ -29,19 +28,24 @@ def _assert_project_owned(project_id: str, user_id: str) -> None:
     )
     if not res.data:
         raise HTTPException(404, "project not found")
+    return res.data[0]
 
 
-def _vector_store_id() -> str:
-    if not settings.vector_store_id:
-        raise HTTPException(
-            500, "VECTOR_STORE_ID not configured on the backend (.env)"
-        )
-    return settings.vector_store_id
+def _ensure_vector_store(project: dict) -> str:
+    """Lazy-create a per-project OpenAI vector store on first upload."""
+    if project.get("openai_vector_store_id"):
+        return project["openai_vector_store_id"]
+    vs = openai_client().vector_stores.create(name=project["name"])
+    supabase().table("projects").update(
+        {"openai_vector_store_id": vs.id}
+    ).eq("id", project["id"]).execute()
+    project["openai_vector_store_id"] = vs.id
+    return vs.id
 
 
 @router.get("", response_model=list[FileOut])
 def list_files(project_id: str, user_id: str = Depends(current_user_id)):
-    _assert_project_owned(project_id, user_id)
+    _load_project(project_id, user_id)
     res = (
         supabase()
         .table("project_files")
@@ -60,8 +64,8 @@ async def upload_file(
     file: UploadFile = File(...),
     user_id: str = Depends(current_user_id),
 ):
-    _assert_project_owned(project_id, user_id)
-    vector_store_id = _vector_store_id()
+    project = _load_project(project_id, user_id)
+    vector_store_id = _ensure_vector_store(project)
 
     contents = await file.read()
     size_bytes = len(contents)
@@ -99,7 +103,7 @@ async def upload_file(
 def delete_file(
     project_id: str, file_id: str, user_id: str = Depends(current_user_id)
 ):
-    _assert_project_owned(project_id, user_id)
+    project = _load_project(project_id, user_id)
     row_res = (
         supabase()
         .table("project_files")
@@ -112,8 +116,8 @@ def delete_file(
     if not row_res.data:
         raise HTTPException(404, "file not found")
     openai_file_id = row_res.data[0]["openai_file_id"]
+    vector_store_id = project.get("openai_vector_store_id")
 
-    vector_store_id = settings.vector_store_id
     if openai_file_id and vector_store_id:
         try:
             openai_client().vector_stores.files.delete(
