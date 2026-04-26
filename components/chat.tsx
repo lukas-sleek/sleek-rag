@@ -347,17 +347,19 @@ export function Composer({
             <button type="button" className={ICON_BTN} title="Spracheingabe">
               <Icon.Mic />
             </button>
-            {streaming ? (
-              <button type="button" className="cmp-send" onClick={onStop} title="Generierung stoppen">
-                <Icon.Stop />
-              </button>
-            ) : (
-              value.trim() && (
+            {/* Fixed-size slot so the send button mounting/unmounting never
+                reflows the toolbar — only its contents change. */}
+            <div className="w-7 h-7 flex items-center justify-center flex-shrink-0">
+              {streaming ? (
+                <button type="button" className="cmp-send" onClick={onStop} title="Generierung stoppen">
+                  <Icon.Stop />
+                </button>
+              ) : value.trim() ? (
                 <button type="submit" className="cmp-send" title="Senden">
                   <Icon.ArrowUp />
                 </button>
-              )
-            )}
+              ) : null}
+            </div>
           </div>
         </div>
       </form>
