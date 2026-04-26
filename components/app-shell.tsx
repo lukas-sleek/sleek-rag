@@ -1,7 +1,8 @@
 "use client";
 import * as React from "react";
+import type { Session } from "@supabase/supabase-js";
 import { Icon } from "./icons";
-import { LoginScreen, type LoginUser } from "./login";
+import { LoginScreen } from "./login";
 import { Sidebar } from "./sidebar";
 import { Composer, EmptyState, Message } from "./chat";
 import { ProjectFilesModal } from "./project-files-modal";
@@ -11,14 +12,12 @@ import {
   filterAllowedFiles,
   inferFileType,
   mockAnalysis,
-  PROJECT_B_FILES,
-  PROJECTS_INITIAL,
-  SAMPLE_FILES,
-  SAMPLE_THREAD,
   type FileItem,
   type Message as Msg,
   type Project,
 } from "./fixtures";
+import { createClient } from "@/lib/supabase/client";
+import { api } from "@/lib/api";
 
 type Toast = { id: string; message: string; kind: string };
 
@@ -33,26 +32,19 @@ const BTN_DANGER =
   "transition-[background-color,border-color] duration-150 hover:bg-[#c02f2f] hover:border-[#c02f2f]";
 
 export function App() {
-  const [user, setUser] = React.useState<LoginUser | null>(null);
+  const supabase = React.useMemo(() => createClient(), []);
+  const [session, setSession] = React.useState<Session | null>(null);
+  const [authReady, setAuthReady] = React.useState(false);
   const [collapsed, setCollapsed] = React.useState(false);
-  const [projects, setProjects] = React.useState<Project[]>(PROJECTS_INITIAL);
-  const [activeChatId, setActiveChatId] = React.useState<string>(() =>
-    PROJECTS_INITIAL[0]?.chats?.[0]?.id || "__empty__"
-  );
+  const [projects, setProjects] = React.useState<Project[]>([]);
+  const [activeChatId, setActiveChatId] = React.useState<string>("__empty__");
 
-  const [projectFiles, setProjectFiles] = React.useState<Record<string, FileItem[]>>(() => {
-    const m: Record<string, FileItem[]> = {};
-    for (const p of PROJECTS_INITIAL) {
-      if (!p.hasFiles) { m[p.id] = []; continue; }
-      if (p.id === "p-b") m[p.id] = PROJECT_B_FILES;
-      else m[p.id] = SAMPLE_FILES;
-    }
-    return m;
-  });
+  const [projectFiles, setProjectFiles] = React.useState<Record<string, FileItem[]>>({});
 
-  const [threads, setThreads] = React.useState<Record<string, Msg[]>>(() => ({ ...SAMPLE_THREAD }));
+  const [threads, setThreads] = React.useState<Record<string, Msg[]>>({});
   const [streaming, setStreaming] = React.useState(false);
-  const streamRef = React.useRef({ stop: false });
+  const streamRef = React.useRef<{ controller: AbortController | null }>({ controller: null });
+  const loadedThreadsRef = React.useRef<Set<string>>(new Set());
 
   const [confirmDialog, setConfirmDialog] = React.useState<null | {
     title: string;
@@ -119,6 +111,111 @@ export function App() {
     }, 4200);
   }, []);
 
+  React.useEffect(() => {
+    let unsub: (() => void) | undefined;
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthReady(true);
+    });
+    const { data } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s);
+      if (!s) {
+        setProjects([]);
+        setThreads({});
+        setProjectFiles({});
+        setActiveChatId("__empty__");
+      }
+    });
+    unsub = () => data.subscription.unsubscribe();
+    return () => unsub?.();
+  }, [supabase]);
+
+  React.useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+    (async () => {
+      const res = await api("/api/projects");
+      if (!res.ok) {
+        pushToast("Projekte konnten nicht geladen werden.", "warn");
+        return;
+      }
+      const rows: { id: string; name: string; chats: { id: string; title: string }[] }[] =
+        await res.json();
+      if (cancelled) return;
+      setProjects(
+        rows.map((r) => ({
+          id: r.id,
+          name: r.name,
+          expanded: true,
+          hasFiles: false,
+          chats: r.chats ?? [],
+        })),
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session, pushToast]);
+
+  React.useEffect(() => {
+    if (!session) return;
+    if (activeChatId === "__empty__") return;
+    if (loadedThreadsRef.current.has(activeChatId)) return;
+    loadedThreadsRef.current.add(activeChatId);
+    let cancelled = false;
+    (async () => {
+      const res = await api(`/api/chats/${activeChatId}/messages`);
+      if (!res.ok) {
+        loadedThreadsRef.current.delete(activeChatId);
+        return;
+      }
+      const msgs: Msg[] = await res.json();
+      if (cancelled) return;
+      setThreads((prev) => ({ ...prev, [activeChatId]: msgs }));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session, activeChatId]);
+
+  const activeProjectId = React.useMemo(() => {
+    for (const p of projects) {
+      if (p.chats.some((c) => c.id === activeChatId)) return p.id;
+    }
+    return null;
+  }, [projects, activeChatId]);
+
+  const loadedFilesRef = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    if (!session) return;
+    if (!showFiles.open) return;
+    if (!activeProjectId) return;
+    if (loadedFilesRef.current.has(activeProjectId)) return;
+    loadedFilesRef.current.add(activeProjectId);
+    let cancelled = false;
+    (async () => {
+      const res = await api(`/api/projects/${activeProjectId}/files`);
+      if (!res.ok) {
+        loadedFilesRef.current.delete(activeProjectId);
+        return;
+      }
+      const rows = (await res.json()) as Array<{
+        id: string;
+        filename: string;
+        size_bytes?: number | null;
+        status: string;
+      }>;
+      if (cancelled) return;
+      setProjectFiles((prev) => ({
+        ...prev,
+        [activeProjectId]: rows.map(rowToFileItem),
+      }));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session, showFiles.open, activeProjectId]);
+
   const activeChat = React.useMemo(() => {
     for (const p of projects) {
       const c = p.chats.find((x) => x.id === activeChatId);
@@ -133,6 +230,104 @@ export function App() {
     return null;
   }, [projects, activeChatId]);
 
+  const formatBytes = (bytes: number | null | undefined) => {
+    if (!bytes && bytes !== 0) return "—";
+    return bytes / 1024 / 1024 < 1
+      ? Math.round(bytes / 1024) + " KB"
+      : (bytes / 1024 / 1024).toFixed(1) + " MB";
+  };
+
+  const rowToFileItem = (row: {
+    id: string;
+    filename: string;
+    size_bytes?: number | null;
+    status: string;
+  }): FileItem => ({
+    id: row.id,
+    name: row.filename,
+    size: formatBytes(row.size_bytes ?? null),
+    type: inferFileType(row.filename),
+    pages: 1,
+    status: row.status === "indexed" ? "complete" : "analyzing",
+    analysis: null,
+  });
+
+  const uploadProjectFiles = async (projectId: string, accepted: File[]) => {
+    if (!accepted.length) return;
+    const placeholders: FileItem[] = accepted.map((f, i) => ({
+      id: "uploading-" + Date.now() + "-" + i,
+      name: f.name,
+      size: formatBytes(f.size),
+      type: inferFileType(f.name),
+      pages: 1,
+      status: "analyzing",
+      analysis: null,
+    }));
+    setProjectFiles((prev) => ({
+      ...prev,
+      [projectId]: [...placeholders, ...(prev[projectId] || [])],
+    }));
+    setShowFiles((s) => (s.open ? s : { open: true, autoPicker: false }));
+
+    const placeholderIds = new Set(placeholders.map((p) => p.id));
+    let anySucceeded = false;
+
+    await Promise.all(
+      accepted.map(async (f, i) => {
+        const placeholderId = placeholders[i].id;
+        try {
+          const form = new FormData();
+          form.append("file", f);
+          const res = await api(`/api/projects/${projectId}/files`, {
+            method: "POST",
+            body: form,
+          });
+          if (!res.ok) {
+            throw new Error("upload failed");
+          }
+          const row = (await res.json()) as {
+            id: string;
+            filename: string;
+            size_bytes?: number | null;
+            status: string;
+          };
+          anySucceeded = true;
+          setProjectFiles((prev) => ({
+            ...prev,
+            [projectId]: (prev[projectId] || []).map((existing) =>
+              existing.id === placeholderId ? rowToFileItem(row) : existing,
+            ),
+          }));
+          if (row.status !== "indexed") {
+            pushToast(`„${row.filename}“: Status ${row.status}.`, "warn");
+          }
+        } catch {
+          pushToast(`„${f.name}“ konnte nicht hochgeladen werden.`, "warn");
+          setProjectFiles((prev) => ({
+            ...prev,
+            [projectId]: (prev[projectId] || []).filter(
+              (existing) => existing.id !== placeholderId,
+            ),
+          }));
+        }
+      }),
+    );
+
+    // Drop any leftover placeholders that didn't get replaced (defensive).
+    setProjectFiles((prev) => ({
+      ...prev,
+      [projectId]: (prev[projectId] || []).filter(
+        (existing) => !placeholderIds.has(existing.id),
+      ),
+    }));
+
+    if (anySucceeded) {
+      setProjects((prev) =>
+        prev.map((p) => (p.id === projectId ? { ...p, hasFiles: true } : p)),
+      );
+    }
+  };
+
   const handleDirectUpload = (fileList: FileList | null) => {
     const { accepted, rejected } = filterAllowedFiles(fileList);
     if (rejected.length) {
@@ -144,45 +339,7 @@ export function App() {
     if (!accepted.length) return;
     const projectId = activeChat?.projectId;
     if (!projectId) return;
-
-    const newFiles: FileItem[] = accepted.map((f, i) => ({
-      id: "f-" + Date.now() + "-" + i,
-      name: f.name,
-      size:
-        f.size / 1024 / 1024 < 1
-          ? Math.round(f.size / 1024) + " KB"
-          : (f.size / 1024 / 1024).toFixed(1) + " MB",
-      type: inferFileType(f.name),
-      pages: 1,
-      status: "analyzing",
-      analysis: null,
-    }));
-
-    setProjectFiles((prev) => ({
-      ...prev,
-      [projectId]: [...newFiles, ...(prev[projectId] || [])],
-    }));
-    setShowFiles({ open: true, autoPicker: false });
-
-    const ids = newFiles.map((f) => f.id);
-    setTimeout(() => {
-      setProjectFiles((prev) => ({
-        ...prev,
-        [projectId]: (prev[projectId] || []).map((f) =>
-          ids.includes(f.id)
-            ? {
-                ...f,
-                status: "complete" as const,
-                pages: Math.max(1, Math.round(2 + Math.random() * 14)),
-                analysis: mockAnalysis(f.name),
-              }
-            : f
-        ),
-      }));
-      setProjects((prev) =>
-        prev.map((p) => (p.id === projectId ? { ...p, hasFiles: true } : p))
-      );
-    }, 5000);
+    void uploadProjectFiles(projectId, accepted);
   };
 
   const messages = threads[activeChatId] || [];
@@ -230,40 +387,62 @@ export function App() {
     });
   }, [activeChatId, followLastMessage]);
 
-  const onNewChat = (projectId: string) => {
-    const id = "c-new-" + Date.now();
+  const onNewChat = async (projectId: string) => {
+    const res = await api("/api/chats", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: projectId, title: "Neuer Chat" }),
+    });
+    if (!res.ok) {
+      pushToast("Chat konnte nicht erstellt werden.", "warn");
+      return;
+    }
+    const row: { id: string; title: string } = await res.json();
     setProjects((prev) =>
       prev.map((p) =>
         p.id === projectId
-          ? { ...p, expanded: true, chats: [{ id, title: "Neuer Chat" }, ...p.chats] }
-          : p
-      )
+          ? { ...p, expanded: true, chats: [{ id: row.id, title: row.title }, ...p.chats] }
+          : p,
+      ),
     );
-    setThreads((prev) => ({ ...prev, [id]: [] }));
-    setActiveChatId(id);
+    setThreads((prev) => ({ ...prev, [row.id]: [] }));
+    loadedThreadsRef.current.add(row.id);
+    setActiveChatId(row.id);
   };
 
-  const onRenameChat = (projectId: string, chatId: string, title: string) => {
+  const onRenameChat = async (projectId: string, chatId: string, title: string) => {
     setProjects((prev) =>
       prev.map((p) =>
         p.id === projectId
           ? { ...p, chats: p.chats.map((c) => (c.id === chatId ? { ...c, title } : c)) }
-          : p
-      )
+          : p,
+      ),
     );
+    const res = await api(`/api/chats/${chatId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (!res.ok) pushToast("Chat-Titel konnte nicht gespeichert werden.", "warn");
   };
 
-  const doDeleteChat = (projectId: string, chatId: string) => {
+  const doDeleteChat = async (projectId: string, chatId: string) => {
+    const res = await api(`/api/chats/${chatId}`, { method: "DELETE" });
+    if (!res.ok) {
+      pushToast("Chat konnte nicht gelöscht werden.", "warn");
+      return;
+    }
     setProjects((prev) =>
       prev.map((p) =>
-        p.id === projectId ? { ...p, chats: p.chats.filter((c) => c.id !== chatId) } : p
-      )
+        p.id === projectId ? { ...p, chats: p.chats.filter((c) => c.id !== chatId) } : p,
+      ),
     );
     setThreads((prev) => {
       const next = { ...prev };
       delete next[chatId];
       return next;
     });
+    loadedThreadsRef.current.delete(chatId);
     if (activeChatId === chatId) {
       const flat = projects.flatMap((p) => p.chats).filter((c) => c.id !== chatId);
       setActiveChatId(flat[0]?.id || "__empty__");
@@ -283,19 +462,31 @@ export function App() {
     });
   };
 
-  const onRenameProject = (projectId: string, name: string) => {
+  const onRenameProject = async (projectId: string, name: string) => {
     setProjects((prev) => prev.map((p) => (p.id === projectId ? { ...p, name } : p)));
+    const res = await api(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) pushToast("Projektname konnte nicht gespeichert werden.", "warn");
   };
 
-  const doDeleteProject = (projectId: string) => {
+  const doDeleteProject = async (projectId: string) => {
     const proj = projects.find((p) => p.id === projectId);
     const chatIds = proj ? proj.chats.map((c) => c.id) : [];
+    const res = await api(`/api/projects/${projectId}`, { method: "DELETE" });
+    if (!res.ok) {
+      pushToast("Projekt konnte nicht gelöscht werden.", "warn");
+      return;
+    }
     setProjects((prev) => prev.filter((p) => p.id !== projectId));
     setThreads((prev) => {
       const next = { ...prev };
       chatIds.forEach((id) => delete next[id]);
       return next;
     });
+    chatIds.forEach((id) => loadedThreadsRef.current.delete(id));
     if (chatIds.includes(activeChatId)) {
       const remaining = projects
         .filter((p) => p.id !== projectId)
@@ -324,16 +515,35 @@ export function App() {
   const sendMessage = async (text: string) => {
     let chatId = activeChatId;
     if (chatId === "__empty__") {
-      chatId = projects[0]?.chats?.[0]?.id || "c-a1";
-      setActiveChatId(chatId);
+      const firstProject = projects[0];
+      if (!firstProject) {
+        pushToast("Erst ein Projekt anlegen.", "warn");
+        return;
+      }
+      const createRes = await api("/api/chats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: firstProject.id, title: "Neuer Chat" }),
+      });
+      if (!createRes.ok) {
+        pushToast("Chat konnte nicht erstellt werden.", "warn");
+        return;
+      }
+      const row: { id: string; title: string } = await createRes.json();
+      chatId = row.id;
+      setProjects((prev) =>
+        prev.map((p) =>
+          p.id === firstProject.id
+            ? { ...p, chats: [{ id: row.id, title: row.title }, ...p.chats] }
+            : p,
+        ),
+      );
+      setThreads((prev) => ({ ...prev, [row.id]: [] }));
+      loadedThreadsRef.current.add(row.id);
+      setActiveChatId(row.id);
     }
 
-    // Mark this chat as padded so the new assistant message can be pinned
-    // ~40% from the top with room to grow into. Stays padded while the user
-    // is in this chat — clears on navigation away.
     setPaddedChatId(chatId);
-    // Block the messages-change layout effect's auto-follow from racing the
-    // post-send 40%-from-top scroll. Cleared inside the rAF below.
     postSendScrollPendingRef.current = true;
 
     setThreads((prev) => ({
@@ -341,23 +551,15 @@ export function App() {
       [chatId]: [...(prev[chatId] || []), { role: "user", content: text }],
     }));
 
-    const reply =
-      "Looking through your indexed sources for relevant material…\n\n" +
-      "Based on what I found, here's a draft response. I've kept it concise and " +
-      "grounded in the documents you've uploaded — let me know if you'd like a different tone, " +
-      "more detail, or to dig into a specific section.";
-
     setStreaming(true);
-    streamRef.current.stop = false;
+    const controller = new AbortController();
+    streamRef.current.controller = controller;
+
     setThreads((prev) => ({
       ...prev,
       [chatId]: [...(prev[chatId] || []), { role: "assistant", content: "" }],
     }));
 
-    // Pin the new (still-empty) assistant message's top to ~40% from the
-    // viewport top, so the response generates with breathing room above and
-    // ~60% of the viewport free below for it to fill into. The follow logic
-    // takes over once the response grows enough to reach the bottom.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const outer = threadOuterRef.current;
@@ -373,40 +575,78 @@ export function App() {
       });
     });
 
-    let acc = "";
-    const chunks = reply.split(" ");
-    for (let i = 0; i < chunks.length; i++) {
-      if (streamRef.current.stop) break;
-      acc += (i === 0 ? "" : " ") + chunks[i];
-      setThreads((prev) => {
-        const arr = [...(prev[chatId] || [])];
-        arr[arr.length - 1] = { role: "assistant", content: acc };
-        return { ...prev, [chatId]: arr };
+    try {
+      const res = await api(`/api/chats/${chatId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+        signal: controller.signal,
       });
-      await new Promise((r) => setTimeout(r, 35 + Math.random() * 50));
+      if (!res.ok || !res.body) {
+        pushToast("Nachricht konnte nicht gesendet werden.", "warn");
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      outer: while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6);
+          if (data === "[DONE]") break outer;
+          try {
+            const { delta } = JSON.parse(data) as { delta: string };
+            setThreads((prev) => {
+              const arr = [...(prev[chatId] || [])];
+              const last = arr[arr.length - 1];
+              arr[arr.length - 1] = { role: "assistant", content: (last?.content ?? "") + delta };
+              return { ...prev, [chatId]: arr };
+            });
+          } catch {
+            /* ignore malformed line */
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        pushToast("Streaming abgebrochen.", "warn");
+      }
+    } finally {
+      setStreaming(false);
+      streamRef.current.controller = null;
     }
-    setStreaming(false);
 
-    setProjects((prev) =>
-      prev.map((p) => ({
-        ...p,
-        chats: p.chats.map((c) =>
-          c.id === chatId && (c.title === "Neuer Chat" || c.title === "New chat")
-            ? { ...c, title: text.slice(0, 40) }
-            : c
-        ),
-      }))
-    );
+    const proj = projects.find((p) => p.chats.some((c) => c.id === chatId));
+    const chat = proj?.chats.find((c) => c.id === chatId);
+    if (chat && (chat.title === "Neuer Chat" || chat.title === "New chat")) {
+      const newTitle = text.slice(0, 40);
+      setProjects((prev) =>
+        prev.map((p) => ({
+          ...p,
+          chats: p.chats.map((c) => (c.id === chatId ? { ...c, title: newTitle } : c)),
+        })),
+      );
+      api(`/api/chats/${chatId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: newTitle }),
+      }).catch(() => {/* best-effort */});
+    }
   };
 
   const onStop = () => {
-    streamRef.current.stop = true;
+    streamRef.current.controller?.abort();
+    streamRef.current.controller = null;
     setStreaming(false);
   };
 
-  if (!user) {
-    return <LoginScreen onLogin={setUser} />;
-  }
+  if (!authReady) return null;
+  if (!session) return <LoginScreen />;
 
   return (
     <div className="flex h-screen w-screen bg-bg">
@@ -425,22 +665,45 @@ export function App() {
             placeholder: "z. B. Q4 Analyse",
             confirmLabel: "Erstellen",
             defaultValue: "",
-            onConfirm: (name: string) => {
+            onConfirm: async (name: string) => {
               const trimmed = (name || "").trim() || "Neues Projekt";
-              const pid = "p-new-" + Date.now();
-              const cid = "c-new-" + Date.now();
+              const projRes = await api("/api/projects", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: trimmed }),
+              });
+              if (!projRes.ok) {
+                pushToast("Projekt konnte nicht erstellt werden.", "warn");
+                return;
+              }
+              const proj: { id: string; name: string } = await projRes.json();
+              const chatRes = await api("/api/chats", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ project_id: proj.id, title: "Neuer Chat" }),
+              });
+              if (!chatRes.ok) {
+                pushToast("Chat konnte nicht erstellt werden.", "warn");
+                setProjects((prev) => [
+                  { id: proj.id, name: proj.name, expanded: true, hasFiles: false, chats: [] },
+                  ...prev,
+                ]);
+                return;
+              }
+              const chat: { id: string; title: string } = await chatRes.json();
               setProjects((prev) => [
                 {
-                  id: pid,
-                  name: trimmed,
+                  id: proj.id,
+                  name: proj.name,
                   expanded: true,
                   hasFiles: false,
-                  chats: [{ id: cid, title: "Neuer Chat" }],
+                  chats: [{ id: chat.id, title: chat.title }],
                 },
                 ...prev,
               ]);
-              setThreads((prev) => ({ ...prev, [cid]: [] }));
-              setActiveChatId(cid);
+              setThreads((prev) => ({ ...prev, [chat.id]: [] }));
+              loadedThreadsRef.current.add(chat.id);
+              setActiveChatId(chat.id);
             },
           });
         }}
@@ -448,7 +711,7 @@ export function App() {
         onDeleteChat={onDeleteChat}
         onRenameProject={onRenameProject}
         onDeleteProject={onDeleteProject}
-        user={user}
+        user={{ email: session.user.email ?? "" }}
         onOpenTemplate={() => setShowTemplate(true)}
       />
 
@@ -607,6 +870,11 @@ export function App() {
             );
           }}
           notify={pushToast}
+          onUpload={
+            activeChat?.projectId
+              ? (files) => uploadProjectFiles(activeChat.projectId, files)
+              : undefined
+          }
         />
       )}
 

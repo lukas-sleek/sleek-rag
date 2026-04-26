@@ -6,7 +6,6 @@ import {
   filterAllowedFiles,
   inferFileType,
   mockAnalysis,
-  SAMPLE_FILES,
   type FileItem,
 } from "./fixtures";
 
@@ -51,6 +50,7 @@ export function ProjectFilesModal({
   autoOpenPicker,
   onAnalysisComplete,
   notify,
+  onUpload,
 }: {
   projectName: string;
   onClose: () => void;
@@ -59,9 +59,10 @@ export function ProjectFilesModal({
   autoOpenPicker?: boolean;
   onAnalysisComplete?: () => void;
   notify?: (msg: string, kind?: string) => void;
+  onUpload?: (files: File[]) => Promise<void> | void;
 }) {
   const [internalFiles, setInternalFiles] = React.useState<FileItem[]>(
-    externalFiles || SAMPLE_FILES
+    externalFiles || []
   );
   const files = externalFiles !== undefined ? externalFiles : internalFiles;
   const setFiles = externalSetFiles || setInternalFiles;
@@ -101,6 +102,13 @@ export function ProjectFilesModal({
       if (notify) notify(msg);
     }
     if (!accepted.length) return;
+
+    if (onUpload) {
+      void onUpload(accepted);
+      return;
+    }
+
+    // Fallback (no onUpload provided): simulate analysis with mock data.
     const newFiles: FileItem[] = accepted.map((f, i) => ({
       id: "f-" + Date.now() + "-" + i,
       name: f.name,

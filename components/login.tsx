@@ -1,34 +1,67 @@
 "use client";
 import * as React from "react";
-
-export type LoginUser = { email: string };
+import { createClient } from "@/lib/supabase/client";
 
 const FIELD_INPUT =
   "bg-bg-input border border-border rounded-md text-text px-3.5 py-3 text-sm " +
   "[outline:none] transition-[border-color,background] duration-150 " +
   "focus:border-accent focus:bg-bg-elevated placeholder:text-text-tertiary";
 
-export function LoginScreen({ onLogin }: { onLogin: (user: LoginUser) => void }) {
+export function LoginScreen() {
+  const supabase = React.useMemo(() => createClient(), []);
   const [mode, setMode] = React.useState<"login" | "register">("login");
-  const [email, setEmail] = React.useState("alex@sleek.de");
-  const [password, setPassword] = React.useState("••••••••");
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
   const [password2, setPassword2] = React.useState("");
   const [name, setName] = React.useState("");
   const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [info, setInfo] = React.useState<string | null>(null);
 
   const isRegister = mode === "register";
 
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
+    setInfo(null);
     if (!email || !password) return;
-    if (isRegister && (!name || password !== password2)) return;
+    if (isRegister && (!name || password !== password2)) {
+      setError("Bitte Name eingeben und Passwörter abgleichen.");
+      return;
+    }
     setLoading(true);
-    setTimeout(() => onLogin({ email }), 650);
+    try {
+      if (isRegister) {
+        const { data, error: err } = await supabase.auth.signUp({
+          email,
+          password,
+          options: { data: { name } },
+        });
+        if (err) {
+          setError(err.message);
+          return;
+        }
+        if (!data.session) {
+          setInfo("Konto erstellt. Bitte E-Mail bestätigen, dann einloggen.");
+          setMode("login");
+          return;
+        }
+      } else {
+        const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+        if (err) {
+          setError(err.message);
+          return;
+        }
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   const switchMode = (next: "login" | "register") => {
     setMode(next);
-    setLoading(false);
+    setError(null);
+    setInfo(null);
   };
 
   return (
@@ -125,6 +158,13 @@ export function LoginScreen({ onLogin }: { onLogin: (user: LoginUser) => void })
                 className={FIELD_INPUT}
               />
             </div>
+          )}
+
+          {error && (
+            <div className="text-xs text-[#d63a3a] -mt-3">{error}</div>
+          )}
+          {info && (
+            <div className="text-xs text-text-secondary -mt-3">{info}</div>
           )}
 
           <button className="btn-primary" type="submit" disabled={loading}>

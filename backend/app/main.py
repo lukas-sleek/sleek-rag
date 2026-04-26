@@ -1,7 +1,16 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.routers import chats, files, projects
+
+if settings.langsmith_api_key:
+    os.environ.setdefault("LANGSMITH_TRACING", "true")
+    os.environ.setdefault("LANGSMITH_API_KEY", settings.langsmith_api_key)
+    if settings.langsmith_project:
+        os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
 
 app = FastAPI(title="sleek-rag backend")
 
@@ -12,6 +21,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(projects.router)
+app.include_router(chats.router)
+app.include_router(files.router)
 
 
 @app.get("/health")
