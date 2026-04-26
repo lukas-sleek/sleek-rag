@@ -1,10 +1,13 @@
 "use client";
 import * as React from "react";
+import { useParams, useRouter } from "next/navigation";
 import type { Session } from "@supabase/supabase-js";
 import { Icon } from "./icons";
 import { LoginScreen } from "./login";
 import { Sidebar } from "./sidebar";
 import { Composer, EmptyState, Message } from "./chat";
+
+const LAST_CHAT_KEY = "sleek-rag.last-chat-id";
 import { ProjectFilesModal } from "./project-files-modal";
 import { TemplateAnalysisModal } from "./template-modal";
 import {
@@ -33,11 +36,38 @@ const BTN_DANGER =
 
 export function App() {
   const supabase = React.useMemo(() => createClient(), []);
+  const router = useRouter();
+  const params = useParams<{ chatId?: string | string[] }>();
+  const urlChatId = React.useMemo(() => {
+    const raw = params?.chatId;
+    if (Array.isArray(raw)) return raw[0] ?? null;
+    return raw ?? null;
+  }, [params]);
   const [session, setSession] = React.useState<Session | null>(null);
   const [authReady, setAuthReady] = React.useState(false);
   const [collapsed, setCollapsed] = React.useState(false);
   const [projects, setProjects] = React.useState<Project[]>([]);
   const [activeChatId, setActiveChatId] = React.useState<string>("__empty__");
+  const [projectsLoaded, setProjectsLoaded] = React.useState(false);
+  const initialRestoreDoneRef = React.useRef(false);
+
+  const selectChat = React.useCallback(
+    (id: string) => {
+      setActiveChatId(id);
+      if (id === "__empty__") {
+        if (typeof window !== "undefined") {
+          window.localStorage.removeItem(LAST_CHAT_KEY);
+        }
+        router.replace("/");
+      } else {
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem(LAST_CHAT_KEY, id);
+        }
+        router.push(`/c/${id}`);
+      }
+    },
+    [router],
+  );
 
   const [projectFiles, setProjectFiles] = React.useState<Record<string, FileItem[]>>({});
 
@@ -121,14 +151,20 @@ export function App() {
       setSession(s);
       if (!s) {
         setProjects([]);
+        setProjectsLoaded(false);
         setThreads({});
         setProjectFiles({});
         setActiveChatId("__empty__");
+        initialRestoreDoneRef.current = false;
+        if (typeof window !== "undefined") {
+          window.localStorage.removeItem(LAST_CHAT_KEY);
+        }
+        router.replace("/");
       }
     });
     unsub = () => data.subscription.unsubscribe();
     return () => unsub?.();
-  }, [supabase]);
+  }, [supabase, router]);
 
   React.useEffect(() => {
     if (!session) return;
@@ -137,6 +173,7 @@ export function App() {
       const res = await api("/api/projects");
       if (!res.ok) {
         pushToast("Projekte konnten nicht geladen werden.", "warn");
+        if (!cancelled) setProjectsLoaded(true);
         return;
       }
       const rows: { id: string; name: string; chats: { id: string; title: string }[] }[] =
@@ -151,11 +188,53 @@ export function App() {
           chats: r.chats ?? [],
         })),
       );
+      setProjectsLoaded(true);
     })();
     return () => {
       cancelled = true;
     };
   }, [session, pushToast]);
+
+  // URL → state. Runs on initial mount with /c/{id}, on browser back/forward,
+  // and after projects load (so we can validate ownership). Also handles the
+  // empty-URL case once: restores last chat from localStorage and rewrites the
+  // URL. Permission check is implicit — projects only contains the user's own
+  // chats, so an unknown id either belongs to someone else or was deleted.
+  React.useEffect(() => {
+    if (!projectsLoaded) return;
+    const ownedIds = new Set(projects.flatMap((p) => p.chats.map((c) => c.id)));
+    if (urlChatId) {
+      if (ownedIds.has(urlChatId)) {
+        if (urlChatId !== activeChatId) setActiveChatId(urlChatId);
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem(LAST_CHAT_KEY, urlChatId);
+        }
+      } else {
+        pushToast("Chat nicht gefunden.", "warn");
+        router.replace("/");
+        setActiveChatId("__empty__");
+      }
+      initialRestoreDoneRef.current = true;
+      return;
+    }
+    if (initialRestoreDoneRef.current) return;
+    initialRestoreDoneRef.current = true;
+    const saved =
+      typeof window !== "undefined" ? window.localStorage.getItem(LAST_CHAT_KEY) : null;
+    if (saved && ownedIds.has(saved)) {
+      setActiveChatId(saved);
+      router.replace(`/c/${saved}`);
+      return;
+    }
+    const first = projects.flatMap((p) => p.chats)[0]?.id;
+    if (first) {
+      setActiveChatId(first);
+      router.replace(`/c/${first}`);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(LAST_CHAT_KEY, first);
+      }
+    }
+  }, [projectsLoaded, projects, urlChatId, router, pushToast, activeChatId]);
 
   React.useEffect(() => {
     if (!session) return;
@@ -283,7 +362,12 @@ export function App() {
             body: form,
           });
           if (!res.ok) {
-            throw new Error("upload failed");
+            let detail = "";
+            try {
+              const body = (await res.json()) as { detail?: string };
+              if (body.detail) detail = String(body.detail);
+            } catch {}
+            throw new Error(detail || `HTTP ${res.status}`);
           }
           const row = (await res.json()) as {
             id: string;
@@ -301,8 +385,9 @@ export function App() {
           if (row.status !== "indexed") {
             pushToast(`„${row.filename}“: Status ${row.status}.`, "warn");
           }
-        } catch {
-          pushToast(`„${f.name}“ konnte nicht hochgeladen werden.`, "warn");
+        } catch (err) {
+          const reason = err instanceof Error && err.message ? `: ${err.message}` : "";
+          pushToast(`„${f.name}“ konnte nicht hochgeladen werden${reason}`, "warn");
           setProjectFiles((prev) => ({
             ...prev,
             [projectId]: (prev[projectId] || []).filter(
@@ -344,6 +429,22 @@ export function App() {
 
   const messages = threads[activeChatId] || [];
   const isEmpty = activeChatId === "__empty__" || messages.length === 0;
+  const noProjects = projectsLoaded && projects.length === 0;
+  const displayName = React.useMemo(() => {
+    const meta = session?.user.user_metadata as
+      | { first_name?: string; full_name?: string; name?: string }
+      | undefined;
+    const first = meta?.first_name?.trim();
+    if (first) return first.split(/\s+/)[0];
+    const full = meta?.full_name || meta?.name;
+    if (full) return full.trim().split(/\s+/)[0];
+    const email = session?.user.email;
+    if (email) {
+      const local = email.split("@")[0];
+      return local.charAt(0).toUpperCase() + local.slice(1);
+    }
+    return "Alex";
+  }, [session]);
 
   // Auto-follow the latest message:
   //   - On every messages change (new message, streaming token), if the user
@@ -407,7 +508,7 @@ export function App() {
     );
     setThreads((prev) => ({ ...prev, [row.id]: [] }));
     loadedThreadsRef.current.add(row.id);
-    setActiveChatId(row.id);
+    selectChat(row.id);
   };
 
   const onRenameChat = async (projectId: string, chatId: string, title: string) => {
@@ -445,7 +546,7 @@ export function App() {
     loadedThreadsRef.current.delete(chatId);
     if (activeChatId === chatId) {
       const flat = projects.flatMap((p) => p.chats).filter((c) => c.id !== chatId);
-      setActiveChatId(flat[0]?.id || "__empty__");
+      selectChat(flat[0]?.id || "__empty__");
     }
   };
 
@@ -491,7 +592,7 @@ export function App() {
       const remaining = projects
         .filter((p) => p.id !== projectId)
         .flatMap((p) => p.chats);
-      setActiveChatId(remaining[0]?.id || "__empty__");
+      selectChat(remaining[0]?.id || "__empty__");
     }
   };
 
@@ -540,7 +641,7 @@ export function App() {
       );
       setThreads((prev) => ({ ...prev, [row.id]: [] }));
       loadedThreadsRef.current.add(row.id);
-      setActiveChatId(row.id);
+      selectChat(row.id);
     }
 
     setPaddedChatId(chatId);
@@ -656,7 +757,7 @@ export function App() {
         projects={projects}
         setProjects={setProjects}
         activeChatId={activeChatId}
-        setActiveChatId={(id) => setActiveChatId(id)}
+        setActiveChatId={(id) => selectChat(id)}
         onNewChat={onNewChat}
         onNewProject={() => {
           setPromptDialog({
@@ -703,7 +804,7 @@ export function App() {
               ]);
               setThreads((prev) => ({ ...prev, [chat.id]: [] }));
               loadedThreadsRef.current.add(chat.id);
-              setActiveChatId(chat.id);
+              selectChat(chat.id);
             },
           });
         }}
@@ -738,7 +839,13 @@ export function App() {
       >
         <div className="h-14 flex items-center px-4 gap-3 border-b border-border flex-shrink-0">
           <div className="text-sm font-medium text-text flex-1 whitespace-nowrap overflow-hidden text-ellipsis">
-            {isEmpty ? "Neuer Chat" : activeChat?.title}
+            {!projectsLoaded
+              ? ""
+              : noProjects
+              ? "Willkommen"
+              : isEmpty
+              ? "Neuer Chat"
+              : activeChat?.title}
             {!isEmpty && activeChat && (
               <span className="text-xs text-text-tertiary font-mono tracking-[0.02em]">
                 {"  ·  " + activeChat.projectName}
@@ -760,12 +867,17 @@ export function App() {
           )}
         </div>
 
-        {isEmpty ? (
+        {!projectsLoaded ? (
+          <div className="flex-1" />
+        ) : noProjects ? (
+          <EmptyState onSuggest={() => {}} userName={displayName} noProjects />
+        ) : isEmpty ? (
           <>
             <EmptyState
               onSuggest={(t) => sendMessage(t)}
               hasFiles={activeChat ? activeChat.projectHasFiles !== false : true}
               projectName={activeChat?.projectName}
+              userName={displayName}
               onAddFiles={() => {
                 if (hiddenFileInputRef.current) hiddenFileInputRef.current.click();
               }}

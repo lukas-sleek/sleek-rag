@@ -167,13 +167,21 @@ async def send_message(
             model="gpt-4o-mini",
             input=[{"role": "user", "content": body.text}],
             conversation=chat["openai_thread_id"],
+            stream=True,
         )
         if tools:
             kwargs["tools"] = tools
-        with openai_client().responses.stream(**kwargs) as stream:
+        # Use `responses.create(stream=True, ...)` (not `responses.stream(...)`)
+        # because the langsmith wrap_openai patch only instruments `.create`.
+        # The streamed iterator must be fully consumed for langsmith to record
+        # the run.
+        stream = openai_client().responses.create(**kwargs)
+        try:
             for event in stream:
                 if event.type == "response.output_text.delta":
                     yield f"data: {json.dumps({'delta': event.delta})}\n\n"
-            yield "data: [DONE]\n\n"
+        finally:
+            stream.close()
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

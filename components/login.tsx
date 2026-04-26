@@ -13,7 +13,7 @@ export function LoginScreen() {
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [password2, setPassword2] = React.useState("");
-  const [name, setName] = React.useState("");
+  const [firstName, setFirstName] = React.useState("");
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [info, setInfo] = React.useState<string | null>(null);
@@ -25,8 +25,8 @@ export function LoginScreen() {
     setError(null);
     setInfo(null);
     if (!email || !password) return;
-    if (isRegister && (!name || password !== password2)) {
-      setError("Bitte Name eingeben und Passwörter abgleichen.");
+    if (isRegister && (!firstName || password !== password2)) {
+      setError("Bitte Vornamen eingeben und Passwörter abgleichen.");
       return;
     }
     setLoading(true);
@@ -35,7 +35,7 @@ export function LoginScreen() {
         const { data, error: err } = await supabase.auth.signUp({
           email,
           password,
-          options: { data: { name } },
+          options: { data: { first_name: firstName.trim() } },
         });
         if (err) {
           setError(err.message);
@@ -106,14 +106,14 @@ export function LoginScreen() {
 
           {isRegister && (
             <div className="flex flex-col gap-2">
-              <label htmlFor="name" className="text-xs font-medium text-text-secondary tracking-[0.01em]">Name</label>
+              <label htmlFor="first-name" className="text-xs font-medium text-text-secondary tracking-[0.01em]">Vorname</label>
               <input
-                id="name"
+                id="first-name"
                 type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Vor- und Nachname"
-                autoComplete="name"
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                placeholder="z. B. Anna"
+                autoComplete="given-name"
                 className={FIELD_INPUT}
               />
             </div>

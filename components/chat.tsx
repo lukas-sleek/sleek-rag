@@ -44,13 +44,27 @@ export function EmptyState({
   projectName,
   onAddFiles,
   userName = "Alex",
+  noProjects = false,
 }: {
   onSuggest: (title: string) => void;
   hasFiles?: boolean;
   projectName?: string;
   onAddFiles?: () => void;
   userName?: string;
+  noProjects?: boolean;
 }) {
+  if (noProjects) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center px-6 py-12 gap-7">
+        <div className="font-display text-[56px] font-extrabold tracking-[-0.04em] text-text">
+          EAG <span className="text-accent">LLM</span>
+        </div>
+        <div className="font-display text-[28px] font-medium tracking-[-0.02em] text-text text-center">
+          Hallo, {userName}. <span className="text-text-tertiary">Erstelle ein Projekt, um zu beginnen.</span>
+        </div>
+      </div>
+    );
+  }
   if (!hasFiles) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center px-6 py-12 gap-7">

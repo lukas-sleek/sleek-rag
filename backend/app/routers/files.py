@@ -65,20 +65,31 @@ async def upload_file(
     user_id: str = Depends(current_user_id),
 ):
     project = _load_project(project_id, user_id)
-    vector_store_id = _ensure_vector_store(project)
 
     contents = await file.read()
     size_bytes = len(contents)
 
-    openai_file = openai_client().files.create(
-        file=(file.filename, contents),
-        purpose="user_data",
-    )
+    try:
+        vector_store_id = _ensure_vector_store(project)
+    except Exception as exc:
+        raise HTTPException(502, f"vector store create failed: {exc}") from exc
 
-    poll = openai_client().vector_stores.files.create_and_poll(
-        vector_store_id=vector_store_id,
-        file_id=openai_file.id,
-    )
+    try:
+        openai_file = openai_client().files.create(
+            file=(file.filename, contents),
+            purpose="user_data",
+        )
+    except Exception as exc:
+        raise HTTPException(502, f"openai file upload failed: {exc}") from exc
+
+    try:
+        poll = openai_client().vector_stores.files.create_and_poll(
+            vector_store_id=vector_store_id,
+            file_id=openai_file.id,
+        )
+    except Exception as exc:
+        raise HTTPException(502, f"vector store ingest failed: {exc}") from exc
+
     status = "indexed" if poll.status == "completed" else (poll.status or "failed")
 
     insert = (

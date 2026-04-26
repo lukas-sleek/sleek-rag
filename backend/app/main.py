@@ -11,6 +11,8 @@ if settings.langsmith_api_key:
     os.environ.setdefault("LANGSMITH_API_KEY", settings.langsmith_api_key)
     if settings.langsmith_project:
         os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
+    if settings.langsmith_endpoint:
+        os.environ.setdefault("LANGSMITH_ENDPOINT", settings.langsmith_endpoint)
 
 app = FastAPI(title="sleek-rag backend")
 

@@ -3,6 +3,7 @@ from pydantic import BaseModel
 
 from app.auth import current_user_id
 from app.db import supabase
+from app.openai_client import openai_client
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -73,10 +74,20 @@ def list_projects(user_id: str = Depends(current_user_id)):
 
 @router.post("", response_model=ProjectOut)
 def create_project(body: ProjectIn, user_id: str = Depends(current_user_id)):
+    try:
+        vs = openai_client().vector_stores.create(name=body.name)
+    except Exception as exc:
+        raise HTTPException(502, f"vector store create failed: {exc}") from exc
     res = (
         supabase()
         .table("projects")
-        .insert({"user_id": user_id, "name": body.name})
+        .insert(
+            {
+                "user_id": user_id,
+                "name": body.name,
+                "openai_vector_store_id": vs.id,
+            }
+        )
         .execute()
     )
     row = res.data[0]
@@ -103,6 +114,18 @@ def rename_project(
 
 @router.delete("/{project_id}")
 def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
+    existing = (
+        supabase()
+        .table("projects")
+        .select("id,openai_vector_store_id")
+        .eq("id", project_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not existing.data:
+        raise HTTPException(404, "not found")
+    vs_id = existing.data[0].get("openai_vector_store_id")
     res = (
         supabase()
         .table("projects")
@@ -113,4 +136,9 @@ def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
     )
     if not res.data:
         raise HTTPException(404, "not found")
+    if vs_id:
+        try:
+            openai_client().vector_stores.delete(vs_id)
+        except Exception:
+            pass
     return {"deleted": project_id}
