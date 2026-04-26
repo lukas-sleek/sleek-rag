@@ -74,6 +74,15 @@ export function App() {
   const [toasts, setToasts] = React.useState<Toast[]>([]);
   const hiddenFileInputRef = React.useRef<HTMLInputElement>(null);
 
+  const threadOuterRef = React.useRef<HTMLDivElement>(null);
+  const threadInnerRef = React.useRef<HTMLDivElement>(null);
+  const stickToBottomRef = React.useRef(true);
+
+  const scrollThreadToBottom = React.useCallback(() => {
+    const el = threadOuterRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, []);
+
   const pushToast = React.useCallback((message: string, kind: string = "warn") => {
     const id = "t-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
     setToasts((prev) => [...prev, { id, message, kind }]);
@@ -150,6 +159,41 @@ export function App() {
 
   const messages = threads[activeChatId] || [];
   const isEmpty = activeChatId === "__empty__" || messages.length === 0;
+
+  // Sticky-to-bottom scroll for the thread:
+  //   - track whether the user is currently parked at the bottom
+  //   - if so, follow streaming tokens and stay pinned when the composer grows
+  //   - if the user scrolls up to read older messages, leave them alone
+  React.useEffect(() => {
+    const el = threadOuterRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const threshold = 48; // px from the bottom counts as "at bottom"
+      stickToBottomRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [isEmpty]);
+
+  React.useEffect(() => {
+    const outer = threadOuterRef.current;
+    const inner = threadInnerRef.current;
+    if (!outer || !inner) return;
+    const onResize = () => {
+      if (stickToBottomRef.current) scrollThreadToBottom();
+    };
+    const ro = new ResizeObserver(onResize);
+    ro.observe(inner); // new messages, streaming tokens
+    ro.observe(outer); // composer growth shrinks the thread
+    return () => ro.disconnect();
+  }, [isEmpty, scrollThreadToBottom]);
+
+  // On chat switch, jump to the bottom of the new thread.
+  React.useLayoutEffect(() => {
+    stickToBottomRef.current = true;
+    requestAnimationFrame(scrollThreadToBottom);
+  }, [activeChatId, scrollThreadToBottom]);
 
   const onNewChat = (projectId: string) => {
     const id = "c-new-" + Date.now();
@@ -248,6 +292,9 @@ export function App() {
       chatId = projects[0]?.chats?.[0]?.id || "c-a1";
       setActiveChatId(chatId);
     }
+
+    // User just submitted — make sure they see their message and the response.
+    stickToBottomRef.current = true;
 
     setThreads((prev) => ({
       ...prev,
@@ -405,8 +452,8 @@ export function App() {
           </>
         ) : (
           <>
-            <div className="flex-1 overflow-y-auto flex flex-col">
-              <div className="w-full max-w-[760px] mx-auto pt-8 pb-[120px] px-6 flex flex-col gap-7">
+            <div ref={threadOuterRef} className="flex-1 overflow-y-auto flex flex-col">
+              <div ref={threadInnerRef} className="w-full max-w-[760px] mx-auto pt-8 pb-[120px] px-6 flex flex-col gap-7">
                 {messages.map((m, i) => (
                   <Message
                     key={i}
