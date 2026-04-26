@@ -9,3 +9,6 @@ out/
 .vercel
 next-env.d.ts
 tsconfig.tsbuildinfo
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
