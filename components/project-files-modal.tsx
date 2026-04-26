@@ -159,26 +159,37 @@ export function ProjectFilesModal({
 
   return (
     <div
-      className={"pf-overlay" + (dragOver ? " is-dragging" : "")}
+      className={
+        "pf-overlay fixed inset-0 bg-black/60 flex items-center justify-center z-[200] p-6 " +
+        "animate-[pf-fade_.15s_ease-out]" +
+        (dragOver ? " is-dragging" : "")
+      }
       onClick={onClose}
       onDragEnter={onDragEnter}
       onDragLeave={onDragLeave}
       onDragOver={onDragOverHandler}
       onDrop={onDrop}
     >
-      <div className="pf-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="pf-header">
-          <div className="pf-header-text">
-            <div className="pf-title">Projektdateien</div>
-            <div className="pf-subtitle">{projectName}</div>
+      <div
+        className="pf-modal relative w-full max-w-[1080px] h-full max-h-[720px] bg-bg border border-border rounded-[14px] flex flex-col overflow-hidden shadow-[0_24px_64px_rgba(0,0,0,.5)]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center px-5 py-4 border-b border-border flex-shrink-0">
+          <div className="flex-1 min-w-0">
+            <div className="font-display text-base font-semibold text-text">Projektdateien</div>
+            <div className="text-xs text-text-tertiary mt-0.5">{projectName}</div>
           </div>
-          <button className="pf-close" onClick={onClose} title="Schließen">
+          <button
+            className="w-8 h-8 rounded-md bg-transparent border-none text-text-secondary cursor-pointer flex items-center justify-center transition-[background-color,color] duration-150 hover:bg-bg-hover hover:text-text"
+            onClick={onClose}
+            title="Schließen"
+          >
             <Icon.XBig />
           </button>
         </div>
 
-        <div className="pf-grid">
-          <div className="pf-left">
+        <div className="flex-1 grid grid-cols-[300px_1fr] min-h-0">
+          <div className="border-r border-border flex flex-col min-h-0">
             <input
               ref={inputRef}
               type="file"
@@ -188,10 +199,12 @@ export function ProjectFilesModal({
               onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
             />
 
-            <div className="pf-list-head">Dateien ({files.length})</div>
-            <div className="pf-list">
+            <div className="pt-2.5 pb-1.5 px-4 text-[10px] font-semibold text-text-tertiary tracking-[0.08em] uppercase">
+              Dateien ({files.length})
+            </div>
+            <div className="flex-1 overflow-y-auto pb-2">
               {files.length === 0 && (
-                <div className="pf-list-empty">Noch keine Dateien</div>
+                <div className="py-6 px-4 text-center text-xs text-text-tertiary tracking-[0.01em]">Noch keine Dateien</div>
               )}
               {files.map((file) => {
                 const cfg = FILE_TYPE[file.type];
@@ -199,20 +212,34 @@ export function ProjectFilesModal({
                 return (
                   <button
                     key={file.id}
-                    className={"pf-item" + (isSel ? " active" : "")}
+                    className={
+                      "flex items-center gap-2.5 w-full px-4 py-2.5 bg-transparent border-none border-l-2 text-left cursor-pointer transition-[background-color,color] duration-150 " +
+                      (isSel
+                        ? "bg-bg-elevated text-text border-l-accent"
+                        : "border-l-transparent text-text-secondary hover:bg-bg-hover hover:text-text")
+                    }
                     onClick={() => setSelectedId(file.id)}
                   >
-                    <span className="pf-item-icon" style={{ color: cfg.color }}>
+                    <span className="flex-shrink-0 flex items-center" style={{ color: cfg.color }}>
                       {cfg.icon()}
                     </span>
-                    <span className="pf-item-text">
-                      <span className="pf-item-name">{file.name}</span>
-                      <span className="pf-item-meta">
+                    <span className="flex-1 min-w-0 flex flex-col gap-0.5">
+                      <span
+                        className={
+                          "text-[12.5px] text-inherit whitespace-nowrap overflow-hidden text-ellipsis " +
+                          (isSel ? "font-medium" : "")
+                        }
+                      >
+                        {file.name}
+                      </span>
+                      <span className="text-[11px] text-text-tertiary">
                         {file.size} · {file.pages} {file.pages === 1 ? "Seite" : "Seiten"}
                       </span>
                     </span>
                     {file.status === "complete" && (
-                      <span className="pf-item-badge ok"><Icon.CheckCircle /></span>
+                      <span className="flex-shrink-0 flex items-center justify-center text-[#10b981]">
+                        <Icon.CheckCircle />
+                      </span>
                     )}
                     {file.status === "analyzing" && (
                       <span className="pf-item-badge dot" />
@@ -221,10 +248,10 @@ export function ProjectFilesModal({
                 );
               })}
             </div>
-            <div className="pf-list-foot">
+            <div className="p-2.5 border-t border-border">
               <button
                 type="button"
-                className="pf-add-btn"
+                className="w-full inline-flex items-center justify-center gap-2 px-3 py-2.5 bg-transparent border border-dashed border-border-strong rounded-[8px] text-text-secondary text-[13px] font-medium [font-family:inherit] cursor-pointer transition-[background-color,border-color,color] duration-150 hover:bg-bg-hover hover:border-accent hover:text-text [&_svg]:w-3.5 [&_svg]:h-3.5"
                 onClick={() => inputRef.current && inputRef.current.click()}
               >
                 <Icon.PlusBig />
@@ -233,52 +260,55 @@ export function ProjectFilesModal({
             </div>
           </div>
 
-          <div className="pf-right">
+          <div className="overflow-y-auto flex flex-col">
             {selected && analysis ? (
-              <div className="pf-analysis">
-                <div className="pf-file-head">
-                  <div className="pf-file-text">
-                    <div className="pf-file-name">{selected.name}</div>
-                    <div className="pf-file-meta">
+              <div className="flex flex-col">
+                <div className="flex items-center gap-3 px-5 py-3.5 border-b border-border">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-text whitespace-nowrap overflow-hidden text-ellipsis">{selected.name}</div>
+                    <div className="text-xs text-text-tertiary mt-0.5">
                       {FILE_TYPE[selected.type].label} · {selected.size} · {selected.pages}{" "}
                       {selected.pages === 1 ? "Seite" : "Seiten"}
                     </div>
                   </div>
-                  <span className="pf-status-pill">
-                    <span className="pf-status-dot" />
+                  <span className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-[rgba(16,185,129,.12)] text-[#6ee7b7] text-[11px] font-medium flex-shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#10b981]" />
                     Analysiert
                   </span>
                 </div>
 
-                <div className="pf-section">
-                  <div className="pf-section-label">Zusammenfassung</div>
-                  <p className="pf-summary">{analysis.summary}</p>
+                <div className="px-5 py-3.5 border-b border-border">
+                  <div className="text-[11px] font-medium text-text-tertiary mb-2">Zusammenfassung</div>
+                  <p className="m-0 text-[13.5px] leading-[1.6] text-text">{analysis.summary}</p>
                 </div>
 
-                <div className="pf-stats">
+                <div className="grid grid-cols-3 border-b border-border">
                   {analysis.keyStats.map((s) => (
-                    <div className="pf-stat" key={s.label}>
-                      <div className="pf-stat-label">{s.label}</div>
-                      <div className="pf-stat-value">{s.value}</div>
+                    <div
+                      key={s.label}
+                      className="px-4 py-2.5 border-r border-b border-border [&:nth-child(3n)]:border-r-0 [&:nth-child(n+4)]:border-b-0"
+                    >
+                      <div className="text-[10px] text-text-tertiary tracking-[0.04em]">{s.label}</div>
+                      <div className="text-sm font-semibold text-text tabular-nums mt-0.5">{s.value}</div>
                     </div>
                   ))}
                 </div>
 
-                <div className="pf-section">
-                  <div className="pf-section-label">
+                <div className="px-5 py-3.5 border-b border-border">
+                  <div className="text-[11px] font-medium text-text-tertiary mb-2">
                     Erkannte Entitäten ({analysis.entities.length})
                   </div>
-                  <div className="pf-chips">
+                  <div className="flex flex-wrap gap-1.5">
                     {analysis.entities.map((e, i) => {
                       const c = entityChipColor(e.type);
                       return (
                         <span
                           key={i}
-                          className="pf-chip"
+                          className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11.5px] font-medium"
                           style={{ background: c.bg, color: c.fg }}
                         >
                           {e.text}
-                          <span className="pf-chip-conf">
+                          <span className="font-mono text-[10px] opacity-60">
                             {Math.round(e.confidence * 100)}%
                           </span>
                         </span>
@@ -322,9 +352,9 @@ export function ProjectFilesModal({
                 </div>
               </div>
             ) : (
-              <div className="pf-empty">
+              <div className="flex-1 flex flex-col items-center justify-center gap-2.5 p-10 text-text-tertiary">
                 <Icon.FileText />
-                <div className="pf-empty-text">Datei auswählen, um die Analyse zu sehen</div>
+                <div className="text-xs">Datei auswählen, um die Analyse zu sehen</div>
               </div>
             )}
           </div>
@@ -332,10 +362,10 @@ export function ProjectFilesModal({
       </div>
 
       {dragOver && (
-        <div className="pf-drop-overlay-full">
-          <div className="pf-drop-inner">
+        <div className="fixed inset-0 bg-[rgba(13,13,13,.78)] [backdrop-filter:blur(10px)] [-webkit-backdrop-filter:blur(10px)] flex items-center justify-center z-[200] pointer-events-none animate-[pf-fade_.12s_ease-out]">
+          <div className="flex flex-col items-center gap-4 px-14 py-9 border-2 border-dashed border-accent rounded-[18px] bg-white/[.02] [&_svg]:w-10 [&_svg]:h-10 [&_svg]:text-accent">
             <Icon.UploadCloud />
-            <div className="pf-drop-title">Dateien hier ablegen</div>
+            <div className="font-display text-[18px] font-semibold text-text tracking-[-.01em]">Dateien hier ablegen</div>
           </div>
         </div>
       )}
