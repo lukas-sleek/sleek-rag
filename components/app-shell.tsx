@@ -76,11 +76,31 @@ export function App() {
 
   const threadOuterRef = React.useRef<HTMLDivElement>(null);
   const threadInnerRef = React.useRef<HTMLDivElement>(null);
-  const stickToBottomRef = React.useRef(true);
 
-  const scrollThreadToBottom = React.useCallback(() => {
-    const el = threadOuterRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+  // Position the last message so its bottom sits ~16px above the viewport
+  // bottom — the "you're caught up" anchor.
+  const followLastMessage = React.useCallback(() => {
+    const outer = threadOuterRef.current;
+    const inner = threadInnerRef.current;
+    if (!outer || !inner) return;
+    const lastMsg = inner.lastElementChild as HTMLElement | null;
+    if (!lastMsg) return;
+    const lastMsgBottom = lastMsg.offsetTop + lastMsg.offsetHeight;
+    outer.scrollTop = Math.max(0, lastMsgBottom - outer.clientHeight + 16);
+  }, []);
+
+  // True when the user is parked near the bottom of the latest message.
+  // Used to decide whether to auto-follow new tokens.
+  const isFollowingLastMessage = React.useCallback(() => {
+    const outer = threadOuterRef.current;
+    const inner = threadInnerRef.current;
+    if (!outer || !inner) return false;
+    if (outer.scrollHeight <= outer.clientHeight + 1) return true;
+    const lastMsg = inner.lastElementChild as HTMLElement | null;
+    if (!lastMsg) return false;
+    const lastMsgBottom = lastMsg.offsetTop + lastMsg.offsetHeight;
+    const viewportBottom = outer.scrollTop + outer.clientHeight;
+    return Math.abs(lastMsgBottom - viewportBottom) < 64;
   }, []);
 
   const pushToast = React.useCallback((message: string, kind: string = "warn") => {
@@ -160,67 +180,42 @@ export function App() {
   const messages = threads[activeChatId] || [];
   const isEmpty = activeChatId === "__empty__" || messages.length === 0;
 
-  // Sticky-to-bottom scroll for the thread.
-  //   - User scroll wheel / touch / keyboard scrolling away from the bottom
-  //     disengages stick. Returning to the bottom re-engages it.
-  //   - While engaged, every messages change (new message, streaming token) and
-  //     every container resize (composer growing) re-pins to the bottom.
-  React.useEffect(() => {
-    const el = threadOuterRef.current;
-    if (!el) return;
-    const recompute = () => {
-      const threshold = 48; // px from bottom counts as "at bottom"
-      stickToBottomRef.current =
-        el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
-    };
-    // wheel/touch/keyboard are user-driven scroll inputs; recompute *after*
-    // the browser commits the scroll, so use a microtask delay.
-    const onUserScrollIntent = () => {
-      Promise.resolve().then(recompute);
-    };
-    el.addEventListener("wheel", onUserScrollIntent, { passive: true });
-    el.addEventListener("touchmove", onUserScrollIntent, { passive: true });
-    el.addEventListener("keydown", onUserScrollIntent);
-    return () => {
-      el.removeEventListener("wheel", onUserScrollIntent);
-      el.removeEventListener("touchmove", onUserScrollIntent);
-      el.removeEventListener("keydown", onUserScrollIntent);
-    };
-  }, [isEmpty]);
+  // Auto-follow the latest message:
+  //   - On every messages change (new message, streaming token), if the user
+  //     was already parked at the bottom of the latest message, keep them
+  //     parked. If they scrolled up to read older content, leave them alone.
+  //   - On composer growth (outer container shrinks), same rule.
+  // The "post-send" behavior of pinning the new assistant message to ~40%
+  // from the top is handled directly inside sendMessage; this layout effect
+  // intentionally does nothing in that case because the user is far from the
+  // bottom right after the 40% scroll, so isFollowingLastMessage returns
+  // false until the response grows enough to reach the viewport bottom.
+  const lastMessageContent = messages[messages.length - 1]?.content ?? "";
+  React.useLayoutEffect(() => {
+    if (isEmpty) return;
+    if (isFollowingLastMessage()) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(followLastMessage);
+      });
+    }
+  }, [isEmpty, messages.length, lastMessageContent, followLastMessage, isFollowingLastMessage]);
 
   React.useEffect(() => {
     const outer = threadOuterRef.current;
     if (!outer) return;
-    const onResize = () => {
-      if (stickToBottomRef.current) scrollThreadToBottom();
-    };
-    const ro = new ResizeObserver(onResize);
-    ro.observe(outer); // composer growth shrinks the thread
-    return () => ro.disconnect();
-  }, [isEmpty, scrollThreadToBottom]);
-
-  // Pin to bottom whenever the thread content changes. Covers: new user
-  // message, new assistant message, every streaming token (each token is a
-  // new content string on the last assistant message).
-  const lastMessageContent = messages[messages.length - 1]?.content ?? "";
-  React.useLayoutEffect(() => {
-    if (isEmpty) return;
-    if (stickToBottomRef.current) {
-      // double-rAF: first frame for layout to settle, second for the new
-      // scrollHeight to be available.
-      requestAnimationFrame(() => {
-        requestAnimationFrame(scrollThreadToBottom);
-      });
-    }
-  }, [isEmpty, messages.length, lastMessageContent, scrollThreadToBottom]);
-
-  // On chat switch, jump to the bottom of the new thread.
-  React.useLayoutEffect(() => {
-    stickToBottomRef.current = true;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(scrollThreadToBottom);
+    const ro = new ResizeObserver(() => {
+      if (isFollowingLastMessage()) followLastMessage();
     });
-  }, [activeChatId, scrollThreadToBottom]);
+    ro.observe(outer);
+    return () => ro.disconnect();
+  }, [isEmpty, followLastMessage, isFollowingLastMessage]);
+
+  // On chat switch, anchor the bottom of the new thread to the viewport bottom.
+  React.useLayoutEffect(() => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(followLastMessage);
+    });
+  }, [activeChatId, followLastMessage]);
 
   const onNewChat = (projectId: string) => {
     const id = "c-new-" + Date.now();
@@ -320,9 +315,6 @@ export function App() {
       setActiveChatId(chatId);
     }
 
-    // User just submitted — make sure they see their message and the response.
-    stickToBottomRef.current = true;
-
     setThreads((prev) => ({
       ...prev,
       [chatId]: [...(prev[chatId] || []), { role: "user", content: text }],
@@ -340,6 +332,22 @@ export function App() {
       ...prev,
       [chatId]: [...(prev[chatId] || []), { role: "assistant", content: "" }],
     }));
+
+    // Pin the new (still-empty) assistant message's top to ~40% from the
+    // viewport top, so the response generates with breathing room above and
+    // ~60% of the viewport free below for it to fill into. The follow logic
+    // takes over once the response grows enough to reach the bottom.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const outer = threadOuterRef.current;
+        const inner = threadInnerRef.current;
+        if (!outer || !inner) return;
+        const lastMsg = inner.lastElementChild as HTMLElement | null;
+        if (!lastMsg) return;
+        const target = lastMsg.offsetTop - outer.clientHeight * 0.4;
+        outer.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+      });
+    });
 
     let acc = "";
     const chunks = reply.split(" ");
@@ -480,7 +488,7 @@ export function App() {
         ) : (
           <>
             <div ref={threadOuterRef} className="flex-1 overflow-y-auto flex flex-col">
-              <div ref={threadInnerRef} className="w-full max-w-[760px] mx-auto pt-8 pb-[120px] px-6 flex flex-col gap-7">
+              <div ref={threadInnerRef} className="w-full max-w-[760px] mx-auto pt-8 pb-[60vh] px-6 flex flex-col gap-7">
                 {messages.map((m, i) => (
                   <Message
                     key={i}
