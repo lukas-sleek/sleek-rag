@@ -81,6 +81,9 @@ export function App() {
 
   const threadOuterRef = React.useRef<HTMLDivElement>(null);
   const threadInnerRef = React.useRef<HTMLDivElement>(null);
+  // While true, the messages-change layout effect skips its auto-follow so
+  // the 40%-from-top scroll scheduled inside sendMessage wins.
+  const postSendScrollPendingRef = React.useRef(false);
 
   // Position the last message so its bottom sits ~16px above the viewport
   // bottom — the "you're caught up" anchor.
@@ -198,6 +201,8 @@ export function App() {
   const lastMessageContent = messages[messages.length - 1]?.content ?? "";
   React.useLayoutEffect(() => {
     if (isEmpty) return;
+    // sendMessage's 40%-from-top scroll wins this commit cycle.
+    if (postSendScrollPendingRef.current) return;
     if (isFollowingLastMessage()) {
       requestAnimationFrame(() => {
         requestAnimationFrame(followLastMessage);
@@ -327,6 +332,9 @@ export function App() {
     // ~40% from the top with room to grow into. Stays padded while the user
     // is in this chat — clears on navigation away.
     setPaddedChatId(chatId);
+    // Block the messages-change layout effect's auto-follow from racing the
+    // post-send 40%-from-top scroll. Cleared inside the rAF below.
+    postSendScrollPendingRef.current = true;
 
     setThreads((prev) => ({
       ...prev,
@@ -354,11 +362,14 @@ export function App() {
       requestAnimationFrame(() => {
         const outer = threadOuterRef.current;
         const inner = threadInnerRef.current;
-        if (!outer || !inner) return;
-        const lastMsg = inner.lastElementChild as HTMLElement | null;
-        if (!lastMsg) return;
-        const target = lastMsg.offsetTop - outer.clientHeight * 0.4;
-        outer.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+        if (outer && inner) {
+          const lastMsg = inner.lastElementChild as HTMLElement | null;
+          if (lastMsg) {
+            const target = lastMsg.offsetTop - outer.clientHeight * 0.4;
+            outer.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+          }
+        }
+        postSendScrollPendingRef.current = false;
       });
     });
 
