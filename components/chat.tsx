@@ -347,19 +347,20 @@ export function Composer({
             <button type="button" className={ICON_BTN} title="Spracheingabe">
               <Icon.Mic />
             </button>
-            {/* Fixed-size slot so the send button mounting/unmounting never
-                reflows the toolbar — only its contents change. */}
-            <div className="w-7 h-7 flex items-center justify-center flex-shrink-0">
-              {streaming ? (
-                <button type="button" className="cmp-send" onClick={onStop} title="Generierung stoppen">
-                  <Icon.Stop />
-                </button>
-              ) : value.trim() ? (
-                <button type="submit" className="cmp-send" title="Senden">
-                  <Icon.ArrowUp />
-                </button>
-              ) : null}
-            </div>
+            {/* Render an invisible 28x28 placeholder when no button is shown
+                so the toolbar layout never reflows when the send button
+                mounts/unmounts. The button keeps its own 28x28 box. */}
+            {streaming ? (
+              <button type="button" className="cmp-send" onClick={onStop} title="Generierung stoppen">
+                <Icon.Stop />
+              </button>
+            ) : value.trim() ? (
+              <button type="submit" className="cmp-send" title="Senden">
+                <Icon.ArrowUp />
+              </button>
+            ) : (
+              <div className="w-7 h-7 flex-shrink-0" aria-hidden="true" />
+            )}
           </div>
         </div>
       </form>
