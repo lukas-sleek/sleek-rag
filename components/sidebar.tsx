@@ -234,7 +234,7 @@ function ProjectSection({
   return (
     <div
       className={
-        "sidebar-section" +
+        "sidebar-section mt-3" +
         (projIndicator ? (projDragOver!.before ? " drop-before" : " drop-after") : "")
       }
       onDragOver={(e) => onProjectDragOver(e, proj.id)}
@@ -415,15 +415,21 @@ export function Sidebar({
   };
 
   return (
-    <aside className={"sidebar" + (collapsed ? " collapsed" : "")}>
-      <div className="sidebar-header">
+    <aside
+      className={
+        "flex flex-col flex-shrink-0 bg-bg-sidebar border-r border-border " +
+        "overflow-hidden transition-[width] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] " +
+        (collapsed ? "w-14" : "w-[280px]")
+      }
+    >
+      <div className="h-14 flex items-center px-3 gap-2 border-b border-border flex-shrink-0">
         {!collapsed && (
-          <div className="sidebar-logo">
-            EAG <span className="accent">LLM</span>
+          <div className="font-display text-[17px] font-extrabold tracking-[-0.03em] flex-1 whitespace-nowrap overflow-hidden">
+            EAG <span className="text-accent">LLM</span>
           </div>
         )}
         <button
-          className="icon-btn sidebar-toggle"
+          className="icon-btn ml-auto"
           onClick={onToggle}
           title={collapsed ? "Sidebar öffnen" : "Sidebar einklappen"}
         >
@@ -432,7 +438,7 @@ export function Sidebar({
       </div>
 
       {collapsed && (
-        <div className="sidebar-collapsed-actions">
+        <div className="flex flex-col items-center py-2 gap-1">
           <button
             className="icon-btn"
             onClick={() => onNewProject && onNewProject()}
@@ -446,16 +452,16 @@ export function Sidebar({
       {!collapsed && (
         <>
           <button
-            className="sidebar-template-btn"
+            className="group flex items-center gap-2.5 w-[calc(100%-16px)] mx-2 mb-2 px-3 py-2.5 bg-transparent border border-border rounded-[10px] text-text-secondary text-[13px] font-medium tracking-[-0.01em] text-left transition-[background-color,border-color,color] duration-150 hover:bg-bg-hover hover:border-border-strong hover:text-text"
             onClick={() => onOpenTemplate && onOpenTemplate()}
             title="Vorlage Projektanalyse bearbeiten"
           >
-            <span className="sidebar-template-icon"><Icon.FileText /></span>
-            <span className="sidebar-template-label">Vorlage Analyse</span>
-            <span className="sidebar-template-edit"><Icon.Edit /></span>
+            <span className="inline-flex items-center justify-center text-accent flex-shrink-0"><Icon.FileText /></span>
+            <span className="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">Vorlage Analyse</span>
+            <span className="inline-flex items-center justify-center text-text-tertiary opacity-0 group-hover:opacity-100 transition-opacity duration-150 flex-shrink-0"><Icon.Edit /></span>
           </button>
 
-          <div className="sidebar-search">
+          <div className="p-3 flex-shrink-0">
             <input
               className="sidebar-search-input"
               placeholder="Projekte suchen…"
@@ -465,14 +471,14 @@ export function Sidebar({
           </div>
 
           <button
-            className="sidebar-new-chat"
+            className="mt-2 mb-1 mx-3 flex items-center gap-2 bg-bg-input border border-border text-text px-3 py-2.5 rounded-md text-[13px] font-medium transition-[background-color,border-color] duration-150 hover:bg-bg-hover hover:border-border-strong"
             onClick={() => onNewProject && onNewProject()}
           >
             <Icon.PlusBig />
             Neues Projekt
           </button>
 
-          <div className="sidebar-scroll">
+          <div className="flex-1 overflow-y-auto px-2 pb-3">
             {visibleProjects.map((proj) => (
               <ProjectSection
                 key={proj.id}
@@ -500,12 +506,17 @@ export function Sidebar({
         </>
       )}
 
-      <div className="sidebar-footer">
+      <div
+        className={
+          "border-t border-border mt-auto flex-shrink-0 flex items-center gap-2.5 " +
+          (collapsed ? "justify-center py-2.5 px-0" : "py-2.5 px-3")
+        }
+      >
         <div className="avatar">{(user.email[0] || "A").toUpperCase()}</div>
         {!collapsed && (
-          <div className="sidebar-footer-text">
-            <div className="name">{user.email.split("@")[0]}</div>
-            <div className="email">{user.email}</div>
+          <div className="flex flex-col flex-1 min-w-0">
+            <div className="text-[13px] font-medium text-text">{user.email.split("@")[0]}</div>
+            <div className="text-[11px] text-text-tertiary whitespace-nowrap overflow-hidden text-ellipsis">{user.email}</div>
           </div>
         )}
       </div>

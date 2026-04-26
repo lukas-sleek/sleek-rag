@@ -112,53 +112,13 @@ input, textarea { font-family: inherit; }
 .btn-primary:active { transform: translateY(1px); }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* ---------- CHAT APP ---------- */
-.app {
-  display: flex;
-  height: 100vh;
-  width: 100vw;
-  background: var(--bg);
-}
-
-.sidebar {
-  width: 280px;
-  flex-shrink: 0;
-  background: var(--bg-sidebar);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  transition: width .22s cubic-bezier(.4,0,.2,1);
-  overflow: hidden;
-}
-.sidebar.collapsed { width: 56px; }
-
-.sidebar-header {
-  height: 56px;
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  gap: 8px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.sidebar-logo {
-  font-family: var(--font-display);
-  font-size: 17px;
-  font-weight: 800;
-  letter-spacing: -0.03em;
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-}
-.sidebar-logo .accent { color: var(--accent); }
-.sidebar-toggle { margin-left: auto; }
-.sidebar-collapsed-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 8px 0;
-  gap: 4px;
-}
+/* ---------- SIDEBAR (residual) ---------- */
+/* Wrapper layout (.sidebar, .sidebar-header, .sidebar-logo, etc.) was moved to
+ * Tailwind utilities in components/sidebar.tsx. Kept here: the reusable
+ * .icon-btn (used by sidebar + topbar), the search input with its inline-SVG
+ * background, and the project/chat row subgraph below — those rows have
+ * descendant-hover reveals, drop indicators (::before/::after), grab cursors,
+ * and chevron rotation that are clearer in plain CSS than Tailwind. */
 .icon-btn {
   background: transparent;
   border: none;
@@ -175,17 +135,6 @@ input, textarea { font-family: inherit; }
 .icon-btn:hover { background: var(--bg-hover); color: var(--text); }
 .icon-btn.active { background: var(--bg-active); color: var(--text); }
 
-.sidebar.collapsed .sidebar-logo,
-.sidebar.collapsed .sidebar-section,
-.sidebar.collapsed .sidebar-footer-text,
-.sidebar.collapsed .sidebar-search {
-  display: none;
-}
-
-.sidebar-search {
-  padding: 12px;
-  flex-shrink: 0;
-}
 .sidebar-search-input {
   width: 100%;
   background: var(--bg-input);
@@ -201,13 +150,6 @@ input, textarea { font-family: inherit; }
 }
 .sidebar-search-input:focus { border-color: var(--border-strong); }
 
-.sidebar-scroll {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 8px 12px 8px;
-}
-
-.sidebar-section { margin-top: 12px; }
 .sidebar-section-header {
   display: flex;
   align-items: center;
@@ -562,32 +504,6 @@ input, textarea { font-family: inherit; }
 /* Drop indicator override for chats — strip the inset shadow inherited from section */
 .sidebar-section.drop-before > .sidebar-section-header { box-shadow: none; }
 
-.sidebar-new-chat {
-  margin: 8px 12px 4px 12px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 9px 12px;
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-  font-weight: 500;
-  transition: background .12s, border-color .12s;
-}
-.sidebar-new-chat:hover { background: var(--bg-hover); border-color: var(--border-strong); }
-
-.sidebar-footer {
-  border-top: 1px solid var(--border);
-  padding: 10px 12px;
-  margin-top: auto;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.sidebar.collapsed .sidebar-footer { justify-content: center; padding: 10px 0; }
 .avatar {
   width: 28px; height: 28px;
   border-radius: 999px;
@@ -600,9 +516,6 @@ input, textarea { font-family: inherit; }
   font-weight: 600;
   flex-shrink: 0;
 }
-.sidebar-footer-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
-.sidebar-footer-text .name { font-size: 13px; font-weight: 500; color: var(--text); }
-.sidebar-footer-text .email { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- MAIN AREA ---------- */
 .main {
@@ -1720,53 +1633,6 @@ body[data-density="compact"] .sidebar-header { height: 48px; }
   to   { opacity: 1; transform: translateY(0); }
 }
 
-
-/* ---------- SIDEBAR TEMPLATE BUTTON ---------- */
-.sidebar-template-btn {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: calc(100% - 16px);
-  margin: 0 8px 8px 8px;
-  padding: 9px 12px;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  text-align: left;
-  transition: background .12s, border-color .12s, color .12s;
-}
-.sidebar-template-btn:hover {
-  background: var(--bg-hover);
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-.sidebar-template-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--accent);
-  flex-shrink: 0;
-}
-.sidebar-template-label {
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.sidebar-template-edit {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-tertiary);
-  opacity: 0;
-  transition: opacity .12s;
-  flex-shrink: 0;
-}
-.sidebar-template-btn:hover .sidebar-template-edit { opacity: 1; }
 
 /* ---------- TEMPLATE ANALYSIS MODAL ---------- */
 .tpl-overlay {
