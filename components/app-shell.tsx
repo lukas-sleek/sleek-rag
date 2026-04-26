@@ -160,39 +160,66 @@ export function App() {
   const messages = threads[activeChatId] || [];
   const isEmpty = activeChatId === "__empty__" || messages.length === 0;
 
-  // Sticky-to-bottom scroll for the thread:
-  //   - track whether the user is currently parked at the bottom
-  //   - if so, follow streaming tokens and stay pinned when the composer grows
-  //   - if the user scrolls up to read older messages, leave them alone
+  // Sticky-to-bottom scroll for the thread.
+  //   - User scroll wheel / touch / keyboard scrolling away from the bottom
+  //     disengages stick. Returning to the bottom re-engages it.
+  //   - While engaged, every messages change (new message, streaming token) and
+  //     every container resize (composer growing) re-pins to the bottom.
   React.useEffect(() => {
     const el = threadOuterRef.current;
     if (!el) return;
-    const onScroll = () => {
-      const threshold = 48; // px from the bottom counts as "at bottom"
+    const recompute = () => {
+      const threshold = 48; // px from bottom counts as "at bottom"
       stickToBottomRef.current =
         el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
     };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
+    // wheel/touch/keyboard are user-driven scroll inputs; recompute *after*
+    // the browser commits the scroll, so use a microtask delay.
+    const onUserScrollIntent = () => {
+      Promise.resolve().then(recompute);
+    };
+    el.addEventListener("wheel", onUserScrollIntent, { passive: true });
+    el.addEventListener("touchmove", onUserScrollIntent, { passive: true });
+    el.addEventListener("keydown", onUserScrollIntent);
+    return () => {
+      el.removeEventListener("wheel", onUserScrollIntent);
+      el.removeEventListener("touchmove", onUserScrollIntent);
+      el.removeEventListener("keydown", onUserScrollIntent);
+    };
   }, [isEmpty]);
 
   React.useEffect(() => {
     const outer = threadOuterRef.current;
-    const inner = threadInnerRef.current;
-    if (!outer || !inner) return;
+    if (!outer) return;
     const onResize = () => {
       if (stickToBottomRef.current) scrollThreadToBottom();
     };
     const ro = new ResizeObserver(onResize);
-    ro.observe(inner); // new messages, streaming tokens
     ro.observe(outer); // composer growth shrinks the thread
     return () => ro.disconnect();
   }, [isEmpty, scrollThreadToBottom]);
 
+  // Pin to bottom whenever the thread content changes. Covers: new user
+  // message, new assistant message, every streaming token (each token is a
+  // new content string on the last assistant message).
+  const lastMessageContent = messages[messages.length - 1]?.content ?? "";
+  React.useLayoutEffect(() => {
+    if (isEmpty) return;
+    if (stickToBottomRef.current) {
+      // double-rAF: first frame for layout to settle, second for the new
+      // scrollHeight to be available.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(scrollThreadToBottom);
+      });
+    }
+  }, [isEmpty, messages.length, lastMessageContent, scrollThreadToBottom]);
+
   // On chat switch, jump to the bottom of the new thread.
   React.useLayoutEffect(() => {
     stickToBottomRef.current = true;
-    requestAnimationFrame(scrollThreadToBottom);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(scrollThreadToBottom);
+    });
   }, [activeChatId, scrollThreadToBottom]);
 
   const onNewChat = (projectId: string) => {
