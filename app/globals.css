@@ -1,4 +1,37 @@
-/* sleek-rag — minimal & clean dark theme */
+/* sleek-rag — minimal & clean dark theme.
+ * Tokens registered in @theme inline below so utilities resolve to the same
+ * values as the pre-migration CSS variables. The :root block stays so residual
+ * hand-rolled CSS in this file (gradients, scrollbars, keyframes, slider
+ * thumb pseudo-elements, variant overrides) keeps working unchanged. */
+@import "tailwindcss";
+
+@theme inline {
+  --color-bg: #212121;
+  --color-bg-elevated: #2a2a2a;
+  --color-bg-sidebar: #171717;
+  --color-bg-input: #2f2f2f;
+  --color-bg-bubble: #2f2f2f;
+  --color-bg-hover: #2a2a2a;
+  --color-bg-active: #333333;
+  --color-border: #333333;
+  --color-border-strong: #424242;
+  --color-text: #ffffff;
+  --color-text-secondary: #a8a8a8;
+  --color-text-tertiary: #6e6e6e;
+  --color-accent: #ff6b4a;
+  --color-accent-hover: #ff8466;
+  --color-accent-soft: rgba(255, 107, 74, 0.12);
+  --color-eichenberger-red: #ff4539;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  --font-sans: var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-display: var(--font-inter-tight), var(--font-inter), -apple-system, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, "SF Mono", Menlo, monospace;
+}
+
 :root {
   --bg: #212121;
   --bg-elevated: #2a2a2a;
