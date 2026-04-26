@@ -433,9 +433,9 @@ input, textarea { font-family: inherit; }
 /* ---------- COMPOSER (residual) ---------- */
 /* Layout, typography, dropdown, model picker, and chip styles moved to
  * Tailwind utilities in components/chat.tsx. Kept here: the composer-wrap
- * gradient with a 30% color stop (Tailwind would need an arbitrary
- * bg-[linear-gradient(...)] which is harder to read), the range slider
- * track + thumb pseudo-elements, and the send button's sendIn pop-in. */
+ * gradient with a 30% color stop, the range slider track + thumb pseudo-
+ * elements, and the round send button's box (its appear/disappear is
+ * driven by Tailwind opacity/scale transitions in chat.tsx). */
 .composer-wrap {
   background: linear-gradient(to bottom, transparent, var(--bg) 30%);
 }
@@ -473,14 +473,8 @@ input, textarea { font-family: inherit; }
   display: inline-flex;
   align-items: center; justify-content: center;
   cursor: pointer;
-  transition: background .12s, opacity .12s, transform .12s;
-  animation: sendIn .14s ease-out;
 }
 .cmp-send:hover { opacity: .88; }
-@keyframes sendIn {
-  from { transform: scale(.8); opacity: 0; }
-  to { transform: scale(1); opacity: 1; }
-}
 
 /* The data-variant="cool"/"mono" and data-density="compact" body overrides
  * from the original design-tool bundle have been removed: nothing in the app

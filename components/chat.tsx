@@ -347,20 +347,29 @@ export function Composer({
             <button type="button" className={ICON_BTN} title="Spracheingabe">
               <Icon.Mic />
             </button>
-            {/* Render an invisible 28x28 placeholder when no button is shown
-                so the toolbar layout never reflows when the send button
-                mounts/unmounts. The button keeps its own 28x28 box. */}
-            {streaming ? (
-              <button type="button" className="cmp-send" onClick={onStop} title="Generierung stoppen">
-                <Icon.Stop />
-              </button>
-            ) : value.trim() ? (
-              <button type="submit" className="cmp-send" title="Senden">
-                <Icon.ArrowUp />
-              </button>
-            ) : (
-              <div className="w-7 h-7 flex-shrink-0" aria-hidden="true" />
-            )}
+            {/* Always render the send button so the toolbar slot is the
+                same DOM element regardless of state — no mount/unmount, no
+                layout shift. Visibility + the pop-in are driven by Tailwind
+                transitions on opacity and scale. */}
+            {(() => {
+              const visible = streaming || !!value.trim();
+              const stopMode = streaming;
+              return (
+                <button
+                  type={stopMode ? "button" : "submit"}
+                  onClick={stopMode ? onStop : undefined}
+                  title={stopMode ? "Generierung stoppen" : "Senden"}
+                  aria-hidden={visible ? undefined : true}
+                  tabIndex={visible ? 0 : -1}
+                  className={
+                    "cmp-send transition-[opacity,transform] duration-150 ease-out " +
+                    (visible ? "opacity-100 scale-100" : "opacity-0 scale-75 pointer-events-none")
+                  }
+                >
+                  {stopMode ? <Icon.Stop /> : <Icon.ArrowUp />}
+                </button>
+              );
+            })()}
           </div>
         </div>
       </form>
