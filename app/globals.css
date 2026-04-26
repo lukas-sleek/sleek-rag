@@ -80,23 +80,11 @@ input, textarea { font-family: inherit; }
 ::-webkit-scrollbar-thumb { background: #2a2a32; border-radius: 6px; border: 2px solid var(--bg); }
 ::-webkit-scrollbar-thumb:hover { background: #3a3a44; }
 
-/* ---------- LOGIN ---------- */
-.login-shell {
-  display: grid;
-  grid-template-columns: 1.1fr 1fr;
-  height: 100vh;
-  background: var(--bg);
-}
-.login-brand {
-  position: relative;
-  background: var(--bg-elevated);
-  padding: 56px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  border-right: 1px solid var(--border);
-  overflow: hidden;
-}
+/* ---------- LOGIN (residual) ---------- */
+/* Layout/typography moved to Tailwind utilities in components/login.tsx.
+ * Kept here: the radial-gradient ::after glow on the brand panel, the
+ * eichenberger logo's nested-img sizing rule, and the shared .btn-primary. */
+.login-brand { position: relative; overflow: hidden; }
 .login-brand::after {
   content: "";
   position: absolute;
@@ -106,102 +94,8 @@ input, textarea { font-family: inherit; }
     radial-gradient(700px 400px at 10% 0%, rgba(255, 69, 57, 0.06), transparent 60%);
   pointer-events: none;
 }
-.login-brand-top { position: relative; z-index: 1; display: flex; align-items: center; gap: 14px; }
-.login-brand-eichenberger { height: 32px; width: auto; }
-.login-brand-eichenberger svg, .login-brand-eichenberger img { height: 100%; width: auto; display: block; }
-.login-brand-divider { width: 1px; height: 22px; background: var(--border-strong); }
-.login-brand-sleek {
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 800;
-  letter-spacing: -0.03em;
-  color: var(--text);
-}
-.login-brand-tag {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-}
-.login-brand-center {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-  max-width: 520px;
-}
-.login-brand-mark {
-  font-family: var(--font-display);
-  font-size: 132px;
-  font-weight: 800;
-  letter-spacing: -0.04em;
-  line-height: 0.92;
-  color: var(--text);
-}
-.login-brand-mark .accent { color: var(--accent); }
-.login-brand-tagline {
-  font-size: 19px;
-  line-height: 1.45;
-  color: var(--text-secondary);
-  max-width: 440px;
-}
-.login-brand-bottom {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-}
-
-.login-form-wrap {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 56px;
-  background: var(--bg);
-}
-.login-form {
-  width: 100%;
-  max-width: 380px;
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-}
-.login-form h1 {
-  font-family: var(--font-display);
-  font-size: 28px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  margin: 0 0 6px 0;
-}
-.login-form p.sub { margin: 0; color: var(--text-secondary); font-size: 14px; }
-
-.field { display: flex; flex-direction: column; gap: 8px; }
-.field label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  letter-spacing: 0.01em;
-}
-.field input {
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  padding: 12px 14px;
-  font-size: 14px;
-  outline: none;
-  transition: border-color .15s, background .15s;
-}
-.field input:focus {
-  border-color: var(--accent);
-  background: var(--bg-elevated);
-}
-.field input::placeholder { color: var(--text-tertiary); }
+.login-brand-eichenberger svg,
+.login-brand-eichenberger img { height: 100%; width: auto; display: block; }
 
 .btn-primary {
   background: var(--accent);
@@ -217,14 +111,6 @@ input, textarea { font-family: inherit; }
 .btn-primary:hover { background: var(--accent-hover); }
 .btn-primary:active { transform: translateY(1px); }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.login-footer {
-  font-size: 12px;
-  color: var(--text-tertiary);
-  text-align: center;
-}
-.login-footer a { color: var(--text-secondary); text-decoration: none; }
-.login-footer a:hover { color: var(--text); }
 
 /* ---------- CHAT APP ---------- */
 .app {
