@@ -346,95 +346,8 @@ input, textarea { font-family: inherit; }
 .ctx-item.danger:hover { background: rgba(214,58,58,.08); }
 .ctx-item svg { flex-shrink: 0; }
 
-/* Confirmation dialog */
-.confirm-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(15, 18, 22, 0.42);
-  backdrop-filter: blur(2px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 200;
-  animation: fadeIn .14s ease-out;
-}
-.confirm-dialog {
-  background: var(--bg-elevated);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 18px 50px rgba(0,0,0,.18), 0 4px 12px rgba(0,0,0,.08);
-  padding: 22px 22px 18px;
-  width: 100%;
-  max-width: 400px;
-  animation: dialogIn .16s ease-out;
-}
-.confirm-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--text);
-  margin-bottom: 8px;
-}
-.confirm-body {
-  font-size: 13.5px;
-  color: var(--text-secondary);
-  line-height: 1.5;
-  margin-bottom: 18px;
-}
-.confirm-body strong { color: var(--text); font-weight: 600; }
-.confirm-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-.btn-ghost,
-.btn-danger {
-  padding: 8px 14px;
-  border-radius: 7px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background .12s, border-color .12s;
-}
-.btn-ghost {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text);
-}
-.btn-ghost:hover { background: var(--bg-hover); }
-.btn-danger {
-  background: #d63a3a;
-  border: 1px solid #d63a3a;
-  color: #fff;
-}
-.btn-danger:hover { background: #c02f2f; border-color: #c02f2f; }
-
-.prompt-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  margin-bottom: 6px;
-  letter-spacing: 0.01em;
-}
-.prompt-input {
-  width: 100%;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  font-size: 14px;
-  font-family: inherit;
-  outline: none;
-  margin-bottom: 18px;
-  transition: border-color .15s, box-shadow .15s;
-}
-.prompt-input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 18%, transparent);
-}
-.prompt-input::placeholder { color: var(--text-tertiary); }
-
+/* Confirmation / prompt dialog enter animations.
+ * Dialog layout/typography moved to Tailwind utilities in components/app-shell.tsx. */
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes dialogIn {
   from { opacity: 0; transform: translateY(6px) scale(.98); }
@@ -517,71 +430,6 @@ input, textarea { font-family: inherit; }
   flex-shrink: 0;
 }
 
-/* ---------- MAIN AREA ---------- */
-.main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  background: var(--bg);
-}
-.topbar {
-  height: 56px;
-  display: flex;
-  align-items: center;
-  padding: 0 16px;
-  gap: 12px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.topbar-title {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text);
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.topbar-project {
-  font-size: 12px;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-  letter-spacing: 0.02em;
-}
-.model-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  padding: 5px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.model-pill .pulse {
-  width: 6px; height: 6px;
-  border-radius: 999px;
-  background: var(--accent);
-}
-
-.thread {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-}
-.thread-inner {
-  width: 100%;
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 32px 24px 120px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-}
-
 /* ---------- COMPOSER (residual) ---------- */
 /* Layout, typography, dropdown, model picker, and chip styles moved to
  * Tailwind utilities in components/chat.tsx. Kept here: the composer-wrap
@@ -634,31 +482,11 @@ input, textarea { font-family: inherit; }
   to { transform: scale(1); opacity: 1; }
 }
 
-/* ---------- VARIANTS ---------- */
-body[data-variant="cool"] {
-  --accent: #6e8aff;
-  --accent-hover: #8aa1ff;
-  --accent-soft: rgba(110, 138, 255, 0.12);
-}
-body[data-variant="cool"] .avatar,
-body[data-variant="cool"] .msg-avatar.user { background: linear-gradient(135deg, #6e8aff, #4a5ec4); }
-body[data-variant="cool"] .btn-primary { color: #0a0c1a; }
-body[data-variant="cool"] .send-btn { color: #0a0c1a; }
-
-body[data-variant="mono"] {
-  --accent: #e8e8e8;
-  --accent-hover: #ffffff;
-  --accent-soft: rgba(232, 232, 232, 0.08);
-}
-body[data-variant="mono"] .avatar,
-body[data-variant="mono"] .msg-avatar.user { background: linear-gradient(135deg, #6a6a72, #3a3a40); color: #fff; }
-body[data-variant="mono"] .btn-primary,
-body[data-variant="mono"] .send-btn { color: #0a0a0c; }
-
-body[data-density="compact"] .thread-inner { gap: 18px; padding-top: 20px; }
-body[data-density="compact"] .msg-content { font-size: 13.5px; line-height: 1.55; }
-body[data-density="compact"] .topbar { height: 48px; }
-body[data-density="compact"] .sidebar-header { height: 48px; }
+/* The data-variant="cool"/"mono" and data-density="compact" body overrides
+ * from the original design-tool bundle have been removed: nothing in the app
+ * sets those data attributes, and after the Tailwind migration most of their
+ * descendant selectors no longer match anything. Re-add (and re-target the
+ * Tailwind --color-* tokens) if a runtime theme switcher is reintroduced. */
 
 /* ---------- PROJECT FILES MODAL (residual) ---------- */
 /* Layout, typography, file row, header, drop overlay, and entity chips moved
@@ -786,84 +614,13 @@ body[data-density="compact"] .sidebar-header { height: 48px; }
   transition: opacity .15s ease, filter .15s ease;
 }
 
-/* ---------- CHAT DRAG-DROP OVERLAY (full-screen, centered) ---------- */
-.chat-drop-overlay {
-  position: fixed; inset: 0;
-  background: rgba(13,13,13,.85);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 250;
-  pointer-events: none;
-  animation: pf-fade .12s ease-out;
-}
-.chat-drop-inner {
-  display: flex; flex-direction: column;
-  align-items: center; gap: 16px;
-  padding: 48px 64px;
-  border: 2px dashed var(--accent);
-  border-radius: 18px;
-  background: rgba(255,255,255,.02);
-}
-.chat-drop-inner svg { width: 48px; height: 48px; color: var(--accent); }
-.chat-drop-title {
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: -.01em;
-}
-
-
-/* ---------- TOAST STACK ---------- */
-.toast-stack {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  z-index: 250;
-  pointer-events: none;
-  max-width: min(420px, calc(100vw - 40px));
-}
-.toast {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  background: var(--bg-elevated);
-  color: var(--text);
-  border: 1px solid var(--border);
-  box-shadow: 0 12px 28px rgba(0,0,0,.45), 0 2px 6px rgba(0,0,0,.3);
-  font-size: 13px;
-  line-height: 1.4;
-  pointer-events: auto;
-  animation: toast-in .2s ease-out;
-  min-width: 240px;
-}
-.toast-warn {
-  border-left: 3px solid #f59e0b;
-}
-.toast-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  margin-top: 1px;
-  color: #f59e0b;
-}
-.toast-icon svg { display: block; }
-.toast-msg {
-  flex: 1;
-  word-break: break-word;
-}
+/* ---------- TOAST STACK (residual) ---------- */
+/* Toast stack and chat drag-drop overlay are Tailwind utilities in
+ * components/app-shell.tsx. Kept here: the toast-in slide-in keyframe. */
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-
 
 /* ---------- TEMPLATE ANALYSIS MODAL (residual) ---------- */
 /* Modal layout/typography moved to Tailwind utilities in
@@ -877,9 +634,3 @@ body[data-density="compact"] .sidebar-header { height: 48px; }
   from { opacity: 0; transform: translateY(6px) scale(.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
-
-/* ---------- TOAST: SUCCESS VARIANT ---------- */
-.toast-success {
-  border-left: 3px solid #10b981;
-}
-.toast-success .toast-icon { color: #10b981; }

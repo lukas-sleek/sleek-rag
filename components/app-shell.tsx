@@ -22,6 +22,16 @@ import {
 
 type Toast = { id: string; message: string; kind: string };
 
+const BTN_GHOST =
+  "px-3.5 py-2 rounded-[7px] text-[13px] font-medium cursor-pointer " +
+  "bg-transparent border border-border text-text " +
+  "transition-[background-color,border-color] duration-150 hover:bg-bg-hover";
+
+const BTN_DANGER =
+  "px-3.5 py-2 rounded-[7px] text-[13px] font-medium cursor-pointer " +
+  "bg-[#d63a3a] border border-[#d63a3a] text-white " +
+  "transition-[background-color,border-color] duration-150 hover:bg-[#c02f2f] hover:border-[#c02f2f]";
+
 export function App() {
   const [user, setUser] = React.useState<LoginUser | null>(null);
   const [collapsed, setCollapsed] = React.useState(false);
@@ -293,7 +303,7 @@ export function App() {
   }
 
   return (
-    <div className="app">
+    <div className="flex h-screen w-screen bg-bg">
       <Sidebar
         collapsed={collapsed}
         onToggle={() => setCollapsed((v) => !v)}
@@ -337,7 +347,7 @@ export function App() {
       />
 
       <main
-        className="main"
+        className="flex-1 flex flex-col min-w-0 bg-bg"
         onDragEnter={(e) => {
           if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files")) {
             setChatDragOver(true);
@@ -357,17 +367,17 @@ export function App() {
           handleDirectUpload(e.dataTransfer.files);
         }}
       >
-        <div className="topbar">
-          <div className="topbar-title">
+        <div className="h-14 flex items-center px-4 gap-3 border-b border-border flex-shrink-0">
+          <div className="text-sm font-medium text-text flex-1 whitespace-nowrap overflow-hidden text-ellipsis">
             {isEmpty ? "Neuer Chat" : activeChat?.title}
             {!isEmpty && activeChat && (
-              <span className="topbar-project">
+              <span className="text-xs text-text-tertiary font-mono tracking-[0.02em]">
                 {"  ·  " + activeChat.projectName}
               </span>
             )}
           </div>
-          <div className="model-pill">
-            <span className="pulse" />
+          <div className="inline-flex items-center gap-1.5 bg-bg-input border border-border px-2.5 py-[5px] rounded-full text-xs text-text-secondary">
+            <span className="w-1.5 h-1.5 rounded-full bg-accent" />
             EAG LLM · gpt-4o
           </div>
           {activeChat?.projectHasFiles && (
@@ -395,8 +405,8 @@ export function App() {
           </>
         ) : (
           <>
-            <div className="thread">
-              <div className="thread-inner">
+            <div className="flex-1 overflow-y-auto flex flex-col">
+              <div className="w-full max-w-[760px] mx-auto pt-8 pb-[120px] px-6 flex flex-col gap-7">
                 {messages.map((m, i) => (
                   <Message
                     key={i}
@@ -488,21 +498,39 @@ export function App() {
       />
 
       {chatDragOver && (
-        <div className="chat-drop-overlay">
-          <div className="chat-drop-inner">
+        <div className="fixed inset-0 bg-[rgba(13,13,13,.85)] [backdrop-filter:blur(6px)] [-webkit-backdrop-filter:blur(6px)] flex items-center justify-center z-[250] pointer-events-none animate-[pf-fade_.12s_ease-out]">
+          <div className="flex flex-col items-center gap-4 px-16 py-12 border-2 border-dashed border-accent rounded-[18px] bg-white/[.02] [&_svg]:w-12 [&_svg]:h-12 [&_svg]:text-accent">
             <Icon.UploadCloud />
-            <div className="chat-drop-title">Dateien hier ablegen</div>
+            <div className="font-display text-[22px] font-semibold text-text tracking-[-.01em]">Dateien hier ablegen</div>
           </div>
         </div>
       )}
 
-      <div className="toast-stack">
-        {toasts.map((t) => (
-          <div key={t.id} className={"toast toast-" + t.kind}>
-            <span className="toast-icon"><Icon.AlertCircle /></span>
-            <span className="toast-msg">{t.message}</span>
-          </div>
-        ))}
+      <div className="fixed bottom-5 right-5 flex flex-col gap-2 z-[250] pointer-events-none max-w-[min(420px,calc(100vw-40px))]">
+        {toasts.map((t) => {
+          const isSuccess = t.kind === "success";
+          return (
+            <div
+              key={t.id}
+              className={
+                "flex items-start gap-2.5 px-3.5 py-3 rounded-[10px] bg-bg-elevated text-text border border-border " +
+                "shadow-[0_12px_28px_rgba(0,0,0,.45),0_2px_6px_rgba(0,0,0,.3)] text-[13px] leading-[1.4] " +
+                "pointer-events-auto animate-[toast-in_.2s_ease-out] min-w-[240px] " +
+                (isSuccess ? "[border-left:3px_solid_#10b981]" : "[border-left:3px_solid_#f59e0b]")
+              }
+            >
+              <span
+                className={
+                  "inline-flex items-center justify-center flex-shrink-0 mt-px " +
+                  (isSuccess ? "text-[#10b981]" : "text-[#f59e0b]")
+                }
+              >
+                <Icon.AlertCircle />
+              </span>
+              <span className="flex-1 break-words">{t.message}</span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -531,13 +559,21 @@ function ConfirmDialog({
   }, [onCancel, onConfirm]);
 
   return (
-    <div className="confirm-overlay" onClick={onCancel}>
-      <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
-        <div className="confirm-title">{title}</div>
-        <div className="confirm-body">{body}</div>
-        <div className="confirm-actions">
-          <button className="btn-ghost" onClick={onCancel}>Abbrechen</button>
-          <button className="btn-danger" onClick={onConfirm} autoFocus>
+    <div
+      className="fixed inset-0 bg-[rgba(15,18,22,0.42)] [backdrop-filter:blur(2px)] flex items-center justify-center z-[200] animate-[fadeIn_.14s_ease-out]"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-bg-elevated text-text border border-border rounded-[12px] shadow-[0_18px_50px_rgba(0,0,0,.18),0_4px_12px_rgba(0,0,0,.08)] pt-[22px] px-[22px] pb-[18px] w-full max-w-[400px] animate-[dialogIn_.16s_ease-out]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-base font-semibold text-text mb-2">{title}</div>
+        <div className="text-[13.5px] text-text-secondary leading-[1.5] mb-[18px] [&_strong]:text-text [&_strong]:font-semibold">
+          {body}
+        </div>
+        <div className="flex justify-end gap-2">
+          <button className={BTN_GHOST} onClick={onCancel}>Abbrechen</button>
+          <button className={BTN_DANGER} onClick={onConfirm} autoFocus>
             {confirmLabel || "Löschen"}
           </button>
         </div>
@@ -587,13 +623,21 @@ function PromptDialog({
   };
 
   return (
-    <div className="confirm-overlay" onClick={onCancel}>
-      <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
-        <div className="confirm-title">{title}</div>
-        {label && <div className="prompt-label">{label}</div>}
+    <div
+      className="fixed inset-0 bg-[rgba(15,18,22,0.42)] [backdrop-filter:blur(2px)] flex items-center justify-center z-[200] animate-[fadeIn_.14s_ease-out]"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-bg-elevated text-text border border-border rounded-[12px] shadow-[0_18px_50px_rgba(0,0,0,.18),0_4px_12px_rgba(0,0,0,.08)] pt-[22px] px-[22px] pb-[18px] w-full max-w-[400px] animate-[dialogIn_.16s_ease-out]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-base font-semibold text-text mb-2">{title}</div>
+        {label && (
+          <div className="text-xs font-medium text-text-secondary mb-1.5 tracking-[0.01em]">{label}</div>
+        )}
         <input
           ref={inputRef}
-          className="prompt-input"
+          className="w-full px-3 py-2.5 rounded-[8px] border border-border bg-bg text-text text-sm [font-family:inherit] [outline:none] mb-[18px] transition-[border-color,box-shadow] duration-150 focus:border-accent focus:shadow-[0_0_0_3px_color-mix(in_oklch,var(--accent)_18%,transparent)] placeholder:text-text-tertiary"
           type="text"
           value={value}
           placeholder={placeholder || ""}
@@ -605,13 +649,9 @@ function PromptDialog({
             }
           }}
         />
-        <div className="confirm-actions">
-          <button className="btn-ghost" onClick={onCancel}>Abbrechen</button>
-          <button
-            className="btn-primary"
-            onClick={submit}
-            disabled={!value.trim()}
-          >
+        <div className="flex justify-end gap-2">
+          <button className={BTN_GHOST} onClick={onCancel}>Abbrechen</button>
+          <button className="btn-primary" onClick={submit} disabled={!value.trim()}>
             {confirmLabel || "Erstellen"}
           </button>
         </div>
