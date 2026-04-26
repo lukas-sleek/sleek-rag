@@ -3,7 +3,7 @@
 RAG app with chat (default) and document ingestion interfaces. Config via env vars, no admin UI.
 
 ## Stack
-- Frontend: React + Vite + Tailwind + shadcn/ui
+- Frontend: NextJS + Tailwind + shadcn/ui + shadcn.io
 - Backend: Python + FastAPI
 - Database: Supabase (Postgres, pgvector, Auth, Storage, Realtime)
 - LLM: OpenAI (Module 1), OpenRouter (Module 2+)

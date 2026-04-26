@@ -50,7 +50,7 @@ Technically-minded people who want to build production RAG systems using AI codi
 
 | Layer | Choice |
 |-------|--------|
-| Frontend | React + TypeScript + Vite + Tailwind + shadcn/ui |
+| Frontend | NextJs 16 + TypeScript + Tailwind + shadcn/ui + shadch.io |
 | Backend | Python + FastAPI |
 | Database | Supabase (Postgres + pgvector + Auth + Storage + Realtime) |
 | LLM (Module 1) | OpenAI Responses API (managed threads + file_search) |
