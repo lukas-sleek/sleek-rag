@@ -37,6 +37,10 @@ function saveTemplate(text: string) {
   } catch {}
 }
 
+const TPL_BTN_BASE =
+  "px-3.5 py-2 rounded-[8px] text-[13px] font-medium [font-family:inherit] " +
+  "border border-transparent transition-[background-color,border-color,color,opacity] duration-150";
+
 export function TemplateAnalysisModal({
   open,
   onClose,
@@ -97,53 +101,68 @@ export function TemplateAnalysisModal({
     .filter(Boolean).length;
 
   return (
-    <div className="tpl-overlay" onClick={handleClose}>
+    <div
+      className="fixed inset-0 bg-black/55 [backdrop-filter:blur(4px)] [-webkit-backdrop-filter:blur(4px)] z-[180] flex items-center justify-center p-6 animate-[tpl-fade_.12s_ease-out]"
+      onClick={handleClose}
+    >
       <div
-        className="tpl-modal"
+        className="w-[min(720px,100%)] max-h-[min(720px,calc(100vh-48px))] bg-bg-elevated text-text border border-border rounded-[14px] shadow-[0_30px_80px_rgba(0,0,0,.55),0_4px_16px_rgba(0,0,0,.4)] flex flex-col overflow-hidden animate-[tpl-pop_.15s_ease-out]"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label="Vorlage Projektanalyse"
       >
-        <div className="tpl-header">
-          <div className="tpl-header-text">
-            <div className="tpl-title">Vorlage · Projektanalyse</div>
-            <div className="tpl-subtitle">
+        <div className="flex items-start gap-3 px-[22px] pt-[18px] pb-3.5 border-b border-border">
+          <div className="flex-1 min-w-0">
+            <div className="font-display text-[17px] font-semibold tracking-[-0.01em] text-text">Vorlage · Projektanalyse</div>
+            <div className="mt-1 text-[12.5px] text-text-tertiary leading-[1.5]">
               {lineCount} {lineCount === 1 ? "Frage" : "Fragen"}
               {" · wird beim Befehl "}
-              <span className="tpl-cmd">Projektanalyse erstellen</span>
+              <span className="inline-block px-1.5 py-px rounded-[4px] bg-accent-soft text-accent font-mono text-[11.5px] font-medium">
+                Projektanalyse erstellen
+              </span>
               {" als Batch an den Agent gesendet"}
             </div>
           </div>
-          <button className="tpl-close" onClick={handleClose} aria-label="Schließen">
+          <button
+            className="bg-transparent border-none text-text-tertiary w-7 h-7 rounded-md inline-flex items-center justify-center flex-shrink-0 transition-[background-color,color] duration-150 hover:bg-bg-hover hover:text-text"
+            onClick={handleClose}
+            aria-label="Schließen"
+          >
             <Icon.XBig />
           </button>
         </div>
 
-        <div className="tpl-body">
-          <div className="tpl-hint">
+        <div className="flex-1 flex flex-col gap-2.5 px-[22px] pt-4 pb-1.5 overflow-hidden min-h-0">
+          <div className="text-[12.5px] text-text-tertiary leading-[1.5]">
             Eine Frage pro Zeile. Nummerierungen werden beibehalten. Du kannst Fragen ergänzen, umformulieren oder entfernen.
           </div>
           <textarea
             ref={taRef}
-            className="tpl-textarea"
+            className="flex-1 min-h-[280px] w-full resize-y bg-bg text-text border border-border rounded-[10px] px-3.5 py-3.5 font-mono text-[13px] leading-[1.65] [outline:none] transition-[border-color,background-color] duration-150 focus:border-border-strong focus:bg-bg-elevated"
             value={text}
             spellCheck={false}
             onChange={(e) => { setText(e.target.value); setDirty(true); }}
-            placeholder="1. Erste Frage…&#10;2. Zweite Frage…"
+            placeholder={"1. Erste Frage…\n2. Zweite Frage…"}
           />
         </div>
 
-        <div className="tpl-footer">
-          <button className="tpl-btn tpl-btn-ghost" onClick={handleReset}>
+        <div className="flex items-center gap-2 px-[22px] pt-3.5 pb-[18px] border-t border-border">
+          <button
+            className={TPL_BTN_BASE + " bg-transparent text-text-tertiary hover:text-text hover:bg-bg-hover"}
+            onClick={handleReset}
+          >
             Auf Standard zurücksetzen
           </button>
-          <div className="tpl-footer-right">
-            <button className="tpl-btn tpl-btn-secondary" onClick={handleClose}>
+          <div className="ml-auto flex gap-2">
+            <button
+              className={TPL_BTN_BASE + " bg-transparent text-text-secondary border-border hover:bg-bg-hover hover:border-border-strong hover:text-text"}
+              onClick={handleClose}
+            >
               Abbrechen
             </button>
             <button
-              className="tpl-btn tpl-btn-primary"
+              className={TPL_BTN_BASE + " bg-accent text-white border-accent hover:bg-accent-hover hover:border-accent-hover disabled:opacity-45 disabled:cursor-not-allowed"}
               onClick={handleSave}
               disabled={!dirty}
               title={dirty ? "Speichern (⌘↵)" : "Keine Änderungen"}
