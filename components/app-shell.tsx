@@ -72,6 +72,11 @@ export function App() {
   const [showTemplate, setShowTemplate] = React.useState(false);
   const [chatDragOver, setChatDragOver] = React.useState(false);
   const [toasts, setToasts] = React.useState<Toast[]>([]);
+  // chatId of the chat that's currently in "post-send" mode (extra bottom
+  // padding so the new assistant message can be pinned ~40% from the top).
+  // Cleared when the user navigates away — coming back shows the chat flush
+  // above the composer like ChatGPT.
+  const [paddedChatId, setPaddedChatId] = React.useState<string | null>(null);
   const hiddenFileInputRef = React.useRef<HTMLInputElement>(null);
 
   const threadOuterRef = React.useRef<HTMLDivElement>(null);
@@ -210,8 +215,11 @@ export function App() {
     return () => ro.disconnect();
   }, [isEmpty, followLastMessage, isFollowingLastMessage]);
 
-  // On chat switch, anchor the bottom of the new thread to the viewport bottom.
+  // On chat switch, drop the post-send padding for the previous chat (so
+  // returning later shows the conversation flush above the composer) and
+  // anchor the bottom of the new thread to the viewport bottom.
   React.useLayoutEffect(() => {
+    setPaddedChatId(null);
     requestAnimationFrame(() => {
       requestAnimationFrame(followLastMessage);
     });
@@ -314,6 +322,11 @@ export function App() {
       chatId = projects[0]?.chats?.[0]?.id || "c-a1";
       setActiveChatId(chatId);
     }
+
+    // Mark this chat as padded so the new assistant message can be pinned
+    // ~40% from the top with room to grow into. Stays padded while the user
+    // is in this chat — clears on navigation away.
+    setPaddedChatId(chatId);
 
     setThreads((prev) => ({
       ...prev,
@@ -488,16 +501,18 @@ export function App() {
         ) : (
           <>
             <div ref={threadOuterRef} className="flex-1 overflow-y-auto flex flex-col">
-              {/* While the assistant is streaming, leave 60vh of bottom
-                  padding so the new message can be scrolled to ~40% from
-                  the top with room to grow into. Once streaming is done,
-                  shrink back to the small gutter so leaving and coming
-                  back to the chat doesn't show empty space. */}
+              {/* When the user has just sent a message in this chat, leave
+                  60vh of bottom padding so the new assistant message can be
+                  pinned ~40% from the top with room to grow into. The
+                  padding stays for the rest of the chat session — only
+                  navigating away (chat switch) drops it back to the small
+                  gutter, so coming back later shows the conversation flush
+                  above the composer like ChatGPT. */}
               <div
                 ref={threadInnerRef}
                 className={
                   "w-full max-w-[760px] mx-auto pt-8 px-6 flex flex-col gap-7 " +
-                  (streaming ? "pb-[60vh]" : "pb-[120px]")
+                  (paddedChatId === activeChatId ? "pb-[60vh]" : "pb-[120px]")
                 }
               >
                 {messages.map((m, i) => (
