@@ -75,6 +75,13 @@ export function App() {
   const [streaming, setStreaming] = React.useState(false);
   const streamRef = React.useRef<{ controller: AbortController | null }>({ controller: null });
   const loadedThreadsRef = React.useRef<Set<string>>(new Set());
+  // Initial-load gate. Tracks chats whose messages fetch has resolved (success
+  // or failure), whether the URL→state effect has picked an active chat, and
+  // a sticky "shell is mounted" flag so chat switches after the first paint
+  // don't bounce back to the splash.
+  const [chatsLoaded, setChatsLoaded] = React.useState<Set<string>>(new Set());
+  const [initialPickDone, setInitialPickDone] = React.useState(false);
+  const [shellReady, setShellReady] = React.useState(false);
 
   const [confirmDialog, setConfirmDialog] = React.useState<null | {
     title: string;
@@ -155,6 +162,9 @@ export function App() {
         setThreads({});
         setProjectFiles({});
         setActiveChatId("__empty__");
+        setChatsLoaded(new Set());
+        setInitialPickDone(false);
+        setShellReady(false);
         initialRestoreDoneRef.current = false;
         if (typeof window !== "undefined") {
           window.localStorage.removeItem(LAST_CHAT_KEY);
@@ -225,6 +235,7 @@ export function App() {
         setActiveChatId("__empty__");
       }
       initialRestoreDoneRef.current = true;
+      setInitialPickDone(true);
       return;
     }
     if (initialRestoreDoneRef.current) return;
@@ -234,6 +245,7 @@ export function App() {
     if (saved && ownedIds.has(saved)) {
       setActiveChatId(saved);
       router.replace(`/c/${saved}`);
+      setInitialPickDone(true);
       return;
     }
     const first = projects.flatMap((p) => p.chats)[0]?.id;
@@ -244,6 +256,7 @@ export function App() {
         window.localStorage.setItem(LAST_CHAT_KEY, first);
       }
     }
+    setInitialPickDone(true);
   }, [projectsLoaded, projects, urlChatId, router, pushToast, activeChatId]);
 
   React.useEffect(() => {
@@ -252,6 +265,8 @@ export function App() {
     if (loadedThreadsRef.current.has(activeChatId)) return;
     loadedThreadsRef.current.add(activeChatId);
     const ctrl = new AbortController();
+    const markLoaded = (id: string) =>
+      setChatsLoaded((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
     (async () => {
       let res: Response;
       try {
@@ -259,16 +274,19 @@ export function App() {
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
           loadedThreadsRef.current.delete(activeChatId);
+          markLoaded(activeChatId);
         }
         return;
       }
       if (!res.ok) {
         loadedThreadsRef.current.delete(activeChatId);
+        markLoaded(activeChatId);
         return;
       }
       const msgs: Msg[] = await res.json();
       if (ctrl.signal.aborted) return;
       setThreads((prev) => ({ ...prev, [activeChatId]: msgs }));
+      markLoaded(activeChatId);
     })();
     return () => {
       // On strict-mode remount, drop the dedup entry too so the second
@@ -277,6 +295,16 @@ export function App() {
       loadedThreadsRef.current.delete(activeChatId);
     };
   }, [session, activeChatId]);
+
+  // Promote shellReady once: projects loaded, URL→state has picked an active
+  // chat, and (if there is one) its messages have resolved. Sticky — chat
+  // switches after the first paint never bounce back to the splash.
+  React.useEffect(() => {
+    if (shellReady) return;
+    if (!projectsLoaded || !initialPickDone) return;
+    if (activeChatId !== "__empty__" && !chatsLoaded.has(activeChatId)) return;
+    setShellReady(true);
+  }, [shellReady, projectsLoaded, initialPickDone, activeChatId, chatsLoaded]);
 
   const activeProjectId = React.useMemo(() => {
     for (const p of projects) {
@@ -306,10 +334,19 @@ export function App() {
         status: string;
       }>;
       if (cancelled) return;
-      setProjectFiles((prev) => ({
-        ...prev,
-        [activeProjectId]: rows.map(rowToFileItem),
-      }));
+      // Preserve any in-flight upload placeholders so a GET that resolves
+      // while a POST is still pending doesn't wipe the row the user just
+      // dropped (e.g. clicking "Dateien hinzufügen" opens the modal AND
+      // starts the upload — both fire requests; whichever lands first must
+      // not stomp the other).
+      setProjectFiles((prev) => {
+        const current = prev[activeProjectId] || [];
+        const inFlight = current.filter((f) => f.id.startsWith("uploading-"));
+        return {
+          ...prev,
+          [activeProjectId]: [...inFlight, ...rows.map(rowToFileItem)],
+        };
+      });
     })();
     return () => {
       cancelled = true;
@@ -827,8 +864,19 @@ export function App() {
     setStreaming(false);
   };
 
-  if (!authReady) return null;
+  const splash = (
+    <div className="flex h-screen w-screen items-center justify-center bg-bg">
+      <div className="font-display text-[56px] font-extrabold tracking-[-0.04em] text-text">
+        EAG <span className="text-accent">LLM</span>
+      </div>
+    </div>
+  );
+  // Hold on the splash until everything the shell needs is in hand. Covers
+  // pre-auth (where returning null would briefly expose the previous DOM),
+  // and the projects+messages waterfall after sign-in.
+  if (!authReady) return splash;
   if (!session) return <LoginScreen />;
+  if (!shellReady) return splash;
 
   return (
     <div className="flex h-screen w-screen bg-bg">
