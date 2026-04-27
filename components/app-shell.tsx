@@ -9,12 +9,14 @@ import { Composer, EmptyState, Message } from "./chat";
 
 const LAST_CHAT_KEY = "sleek-rag.last-chat-id";
 import { ProjectFilesModal } from "./project-files-modal";
+import { PdfViewerDialog } from "./pdf-viewer-dialog";
 import { TemplateAnalysisModal, loadTemplate, parseTemplate } from "./template-modal";
 import {
   ACCEPT_ATTR,
   filterAllowedFiles,
   inferFileType,
   mockAnalysis,
+  type Citation,
   type FileItem,
   type Message as Msg,
   type Project,
@@ -100,6 +102,7 @@ export function App() {
   }>(null);
   const [showFiles, setShowFiles] = React.useState({ open: false, autoPicker: false });
   const [showTemplate, setShowTemplate] = React.useState(false);
+  const [viewerCitation, setViewerCitation] = React.useState<Citation | null>(null);
   const [chatDragOver, setChatDragOver] = React.useState(false);
   const [toasts, setToasts] = React.useState<Toast[]>([]);
   // chatId of the chat that's currently in "post-send" mode (extra bottom
@@ -1276,6 +1279,7 @@ export function App() {
                     key={i}
                     msg={m}
                     streaming={streaming && i === messages.length - 1 && m.role === "assistant"}
+                    onCiteClick={setViewerCitation}
                   />
                 ))}
               </div>
@@ -1357,6 +1361,19 @@ export function App() {
               ? (files) => uploadProjectFiles(activeChat.projectId, files)
               : undefined
           }
+          onPreview={(file) =>
+            setViewerCitation({
+              chunk_id: `preview-${file.id}`,
+              file_id: file.id,
+              filename: file.name,
+              page_start: 1,
+              page_end: 1,
+              snippet: "",
+              figure_label: null,
+              image_path: null,
+              score: 0,
+            })
+          }
         />
       )}
 
@@ -1364,6 +1381,11 @@ export function App() {
         open={showTemplate}
         onClose={() => setShowTemplate(false)}
         onSaved={() => pushToast("Vorlage gespeichert.", "success")}
+      />
+
+      <PdfViewerDialog
+        citation={viewerCitation}
+        onClose={() => setViewerCitation(null)}
       />
 
       {chatDragOver && (

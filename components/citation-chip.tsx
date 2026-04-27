@@ -1,0 +1,44 @@
+"use client";
+import { Icon } from "./icons";
+import type { Citation } from "./fixtures";
+
+export function CitationChip({
+  citation,
+  index,
+  onClick,
+}: {
+  citation: Citation;
+  index: number;
+  onClick: () => void;
+}) {
+  const isFigure = !!citation.figure_label;
+  const pageLabel =
+    citation.page_start === citation.page_end
+      ? `p.${citation.page_start}`
+      : `p.${citation.page_start}-${citation.page_end}`;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={citation.snippet}
+      className={
+        "inline-flex items-center gap-1 px-2 h-6 rounded-full text-[11px] font-medium " +
+        "bg-bg-input border border-border text-text-secondary cursor-pointer " +
+        "transition-[background-color,color,border-color] duration-150 " +
+        "hover:bg-bg-hover hover:text-text hover:border-border-strong " +
+        "[&_svg]:w-3 [&_svg]:h-3 [&_svg]:flex-shrink-0 [&_svg]:text-text-tertiary " +
+        "hover:[&_svg]:text-text-secondary"
+      }
+    >
+      {isFigure ? <Icon.FileImage /> : <Icon.FileText />}
+      <span className="font-mono tabular-nums">[{index}]</span>
+      <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">
+        {citation.filename}
+      </span>
+      <span className="text-text-tertiary">{pageLabel}</span>
+      {citation.figure_label && (
+        <span className="text-text-tertiary">· {citation.figure_label}</span>
+      )}
+    </button>
+  );
+}

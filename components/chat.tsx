@@ -3,7 +3,9 @@ import * as React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Icon } from "./icons";
-import type { Message as Msg } from "./fixtures";
+import type { Citation, Message as Msg } from "./fixtures";
+import { CitationChip } from "./citation-chip";
+import { createClient } from "@/lib/supabase/client";
 
 const MD_PROSE =
   "text-[14.5px] leading-[1.65] text-text break-words " +
@@ -29,7 +31,65 @@ const SUGGESTIONS = [
   { title: "Projektanalyse v2 erstellen", desc: "Volltext-Analyse — Dokumente komplett im Modell-Kontext" },
 ];
 
-export function Message({ msg, streaming }: { msg: Msg; streaming: boolean }) {
+function FigureThumb({
+  citation,
+  onOpen,
+}: {
+  citation: Citation;
+  onOpen: () => void;
+}) {
+  const [url, setUrl] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    if (!citation.image_path) return;
+    let cancelled = false;
+    const supabase = createClient();
+    supabase.storage
+      .from("chunk-images")
+      .createSignedUrl(citation.image_path, 600)
+      .then(({ data }) => {
+        if (cancelled) return;
+        setUrl(data?.signedUrl ?? null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [citation.image_path]);
+  if (!url) return null;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="block mt-3 rounded-[10px] overflow-hidden border border-border bg-bg-elevated cursor-pointer transition-[border-color,box-shadow] duration-150 hover:border-border-strong hover:shadow-[0_0_0_3px_color-mix(in_oklch,var(--accent)_18%,transparent)]"
+    >
+      <img
+        src={url}
+        alt={citation.figure_label ?? "Figure"}
+        className="block max-w-md max-h-80 object-contain bg-[#1a1a1a]"
+      />
+      <div className="text-[11px] text-text-tertiary px-2 py-1.5 text-left border-t border-border">
+        {citation.figure_label ?? "Figure"} · {citation.filename} p.{citation.page_start}
+      </div>
+    </button>
+  );
+}
+
+function linkifyCitations(text: string, citations: Citation[]): string {
+  return text.replace(/\[(\d+)\]/g, (m, n) => {
+    const idx = parseInt(n, 10) - 1;
+    if (idx < 0 || idx >= citations.length) return m;
+    return `[${m}](#cite-${idx})`;
+  });
+}
+
+export function Message({
+  msg,
+  streaming,
+  onCiteClick,
+}: {
+  msg: Msg;
+  streaming: boolean;
+  onCiteClick?: (c: Citation) => void;
+}) {
   const isUser = msg.role === "user";
   if (isUser) {
     return (
@@ -40,11 +100,82 @@ export function Message({ msg, streaming }: { msg: Msg; streaming: boolean }) {
       </div>
     );
   }
+  const citations = msg.citations ?? [];
+  const renderedContent = citations.length
+    ? linkifyCitations(msg.content, citations)
+    : msg.content;
+  // De-dup figure thumbs by image_path (LLM often cites the same figure
+  // multiple times). Cap at 3 so a chunky retrieval set doesn't blow up the
+  // message height.
+  const figureCitations: Citation[] = [];
+  const seenImage = new Set<string>();
+  for (const c of citations) {
+    if (!c.image_path || seenImage.has(c.image_path)) continue;
+    seenImage.add(c.image_path);
+    figureCitations.push(c);
+    if (figureCitations.length >= 3) break;
+  }
   return (
     <div className="group flex flex-col items-stretch">
       <div className={MD_PROSE}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            a: ({ href, children, ...rest }) => {
+              const m = href?.match(/^#cite-(\d+)$/);
+              if (m) {
+                const idx = parseInt(m[1], 10);
+                const c = citations[idx];
+                if (c) {
+                  return (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        onCiteClick?.(c);
+                      }}
+                      title={c.snippet}
+                      className="font-mono tabular-nums text-[12px] text-accent hover:text-accent-hover underline underline-offset-2 align-baseline px-px"
+                    >
+                      {children}
+                    </button>
+                  );
+                }
+              }
+              return (
+                <a href={href} target="_blank" rel="noreferrer" {...rest}>
+                  {children}
+                </a>
+              );
+            },
+          }}
+        >
+          {renderedContent}
+        </ReactMarkdown>
       </div>
+      {figureCitations.length > 0 && (
+        <div className="flex flex-wrap gap-3">
+          {figureCitations.map((c) => (
+            <FigureThumb
+              key={c.chunk_id}
+              citation={c}
+              onOpen={() => onCiteClick?.(c)}
+            />
+          ))}
+        </div>
+      )}
+      {citations.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-3">
+          {citations.map((c, i) => (
+            <CitationChip
+              key={`${c.chunk_id}-${i}`}
+              citation={c}
+              index={i + 1}
+              onClick={() => onCiteClick?.(c)}
+            />
+          ))}
+        </div>
+      )}
       {!streaming && (
         <div className="flex gap-1 mt-2.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
           <button className="bg-transparent border border-transparent rounded-md px-2 py-1 text-text-tertiary text-[11px] inline-flex items-center gap-[5px] transition-[background-color,color,border-color] duration-150 hover:bg-bg-hover hover:text-text hover:border-border">

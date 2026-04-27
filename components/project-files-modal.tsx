@@ -51,6 +51,7 @@ export function ProjectFilesModal({
   onAnalysisComplete,
   notify,
   onUpload,
+  onPreview,
 }: {
   projectName: string;
   onClose: () => void;
@@ -60,6 +61,7 @@ export function ProjectFilesModal({
   onAnalysisComplete?: () => void;
   notify?: (msg: string, kind?: string) => void;
   onUpload?: (files: File[]) => Promise<void> | void;
+  onPreview?: (file: FileItem) => void;
 }) {
   const [internalFiles, setInternalFiles] = React.useState<FileItem[]>(
     externalFiles || []
@@ -303,8 +305,22 @@ export function ProjectFilesModal({
                     <div className="text-xs text-text-tertiary mt-0.5">
                       {FILE_TYPE[selected.type].label} · {selected.size} · {selected.pages}{" "}
                       {selected.pages === 1 ? "Seite" : "Seiten"}
+                      {selected.chunkCount != null && (
+                        <> · {selected.chunkCount} {selected.chunkCount === 1 ? "Chunk" : "Chunks"}</>
+                      )}
                     </div>
                   </div>
+                  {onPreview && selected.type === "pdf" && (
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-bg-input border border-border text-text-secondary text-[11.5px] font-medium cursor-pointer transition-[background-color,color,border-color] duration-150 hover:bg-bg-hover hover:text-text hover:border-border-strong [&_svg]:w-3 [&_svg]:h-3"
+                      onClick={() => onPreview(selected)}
+                      title="PDF öffnen"
+                    >
+                      <Icon.FileText />
+                      Vorschau
+                    </button>
+                  )}
                   <span className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-[rgba(16,185,129,.12)] text-[#6ee7b7] text-[11px] font-medium flex-shrink-0">
                     <span className="w-1.5 h-1.5 rounded-full bg-[#10b981]" />
                     Analysiert
