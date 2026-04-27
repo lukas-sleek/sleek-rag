@@ -9,7 +9,7 @@ import { Composer, EmptyState, Message } from "./chat";
 
 const LAST_CHAT_KEY = "sleek-rag.last-chat-id";
 import { ProjectFilesModal } from "./project-files-modal";
-import { TemplateAnalysisModal } from "./template-modal";
+import { TemplateAnalysisModal, loadTemplate, parseTemplate } from "./template-modal";
 import {
   ACCEPT_ATTR,
   filterAllowedFiles,
@@ -168,31 +168,41 @@ export function App() {
 
   React.useEffect(() => {
     if (!session) return;
-    let cancelled = false;
+    const ctrl = new AbortController();
     (async () => {
-      const res = await api("/api/projects");
-      if (!res.ok) {
+      let res: Response;
+      try {
+        res = await api("/api/projects", { signal: ctrl.signal });
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
         pushToast("Projekte konnten nicht geladen werden.", "warn");
-        if (!cancelled) setProjectsLoaded(true);
+        setProjectsLoaded(true);
         return;
       }
-      const rows: { id: string; name: string; chats: { id: string; title: string }[] }[] =
-        await res.json();
-      if (cancelled) return;
+      if (!res.ok) {
+        pushToast("Projekte konnten nicht geladen werden.", "warn");
+        setProjectsLoaded(true);
+        return;
+      }
+      const rows: {
+        id: string;
+        name: string;
+        has_files: boolean;
+        chats: { id: string; title: string }[];
+      }[] = await res.json();
+      if (ctrl.signal.aborted) return;
       setProjects(
         rows.map((r) => ({
           id: r.id,
           name: r.name,
           expanded: true,
-          hasFiles: false,
+          hasFiles: r.has_files,
           chats: r.chats ?? [],
         })),
       );
       setProjectsLoaded(true);
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => ctrl.abort();
   }, [session, pushToast]);
 
   // URL → state. Runs on initial mount with /c/{id}, on browser back/forward,
@@ -241,19 +251,30 @@ export function App() {
     if (activeChatId === "__empty__") return;
     if (loadedThreadsRef.current.has(activeChatId)) return;
     loadedThreadsRef.current.add(activeChatId);
-    let cancelled = false;
+    const ctrl = new AbortController();
     (async () => {
-      const res = await api(`/api/chats/${activeChatId}/messages`);
+      let res: Response;
+      try {
+        res = await api(`/api/chats/${activeChatId}/messages`, { signal: ctrl.signal });
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          loadedThreadsRef.current.delete(activeChatId);
+        }
+        return;
+      }
       if (!res.ok) {
         loadedThreadsRef.current.delete(activeChatId);
         return;
       }
       const msgs: Msg[] = await res.json();
-      if (cancelled) return;
+      if (ctrl.signal.aborted) return;
       setThreads((prev) => ({ ...prev, [activeChatId]: msgs }));
     })();
     return () => {
-      cancelled = true;
+      // On strict-mode remount, drop the dedup entry too so the second
+      // mount re-issues the fetch (the first one is now aborted).
+      ctrl.abort();
+      loadedThreadsRef.current.delete(activeChatId);
     };
   }, [session, activeChatId]);
 
@@ -680,7 +701,10 @@ export function App() {
       const res = await api(`/api/chats/${chatId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({
+          text,
+          projektanalyse_template: parseTemplate(loadTemplate()),
+        }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
@@ -701,13 +725,33 @@ export function App() {
           const data = line.slice(6);
           if (data === "[DONE]") break outer;
           try {
-            const { delta } = JSON.parse(data) as { delta: string };
-            setThreads((prev) => {
-              const arr = [...(prev[chatId] || [])];
-              const last = arr[arr.length - 1];
-              arr[arr.length - 1] = { role: "assistant", content: (last?.content ?? "") + delta };
-              return { ...prev, [chatId]: arr };
-            });
+            const payload = JSON.parse(data) as {
+              delta?: string;
+              progress?: { done: number; total: number; question?: string };
+            };
+            if (payload.progress) {
+              const { done, total, question } = payload.progress;
+              const tail = question ? ` — zuletzt: ${question.slice(0, 80)}` : "";
+              setThreads((prev) => {
+                const arr = [...(prev[chatId] || [])];
+                arr[arr.length - 1] = {
+                  role: "assistant",
+                  content: `_Projektanalyse läuft… ${done}/${total}${tail}_`,
+                };
+                return { ...prev, [chatId]: arr };
+              });
+            } else if (payload.delta !== undefined) {
+              setThreads((prev) => {
+                const arr = [...(prev[chatId] || [])];
+                const last = arr[arr.length - 1];
+                const isProgressPlaceholder = last?.content?.startsWith("_Projektanalyse läuft");
+                arr[arr.length - 1] = {
+                  role: "assistant",
+                  content: isProgressPlaceholder ? payload.delta! : (last?.content ?? "") + payload.delta!,
+                };
+                return { ...prev, [chatId]: arr };
+              });
+            }
           } catch {
             /* ignore malformed line */
           }
@@ -725,18 +769,55 @@ export function App() {
     const proj = projects.find((p) => p.chats.some((c) => c.id === chatId));
     const chat = proj?.chats.find((c) => c.id === chatId);
     if (chat && (chat.title === "Neuer Chat" || chat.title === "New chat")) {
-      const newTitle = text.slice(0, 40);
+      // Clear the title so the streamed tokens are the only thing shown.
       setProjects((prev) =>
         prev.map((p) => ({
           ...p,
-          chats: p.chats.map((c) => (c.id === chatId ? { ...c, title: newTitle } : c)),
+          chats: p.chats.map((c) => (c.id === chatId ? { ...c, title: "" } : c)),
         })),
       );
-      api(`/api/chats/${chatId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: newTitle }),
-      }).catch(() => {/* best-effort */});
+      try {
+        const res = await api(`/api/chats/${chatId}/title`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ first_message: text }),
+        });
+        if (res.ok && res.body) {
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let acc = "";
+          outer: while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              const data = line.slice(6);
+              if (data === "[DONE]") break outer;
+              try {
+                const { delta } = JSON.parse(data) as { delta?: string };
+                if (!delta) continue;
+                acc += delta;
+                setProjects((prev) =>
+                  prev.map((p) => ({
+                    ...p,
+                    chats: p.chats.map((c) =>
+                      c.id === chatId ? { ...c, title: acc } : c,
+                    ),
+                  })),
+                );
+              } catch {
+                /* ignore malformed line */
+              }
+            }
+          }
+        }
+      } catch {
+        /* best-effort title generation; leave whatever's accumulated */
+      }
     }
   };
 

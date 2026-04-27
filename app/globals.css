@@ -217,13 +217,6 @@ input, textarea { font-family: inherit; }
 }
 .chat-item:hover { background: var(--bg-hover); color: var(--text); }
 .chat-item.active { background: var(--bg-active); color: var(--text); }
-.chat-item .dot {
-  width: 4px; height: 4px;
-  border-radius: 999px;
-  background: var(--text-tertiary);
-  flex-shrink: 0;
-}
-.chat-item.active .dot { background: var(--accent); }
 .chat-item .label {
   flex: 1;
   overflow: hidden;
@@ -238,7 +231,9 @@ input, textarea { font-family: inherit; }
   align-items: center;
   border-radius: var(--radius-sm);
 }
-.chat-item-wrap .chat-item { padding-right: 28px; }
+.chat-item-wrap .chat-item { padding-right: 10px; }
+.chat-item-wrap:hover .chat-item,
+.chat-item-wrap:has(.chat-more.open) .chat-item { padding-right: 28px; }
 .chat-more {
   position: absolute;
   right: 4px;
@@ -255,8 +250,8 @@ input, textarea { font-family: inherit; }
   transition: opacity .12s, background .12s, color .12s;
 }
 .chat-item-wrap:hover .chat-more,
-.chat-item-wrap.active .chat-more,
-.chat-more.open { opacity: 1; }
+.chat-more.open { opacity: 1 !important; }
+.chat-item-wrap:not(:hover) .chat-more:not(.open) { opacity: 0 !important; }
 .chat-more:hover { background: var(--bg-hover); color: var(--text); }
 .chat-more.open { background: var(--bg-hover); color: var(--text); }
 

@@ -22,13 +22,20 @@ const DEFAULT_TEMPLATE_TEXT = DEFAULT_TEMPLATE_QUESTIONS
 
 const TEMPLATE_STORAGE_KEY = "eag-llm.projektanalyse-template";
 
-function loadTemplate(): string {
+export function loadTemplate(): string {
   if (typeof window === "undefined") return DEFAULT_TEMPLATE_TEXT;
   try {
     const v = localStorage.getItem(TEMPLATE_STORAGE_KEY);
     if (v && v.trim()) return v;
   } catch {}
   return DEFAULT_TEMPLATE_TEXT;
+}
+
+export function parseTemplate(text: string): string[] {
+  return text
+    .split("\n")
+    .map((l) => l.replace(/^\s*\d+[.)]\s*/, "").trim())
+    .filter(Boolean);
 }
 
 function saveTemplate(text: string) {

@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
+from langsmith import traceable
 from pydantic import BaseModel
 
 from app.auth import current_user_id
 from app.db import supabase
-from app.openai_client import openai_client
+from app.openai_client import vs_create, vs_delete
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -29,6 +30,7 @@ class ProjectOut(BaseModel):
 
 
 @router.get("", response_model=list[ProjectOut])
+@traceable(run_type="chain", name="projects.list")
 def list_projects(user_id: str = Depends(current_user_id)):
     proj_res = (
         supabase()
@@ -73,9 +75,10 @@ def list_projects(user_id: str = Depends(current_user_id)):
 
 
 @router.post("", response_model=ProjectOut)
+@traceable(run_type="chain", name="projects.create")
 def create_project(body: ProjectIn, user_id: str = Depends(current_user_id)):
     try:
-        vs = openai_client().vector_stores.create(name=body.name)
+        vs_id = vs_create(name=body.name)
     except Exception as exc:
         raise HTTPException(502, f"vector store create failed: {exc}") from exc
     res = (
@@ -85,7 +88,7 @@ def create_project(body: ProjectIn, user_id: str = Depends(current_user_id)):
             {
                 "user_id": user_id,
                 "name": body.name,
-                "openai_vector_store_id": vs.id,
+                "openai_vector_store_id": vs_id,
             }
         )
         .execute()
@@ -95,6 +98,7 @@ def create_project(body: ProjectIn, user_id: str = Depends(current_user_id)):
 
 
 @router.patch("/{project_id}", response_model=ProjectOut)
+@traceable(run_type="chain", name="projects.rename")
 def rename_project(
     project_id: str, body: ProjectPatch, user_id: str = Depends(current_user_id)
 ):
@@ -113,6 +117,7 @@ def rename_project(
 
 
 @router.delete("/{project_id}")
+@traceable(run_type="chain", name="projects.delete")
 def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
     existing = (
         supabase()
@@ -138,7 +143,7 @@ def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
         raise HTTPException(404, "not found")
     if vs_id:
         try:
-            openai_client().vector_stores.delete(vs_id)
+            vs_delete(vs_id)
         except Exception:
             pass
     return {"deleted": project_id}

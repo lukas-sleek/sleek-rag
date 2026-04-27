@@ -137,7 +137,6 @@ function ChatItem({
         className={"chat-item" + (active ? " active" : "")}
         onClick={() => !editing && onSelect()}
       >
-        <span className="dot" />
         {editing ? (
           <input
             ref={inputRef}
@@ -152,7 +151,7 @@ function ChatItem({
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          <span className="label">{chat.title}</span>
+          <span className="label">{chat.title || "​"}</span>
         )}
       </button>
       {!editing && (

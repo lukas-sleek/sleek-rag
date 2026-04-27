@@ -1,7 +1,28 @@
 "use client";
 import * as React from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Icon } from "./icons";
 import type { Message as Msg } from "./fixtures";
+
+const MD_PROSE =
+  "text-[14.5px] leading-[1.65] text-text break-words " +
+  "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0 " +
+  "[&_h1]:font-display [&_h1]:text-[22px] [&_h1]:font-semibold [&_h1]:tracking-[-0.02em] [&_h1]:mt-6 [&_h1]:mb-3 " +
+  "[&_h2]:font-display [&_h2]:text-[17px] [&_h2]:font-semibold [&_h2]:tracking-[-0.01em] [&_h2]:mt-5 [&_h2]:mb-2 " +
+  "[&_h3]:text-[15px] [&_h3]:font-semibold [&_h3]:mt-4 [&_h3]:mb-1.5 " +
+  "[&_p]:my-2 [&_p:empty]:hidden " +
+  "[&_ul]:my-2 [&_ul]:pl-5 [&_ul]:list-disc [&_ol]:my-2 [&_ol]:pl-5 [&_ol]:list-decimal " +
+  "[&_li]:my-0.5 [&_li>p]:my-0 " +
+  "[&_strong]:font-semibold [&_em]:italic " +
+  "[&_a]:text-accent [&_a]:underline [&_a]:underline-offset-2 hover:[&_a]:text-accent-hover " +
+  "[&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-text-secondary [&_blockquote]:my-2 " +
+  "[&_hr]:my-4 [&_hr]:border-border " +
+  "[&_code]:font-mono [&_code]:text-[13px] [&_code]:bg-bg-input [&_code]:border [&_code]:border-border [&_code]:px-1.5 [&_code]:py-px [&_code]:rounded-[4px] " +
+  "[&_pre]:bg-bg-input [&_pre]:border [&_pre]:border-border [&_pre]:rounded-md [&_pre]:p-3 [&_pre]:overflow-x-auto [&_pre]:my-3 [&_pre_code]:bg-transparent [&_pre_code]:border-0 [&_pre_code]:p-0 " +
+  "[&_table]:border-collapse [&_table]:my-3 [&_table]:text-[13.5px] " +
+  "[&_th]:border [&_th]:border-border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-semibold [&_th]:bg-bg-input " +
+  "[&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_td]:align-top";
 
 const SUGGESTIONS = [
   { title: "Projektanalyse erstellen", desc: "Strukturierte Auswertung über alle Dokumente im aktiven Projekt" },
@@ -21,8 +42,8 @@ export function Message({ msg, streaming }: { msg: Msg; streaming: boolean }) {
   }
   return (
     <div className="group flex flex-col items-stretch">
-      <div className="text-[14.5px] leading-[1.65] text-text whitespace-pre-wrap break-words [&_code]:font-mono [&_code]:text-[13px] [&_code]:bg-bg-input [&_code]:border [&_code]:border-border [&_code]:px-1.5 [&_code]:py-px [&_code]:rounded-[4px]">
-        {msg.content}
+      <div className={MD_PROSE}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
       </div>
       {!streaming && (
         <div className="flex gap-1 mt-2.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
