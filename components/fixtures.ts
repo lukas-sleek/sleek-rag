@@ -33,7 +33,24 @@ export const PROJECTS_INITIAL: Project[] = [
   },
 ];
 
-export type Message = { role: "user" | "assistant"; content: string };
+export type Citation = {
+  chunk_id: string;
+  file_id: string;
+  filename: string;
+  page_start: number;
+  page_end: number;
+  snippet: string;
+  figure_label: string | null;
+  image_path: string | null;
+  score: number;
+};
+
+export type Message = {
+  role: "user" | "assistant";
+  content: string;
+  id?: string;
+  citations?: Citation[] | null;
+};
 
 export const SAMPLE_THREAD: Record<string, Message[]> = {
   "c-b1": [

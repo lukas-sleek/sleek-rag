@@ -7,8 +7,9 @@ from langsmith import traceable
 from pydantic import BaseModel
 
 from app.auth import current_user_id
+from app.config import settings
 from app.db import supabase
-from app.openai_client import conversation_create, openai_client
+from app.gemini_client import gemini_client
 from app.projektanalyse import (
     PROJEKTANALYSE_INSTRUCTIONS,
     PROJEKTANALYSE_TOOL,
@@ -16,6 +17,8 @@ from app.projektanalyse import (
     stream_projektanalyse,
     stream_projektanalyse_v2,
 )
+from app.prompt import build_messages
+from app.retrieval import retrieve
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
@@ -47,6 +50,7 @@ class TitleIn(BaseModel):
 class MessageOut(BaseModel):
     role: str
     content: str
+    citations: list[dict] | None = None
 
 
 @traceable(run_type="tool", name="db.load_chat")
@@ -127,35 +131,28 @@ def delete_chat(chat_id: str, user_id: str = Depends(current_user_id)):
 @router.get("/{chat_id}/messages", response_model=list[MessageOut])
 @traceable(run_type="chain", name="chats.list_messages")
 def list_messages(chat_id: str, user_id: str = Depends(current_user_id)):
-    chat = _load_chat(chat_id, user_id)
-    if not chat["openai_thread_id"]:
-        return []
-    items = openai_client().conversations.items.list(
-        conversation_id=chat["openai_thread_id"]
+    _load_chat(chat_id, user_id)
+    res = (
+        supabase()
+        .table("chat_messages")
+        .select("role,content,citations")
+        .eq("chat_id", chat_id)
+        .eq("user_id", user_id)
+        .order("created_at")
+        .execute()
     )
-    out: list[MessageOut] = []
-    # OpenAI returns most-recent-first; reverse to chronological for display.
-    for item in reversed(list(items)):
-        if getattr(item, "type", None) != "message":
-            continue
-        role = getattr(item, "role", None)
-        content_parts = []
-        for piece in getattr(item, "content", []) or []:
-            text = getattr(piece, "text", None)
-            if isinstance(text, str):
-                content_parts.append(text)
-            elif text is not None:
-                content_parts.append(getattr(text, "value", "") or "")
-        if role and content_parts:
-            out.append(MessageOut(role=role, content="".join(content_parts)))
-    return out
+    return [
+        MessageOut(
+            role=r["role"], content=r["content"], citations=r.get("citations")
+        )
+        for r in (res.data or [])
+    ]
 
 
-def _detect_projektanalyse_call(item) -> str | None:
+def _detect_projektanalyse_call(tool_call) -> str | None:
     """Returns 'v1', 'v2', or None depending on which tool the model called."""
-    if getattr(item, "type", None) != "function_call":
-        return None
-    name = getattr(item, "name", None)
+    fn = getattr(tool_call, "function", None)
+    name = getattr(fn, "name", None) if fn else None
     if name == "run_projektanalyse":
         return "v1"
     if name == "run_projektanalyse_v2":
@@ -172,102 +169,151 @@ async def _send_message_stream(
     user_id: str,
     template: list[str] | None,
 ):
-    """Top-level run for a chat turn. Setup ops (conversation_create, project
-    lookup) and the responses.create LLM call all become children of this run.
+    """Top-level run for a chat turn.
 
-    If the model calls the run_projektanalyse tool we close the live stream
-    and hand off to the parallel batch handler in app.projektanalyse, which
-    emits its own progress + final-report SSE events."""
-    if not chat["openai_thread_id"]:
-        conv_id = await asyncio.to_thread(conversation_create)
-        await asyncio.to_thread(
-            lambda: supabase()
-            .table("chats")
-            .update({"openai_thread_id": conv_id})
-            .eq("id", chat_id)
-            .execute()
-        )
-        chat["openai_thread_id"] = conv_id
+    Persists the user message, retrieves chunks from document_chunks, calls
+    Gemini with tools attached, streams deltas and a citations meta frame.
+    Hands off to projektanalyse v1/v2 if the model triggers a tool."""
 
-    project = await asyncio.to_thread(
+    # 1. Persist user message.
+    user_msg = await asyncio.to_thread(
         lambda: supabase()
-        .table("projects")
-        .select("openai_vector_store_id")
-        .eq("id", chat["project_id"])
-        .single()
-        .execute()
-        .data
-    )
-    vector_store_id = (project or {}).get("openai_vector_store_id")
-
-    tools: list[dict] = [PROJEKTANALYSE_TOOL, PROJEKTANALYSE_V2_TOOL]
-    if vector_store_id:
-        tools.append(
+        .table("chat_messages")
+        .insert(
             {
-                "type": "file_search",
-                "vector_store_ids": [vector_store_id],
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "role": "user",
+                "content": text,
             }
         )
-
-    kwargs = dict(
-        model="gpt-4o-mini",
-        input=[{"role": "user", "content": text}],
-        conversation=chat["openai_thread_id"],
-        stream=True,
-        tools=tools,
-        instructions=PROJEKTANALYSE_INSTRUCTIONS,
+        .execute()
+        .data[0]
     )
-    if vector_store_id:
-        # Surface chunk content + scores in the response payload so they
-        # appear in LangSmith traces. Without this only the file_search_call
-        # queries/status are returned.
-        kwargs["include"] = ["file_search_call.results"]
 
-    stream = await asyncio.to_thread(openai_client().responses.create, **kwargs)
+    # 2. Load history (last 20 messages, excluding the just-inserted user message).
+    history_rows = await asyncio.to_thread(
+        lambda: (
+            supabase()
+            .table("chat_messages")
+            .select("role,content,created_at")
+            .eq("chat_id", chat_id)
+            .eq("user_id", user_id)
+            .neq("id", user_msg["id"])
+            .order("created_at", desc=True)
+            .limit(20)
+            .execute()
+            .data
+            or []
+        )
+    )
+    history = [
+        {"role": r["role"], "content": r["content"]}
+        for r in reversed(history_rows)
+        if r["role"] in ("user", "assistant")
+    ]
+
+    # 3. Retrieve chunks.
+    project_id = chat["project_id"]
+    chunks = await asyncio.to_thread(
+        retrieve, query=text, project_id=project_id, user_id=user_id, top_k=8
+    )
+    citations = [c.to_citation() for c in chunks]
+
+    # 4. Emit meta frame with citations up-front.
+    yield f"data: {json.dumps({'type': 'meta', 'citations': citations})}\n\n"
+
+    # 5. Build messages and call Gemini.
+    messages = build_messages(
+        query=text,
+        history=history,
+        chunks=chunks,
+        system_prompt=PROJEKTANALYSE_INSTRUCTIONS,
+    )
+    tools: list[dict] = [PROJEKTANALYSE_TOOL, PROJEKTANALYSE_V2_TOOL]
+
+    stream = await asyncio.to_thread(
+        lambda: gemini_client().chat.completions.create(
+            model=settings.gemini_chat_model,
+            messages=messages,
+            tools=tools,
+            stream=True,
+        )
+    )
+
+    parts: list[str] = []
     triggered: str | None = None
+    pending_tool_calls: dict[int, dict] = {}
+
     try:
         for event in stream:
-            etype = getattr(event, "type", None)
-            if etype == "response.output_text.delta":
-                yield f"data: {json.dumps({'delta': event.delta})}\n\n"
-            elif etype == "response.output_item.done":
-                kind = _detect_projektanalyse_call(getattr(event, "item", None))
-                if kind:
-                    triggered = kind
+            if not event.choices:
+                continue
+            choice = event.choices[0]
+            delta = choice.delta
+            if getattr(delta, "content", None):
+                parts.append(delta.content)
+                yield f"data: {json.dumps({'type': 'delta', 'content': delta.content})}\n\n"
+            tool_calls = getattr(delta, "tool_calls", None) or []
+            for tc in tool_calls:
+                idx = getattr(tc, "index", 0) or 0
+                slot = pending_tool_calls.setdefault(idx, {"name": None})
+                fn = getattr(tc, "function", None)
+                if fn and getattr(fn, "name", None):
+                    slot["name"] = fn.name
+            if pending_tool_calls:
+                for slot in pending_tool_calls.values():
+                    name = slot.get("name")
+                    if name == "run_projektanalyse":
+                        triggered = "v1"
+                        break
+                    if name == "run_projektanalyse_v2":
+                        triggered = "v2"
+                        break
+                if triggered:
                     break
     finally:
-        await asyncio.to_thread(stream.close)
+        try:
+            await asyncio.to_thread(stream.close)
+        except Exception:
+            pass
 
+    # 6. Hand off to projektanalyse if triggered (handles its own persistence
+    #    + done frame). Otherwise persist assistant message and emit done.
     if triggered == "v1":
         async for sse in stream_projektanalyse(
-            template=template,
-            vector_store_id=vector_store_id,
-            conversation_id=chat["openai_thread_id"],
+            template=template, chat_id=chat_id, user_id=user_id
         ):
             yield sse
         return
 
     if triggered == "v2":
-        file_rows = await asyncio.to_thread(
-            lambda: supabase()
-            .table("project_files")
-            .select("openai_file_id,status")
-            .eq("project_id", chat["project_id"])
-            .eq("user_id", user_id)
-            .eq("status", "indexed")
-            .execute()
-            .data
-        )
-        file_ids = [r["openai_file_id"] for r in (file_rows or []) if r.get("openai_file_id")]
         async for sse in stream_projektanalyse_v2(
-            template=template,
-            file_ids=file_ids,
-            conversation_id=chat["openai_thread_id"],
+            template=template, chat_id=chat_id, user_id=user_id
         ):
             yield sse
         return
 
-    yield "data: [DONE]\n\n"
+    assistant_text = "".join(parts).strip()
+    if assistant_text:
+        msg = await asyncio.to_thread(
+            lambda: supabase()
+            .table("chat_messages")
+            .insert(
+                {
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "role": "assistant",
+                    "content": assistant_text,
+                    "citations": citations,
+                }
+            )
+            .execute()
+            .data[0]
+        )
+        yield f"data: {json.dumps({'type': 'done', 'message_id': msg['id']})}\n\n"
+    else:
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
 
 @router.post("/{chat_id}/messages")
@@ -296,11 +342,14 @@ def _title_stream(*, first_message: str, chat_id: str, user_id: str):
     )
     parts: list[str] = []
     try:
-        stream = openai_client().responses.create(
-            model="gpt-4o-mini",
-            instructions=instructions,
-            input=first_message,
+        stream = gemini_client().chat.completions.create(
+            model=settings.gemini_chat_model,
+            messages=[
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": first_message},
+            ],
             stream=True,
+            extra_body={"reasoning_effort": "none"},
         )
     except Exception as exc:
         yield f"data: {json.dumps({'error': str(exc)})}\n\n"
@@ -308,11 +357,18 @@ def _title_stream(*, first_message: str, chat_id: str, user_id: str):
         return
     try:
         for event in stream:
-            if event.type == "response.output_text.delta":
-                parts.append(event.delta)
-                yield f"data: {json.dumps({'delta': event.delta})}\n\n"
+            if not event.choices:
+                continue
+            chunk = event.choices[0].delta
+            piece = getattr(chunk, "content", None)
+            if piece:
+                parts.append(piece)
+                yield f"data: {json.dumps({'delta': piece})}\n\n"
     finally:
-        stream.close()
+        try:
+            stream.close()
+        except Exception:
+            pass
 
     title = "".join(parts).strip().strip('"').strip("'").strip()
     if title:

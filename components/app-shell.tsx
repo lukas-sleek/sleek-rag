@@ -930,6 +930,10 @@ export function App() {
           if (data === "[DONE]") break outer;
           try {
             const payload = JSON.parse(data) as {
+              type?: "meta" | "delta" | "done";
+              content?: string;
+              citations?: import("./fixtures").Citation[];
+              message_id?: string;
               delta?: string;
               progress?: { done: number; total: number; question?: string };
             };
@@ -944,17 +948,75 @@ export function App() {
                 };
                 return { ...prev, [chatId]: arr };
               });
-            } else if (payload.delta !== undefined) {
-              setThreads((prev) => {
-                const arr = [...(prev[chatId] || [])];
-                const last = arr[arr.length - 1];
-                const isProgressPlaceholder = last?.content?.startsWith("_Projektanalyse läuft");
-                arr[arr.length - 1] = {
-                  role: "assistant",
-                  content: isProgressPlaceholder ? payload.delta! : (last?.content ?? "") + payload.delta!,
-                };
-                return { ...prev, [chatId]: arr };
-              });
+              continue;
+            }
+            switch (payload.type) {
+              case "meta": {
+                if (process.env.NODE_ENV !== "production") {
+                  // eslint-disable-next-line no-console
+                  console.debug("citations", payload.citations);
+                }
+                setThreads((prev) => {
+                  const arr = [...(prev[chatId] || [])];
+                  const last = arr[arr.length - 1];
+                  if (last?.role === "assistant") {
+                    arr[arr.length - 1] = { ...last, citations: payload.citations ?? [] };
+                  }
+                  return { ...prev, [chatId]: arr };
+                });
+                break;
+              }
+              case "delta": {
+                const piece = payload.content ?? "";
+                if (!piece) break;
+                setThreads((prev) => {
+                  const arr = [...(prev[chatId] || [])];
+                  const last = arr[arr.length - 1];
+                  const isProgressPlaceholder = last?.content?.startsWith(
+                    "_Projektanalyse läuft",
+                  );
+                  arr[arr.length - 1] = {
+                    ...last,
+                    role: "assistant",
+                    content: isProgressPlaceholder ? piece : (last?.content ?? "") + piece,
+                  };
+                  return { ...prev, [chatId]: arr };
+                });
+                break;
+              }
+              case "done": {
+                if (payload.message_id) {
+                  setThreads((prev) => {
+                    const arr = [...(prev[chatId] || [])];
+                    const last = arr[arr.length - 1];
+                    if (last?.role === "assistant") {
+                      arr[arr.length - 1] = { ...last, id: payload.message_id };
+                    }
+                    return { ...prev, [chatId]: arr };
+                  });
+                }
+                break;
+              }
+              default: {
+                // Backward-compat: legacy frames that just carry {delta: "..."}.
+                if (payload.delta !== undefined) {
+                  setThreads((prev) => {
+                    const arr = [...(prev[chatId] || [])];
+                    const last = arr[arr.length - 1];
+                    const isProgressPlaceholder = last?.content?.startsWith(
+                      "_Projektanalyse läuft",
+                    );
+                    arr[arr.length - 1] = {
+                      ...last,
+                      role: "assistant",
+                      content: isProgressPlaceholder
+                        ? payload.delta!
+                        : (last?.content ?? "") + payload.delta!,
+                    };
+                    return { ...prev, [chatId]: arr };
+                  });
+                }
+              }
             }
           } catch {
             /* ignore malformed line */
