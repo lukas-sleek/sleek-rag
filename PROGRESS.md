@@ -32,3 +32,34 @@ Track your progress through the masterclass. Update this file as you complete mo
 ### Next: Module 2 — BYO Retrieval + Memory
 
 The PRD's M1 → M2 architectural decision (PRD.md §"Module 1 → Module 2 Transition") commits to **Option A: Replace** — strip the Responses API + Vector Store managed-RAG path entirely and rebuild on the standard Chat Completions API with own ingestion (chunking → embeddings → pgvector → retrieval tool) plus client-side conversation history. M1's managed-RAG code is intentionally throwaway.
+
+---
+
+### Module 1.5 — Google Cloud RAG Migration (in progress)
+
+Driver: M1's OpenAI managed-RAG cannot return page-number citations or retrieve images of technical drawings. Rather than continuing to M2 with OpenAI, we replace it with a Google Cloud stack — Document AI Layout Parser (page spans + figure bytes natively) + Gemini 2.5 Flash via the OpenAI-compatible endpoint + self-hosted retrieval in Supabase pgvector.
+
+Branch: `feat/google-rag-migration`. Decision basis: `.agent/research/recommendation.md` (synthesized from `google-rag-research.md` + `codebase-map.md`).
+
+#### Manual GCP setup — completed 2026-04-28
+
+- [x] GCP project `sleek-rag` (number `1007445049099`) created, billing linked
+- [x] APIs enabled: Document AI, Generative Language, Cloud Storage, IAM Credentials
+- [x] Document AI Layout Parser processor `158602e037219e17` provisioned in `eu` multi-region
+- [x] Service account `sleek-rag-backend@sleek-rag.iam.gserviceaccount.com` created with `roles/documentai.apiUser` + `roles/storage.objectAdmin`; key file at `~/.config/sleek-rag/sleek-rag-b80deaaff5c7.json` (chmod 600, outside repo)
+- [x] Gemini API key provisioned via AI Studio, stored in `.env` as `GEMINI_API_KEY`. Smoke-tested with `GET /v1beta/openai/models` — returns Gemini model list
+- [x] GCS staging bucket `sleek-rag-staging` (`eu`) created
+- [x] Supabase Storage buckets `project-files` and `chunk-images` created with RLS policies (users read own folder)
+- [x] All env vars populated in `.env` (GCP_PROJECT_ID, DOCUMENTAI_*, GEMINI_*, GCS_STAGING_BUCKET)
+
+#### Phase plans
+
+- [x] Plan 10 — completed 2026-04-28. Schema migration `0002_google_rag.sql` applied to RAG project; Gemini + Document AI clients live; smoke tests pass.
+  - Deviation: gemini smoke test passes `extra_body={"reasoning_effort": "none"}` because gemini-2.5-flash spends thinking tokens that exceed the plan's `max_tokens=10` cap, returning `content=None` otherwise.
+  - Deviation: gemini embeddings smoke test passes `dimensions=settings.gemini_embedding_dim` because `gemini-embedding-001` defaults to 3072 dims; we pin to 768 to match the pgvector column.
+  - Deviation: initial Document AI processor (`158602e037219e17`) was provisioned as `CUSTOM_EXTRACTION_PROCESSOR`; replaced with a `LAYOUT_PARSER_PROCESSOR` (`d7fc4648a95684c0`) and `.env` updated. The service account also needed `roles/documentai.viewer` (in addition to `roles/documentai.apiUser`) for the validation `list_processors` call.
+- [ ] Plan 11 — `.agent/plans/11.document-ai-ingestion.md` — async ingestion worker, batch parsing, embedding, image extraction. 🔴 Complex.
+- [ ] Plan 12 — `.agent/plans/12.gemini-chat-with-citations.md` — chat endpoint rewrite with hybrid retrieval and multimodal input, history moves to Supabase. 🔴 Complex.
+- [ ] Plan 13 — `.agent/plans/13.citation-image-ui-and-cleanup.md` — citation chips, figure thumbnails, PDF viewer, OpenAI removal. ⚠️ Medium.
+
+**Status:** Manual GCP/Supabase setup complete. Ready to kick off plan 10 execution.

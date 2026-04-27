@@ -22,5 +22,19 @@ class Settings(BaseSettings):
     langsmith_project: str = "sleek-rag"
     langsmith_endpoint: str = ""
 
+    # --- Google Cloud ---
+    gcp_project_id: str = ""
+    gcp_service_account_json_path: str = ""  # absolute path to JSON
+    documentai_location: str = "eu"
+    documentai_processor_id: str = ""
+    gcs_staging_bucket: str = ""
+
+    # --- Gemini (OpenAI-compatible endpoint) ---
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    gemini_chat_model: str = "gemini-2.5-flash"
+    gemini_embedding_model: str = "gemini-embedding-001"
+    gemini_embedding_dim: int = 768
+
 
 settings = Settings()
