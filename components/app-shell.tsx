@@ -20,6 +20,7 @@ import {
   type Project,
 } from "./fixtures";
 import { createClient } from "@/lib/supabase/client";
+import { subscribeToFileStatus } from "@/lib/supabase/realtime";
 import { api } from "@/lib/api";
 
 type Toast = { id: string; message: string; kind: string };
@@ -395,6 +396,9 @@ export function App() {
         filename: string;
         size_bytes?: number | null;
         status: string;
+        chunk_count?: number | null;
+        page_count?: number | null;
+        ingest_error?: string | null;
       }>;
       if (cancelled) return;
       // Preserve any in-flight upload placeholders so a GET that resolves
@@ -415,6 +419,33 @@ export function App() {
       cancelled = true;
     };
   }, [session, showFiles.open, activeProjectId]);
+
+  React.useEffect(() => {
+    if (!session) return;
+    if (!activeProjectId) return;
+    const projectId = activeProjectId;
+    const unsub = subscribeToFileStatus(projectId, (row) => {
+      setProjectFiles((prev) => {
+        const list = prev[projectId];
+        if (!list) return prev;
+        const idx = list.findIndex((f) => f.id === row.id);
+        if (idx === -1) return prev;
+        const ready = row.status === "ready" || row.status === "indexed";
+        const failed = row.status === "failed";
+        const updated: FileItem = {
+          ...list[idx],
+          status: ready ? "complete" : failed ? "failed" : "analyzing",
+          ingestStatus: row.status,
+          chunkCount: row.chunk_count ?? list[idx].chunkCount,
+          ingestError: row.ingest_error ?? null,
+        };
+        const next = [...list];
+        next[idx] = updated;
+        return { ...prev, [projectId]: next };
+      });
+    });
+    return unsub;
+  }, [session, activeProjectId]);
 
   const activeChat = React.useMemo(() => {
     for (const p of projects) {
@@ -442,15 +473,25 @@ export function App() {
     filename: string;
     size_bytes?: number | null;
     status: string;
-  }): FileItem => ({
-    id: row.id,
-    name: row.filename,
-    size: formatBytes(row.size_bytes ?? null),
-    type: inferFileType(row.filename),
-    pages: 1,
-    status: row.status === "indexed" ? "complete" : "analyzing",
-    analysis: null,
-  });
+    chunk_count?: number | null;
+    page_count?: number | null;
+    ingest_error?: string | null;
+  }): FileItem => {
+    const ready = row.status === "ready" || row.status === "indexed";
+    const failed = row.status === "failed";
+    return {
+      id: row.id,
+      name: row.filename,
+      size: formatBytes(row.size_bytes ?? null),
+      type: inferFileType(row.filename),
+      pages: row.page_count ?? 1,
+      status: ready ? "complete" : failed ? "failed" : "analyzing",
+      ingestStatus: row.status,
+      chunkCount: row.chunk_count ?? undefined,
+      ingestError: row.ingest_error ?? null,
+      analysis: null,
+    };
+  };
 
   const uploadProjectFiles = async (projectId: string, accepted: File[]) => {
     if (!accepted.length) return;
@@ -495,6 +536,9 @@ export function App() {
             filename: string;
             size_bytes?: number | null;
             status: string;
+            chunk_count?: number | null;
+            page_count?: number | null;
+            ingest_error?: string | null;
           };
           anySucceeded = true;
           setProjectFiles((prev) => ({
@@ -503,7 +547,7 @@ export function App() {
               existing.id === placeholderId ? rowToFileItem(row) : existing,
             ),
           }));
-          if (row.status !== "indexed") {
+          if (row.status !== "indexed" && row.status !== "parsing" && row.status !== "ready") {
             pushToast(`„${row.filename}“: Status ${row.status}.`, "warn");
           }
         } catch (err) {

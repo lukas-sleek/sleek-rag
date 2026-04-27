@@ -10,3 +10,4 @@ python-multipart==0.0.17
 openai==1.109.1
 langsmith==0.7.37
 google-cloud-documentai>=3.5.0
+google-cloud-storage>=3.0.0

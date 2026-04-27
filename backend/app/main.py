@@ -1,10 +1,13 @@
+import asyncio
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.routers import chats, files, projects
+from app.workers.ingest import run_worker
 
 if settings.langsmith_api_key:
     os.environ.setdefault("LANGSMITH_TRACING", "true")
@@ -14,7 +17,21 @@ if settings.langsmith_api_key:
     if settings.langsmith_endpoint:
         os.environ.setdefault("LANGSMITH_ENDPOINT", settings.langsmith_endpoint)
 
-app = FastAPI(title="sleek-rag backend")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(run_worker())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+app = FastAPI(title="sleek-rag backend", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

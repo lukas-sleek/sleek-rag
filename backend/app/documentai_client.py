@@ -1,4 +1,4 @@
-from google.cloud import documentai_v1 as documentai
+from google.cloud import documentai_v1beta3 as documentai
 from google.oauth2 import service_account
 
 from app.config import settings

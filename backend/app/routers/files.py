@@ -4,13 +4,7 @@ from pydantic import BaseModel
 
 from app.auth import current_user_id
 from app.db import supabase
-from app.openai_client import (
-    files_create,
-    files_delete,
-    vs_create,
-    vs_delete_file,
-    vs_ingest_file,
-)
+from app.openai_client import files_delete, vs_delete_file
 
 router = APIRouter(prefix="/api/projects/{project_id}/files", tags=["files"])
 
@@ -20,7 +14,9 @@ class FileOut(BaseModel):
     filename: str
     size_bytes: int | None = None
     status: str
-    openai_file_id: str | None = None
+    chunk_count: int | None = None
+    page_count: int | None = None
+    openai_file_id: str | None = None  # legacy, dropped in plan 13
 
 
 @traceable(run_type="tool", name="db.load_project")
@@ -39,19 +35,6 @@ def _load_project(project_id: str, user_id: str) -> dict:
     return res.data[0]
 
 
-def _ensure_vector_store(project: dict) -> str:
-    """Lazy-create a per-project OpenAI vector store on first upload (legacy
-    path; new projects already have a vs_id provisioned at creation time)."""
-    if project.get("openai_vector_store_id"):
-        return project["openai_vector_store_id"]
-    vs_id = vs_create(name=project["name"])
-    supabase().table("projects").update(
-        {"openai_vector_store_id": vs_id}
-    ).eq("id", project["id"]).execute()
-    project["openai_vector_store_id"] = vs_id
-    return vs_id
-
-
 @router.get("", response_model=list[FileOut])
 @traceable(run_type="chain", name="files.list")
 def list_files(project_id: str, user_id: str = Depends(current_user_id)):
@@ -59,7 +42,9 @@ def list_files(project_id: str, user_id: str = Depends(current_user_id)):
     res = (
         supabase()
         .table("project_files")
-        .select("id,filename,size_bytes,status,openai_file_id")
+        .select(
+            "id,filename,size_bytes,status,chunk_count,page_count,openai_file_id"
+        )
         .eq("project_id", project_id)
         .eq("user_id", user_id)
         .order("created_at", desc=True)
@@ -75,31 +60,10 @@ async def upload_file(
     file: UploadFile = File(...),
     user_id: str = Depends(current_user_id),
 ):
-    project = _load_project(project_id, user_id)
-
+    _load_project(project_id, user_id)
     contents = await file.read()
     size_bytes = len(contents)
-
-    try:
-        vector_store_id = _ensure_vector_store(project)
-    except Exception as exc:
-        raise HTTPException(502, f"vector store create failed: {exc}") from exc
-
-    try:
-        openai_file = files_create(filename=file.filename, contents=contents)
-    except Exception as exc:
-        raise HTTPException(502, f"openai file upload failed: {exc}") from exc
-
-    try:
-        ingest = vs_ingest_file(
-            vector_store_id=vector_store_id, file_id=openai_file["id"]
-        )
-    except Exception as exc:
-        raise HTTPException(502, f"vector store ingest failed: {exc}") from exc
-
-    status = (
-        "indexed" if ingest["status"] == "completed" else (ingest["status"] or "failed")
-    )
+    mime = file.content_type or "application/octet-stream"
 
     insert = (
         supabase()
@@ -110,13 +74,43 @@ async def upload_file(
                 "user_id": user_id,
                 "filename": file.filename,
                 "size_bytes": size_bytes,
-                "openai_file_id": openai_file["id"],
-                "status": status,
+                "mime_type": mime,
+                "status": "uploading",
             }
         )
         .execute()
     )
-    return insert.data[0]
+    file_row = insert.data[0]
+    file_id = file_row["id"]
+
+    blob_path = f"{user_id}/{file_id}/{file.filename}"
+    try:
+        supabase().storage.from_("project-files").upload(
+            blob_path, contents, {"content-type": mime}
+        )
+    except Exception as exc:
+        supabase().table("project_files").update(
+            {"status": "failed", "ingest_error": f"storage upload failed: {exc}"[:500]}
+        ).eq("id", file_id).execute()
+        raise HTTPException(502, f"storage upload failed: {exc}") from exc
+
+    supabase().table("project_files").update(
+        {"gcs_blob_path": blob_path, "status": "parsing"}
+    ).eq("id", file_id).execute()
+
+    supabase().table("ingest_jobs").insert(
+        {"file_id": file_id, "user_id": user_id, "state": "queued"}
+    ).execute()
+
+    return FileOut(
+        id=file_id,
+        filename=file.filename,
+        size_bytes=size_bytes,
+        status="parsing",
+        chunk_count=0,
+        page_count=None,
+        openai_file_id=None,
+    )
 
 
 @router.delete("/{file_id}")
@@ -128,7 +122,7 @@ def delete_file(
     row_res = (
         supabase()
         .table("project_files")
-        .select("openai_file_id")
+        .select("openai_file_id,gcs_blob_path")
         .eq("id", file_id)
         .eq("user_id", user_id)
         .limit(1)
@@ -136,7 +130,9 @@ def delete_file(
     )
     if not row_res.data:
         raise HTTPException(404, "file not found")
-    openai_file_id = row_res.data[0]["openai_file_id"]
+    row = row_res.data[0]
+    openai_file_id = row.get("openai_file_id")
+    blob_path = row.get("gcs_blob_path")
     vector_store_id = project.get("openai_vector_store_id")
 
     if openai_file_id and vector_store_id:
@@ -146,6 +142,12 @@ def delete_file(
             pass
         try:
             files_delete(openai_file_id)
+        except Exception:
+            pass
+
+    if blob_path:
+        try:
+            supabase().storage.from_("project-files").remove([blob_path])
         except Exception:
             pass
 

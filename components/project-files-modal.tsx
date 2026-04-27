@@ -241,7 +241,25 @@ export function ProjectFilesModal({
                         {file.name}
                       </span>
                       <span className="text-[11px] text-text-tertiary">
-                        {file.size} · {file.pages} {file.pages === 1 ? "Seite" : "Seiten"}
+                        {(() => {
+                          if (file.status === "failed") return "Fehlgeschlagen";
+                          if (file.status === "complete") {
+                            const c = file.chunkCount;
+                            return c
+                              ? `${c} ${c === 1 ? "Chunk" : "Chunks"} indiziert`
+                              : `${file.size} · ${file.pages} ${file.pages === 1 ? "Seite" : "Seiten"}`;
+                          }
+                          switch (file.ingestStatus) {
+                            case "uploading":
+                              return "Hochladen…";
+                            case "parsing":
+                              return "Layout wird analysiert…";
+                            case "embedding":
+                              return "Chunks werden eingebettet…";
+                            default:
+                              return `${file.size} · ${file.pages} ${file.pages === 1 ? "Seite" : "Seiten"}`;
+                          }
+                        })()}
                       </span>
                     </span>
                     {file.status === "complete" && (
@@ -251,6 +269,14 @@ export function ProjectFilesModal({
                     )}
                     {file.status === "analyzing" && (
                       <span className="pf-item-badge dot" />
+                    )}
+                    {file.status === "failed" && (
+                      <span
+                        className="flex-shrink-0 flex items-center justify-center text-[#ef4444]"
+                        title={file.ingestError || "Ingestion fehlgeschlagen"}
+                      >
+                        <Icon.XBig />
+                      </span>
                     )}
                   </button>
                 );

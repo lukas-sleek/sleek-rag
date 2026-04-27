@@ -58,7 +58,10 @@ Branch: `feat/google-rag-migration`. Decision basis: `.agent/research/recommenda
   - Deviation: gemini smoke test passes `extra_body={"reasoning_effort": "none"}` because gemini-2.5-flash spends thinking tokens that exceed the plan's `max_tokens=10` cap, returning `content=None` otherwise.
   - Deviation: gemini embeddings smoke test passes `dimensions=settings.gemini_embedding_dim` because `gemini-embedding-001` defaults to 3072 dims; we pin to 768 to match the pgvector column.
   - Deviation: initial Document AI processor (`158602e037219e17`) was provisioned as `CUSTOM_EXTRACTION_PROCESSOR`; replaced with a `LAYOUT_PARSER_PROCESSOR` (`d7fc4648a95684c0`) and `.env` updated. The service account also needed `roles/documentai.viewer` (in addition to `roles/documentai.apiUser`) for the validation `list_processors` call.
-- [ ] Plan 11 — `.agent/plans/11.document-ai-ingestion.md` — async ingestion worker, batch parsing, embedding, image extraction. 🔴 Complex.
+- [x] Plan 11 — completed 2026-04-28. Async ingestion live; e2e test ingested a 4-page PDF (`somatosensory.pdf`) in 16.9s producing 9 chunks with 768-dim embeddings, and a separate 8-page engineering PDF in 30.6s producing 26 chunks + 17 figure images persisted to `chunk-images` Supabase Storage.
+  - Deviation: Layout Parser image extraction requires `documentai_v1beta3` (not v1) plus `enable_image_extraction=True` on `LayoutConfig`. Image bytes live on `Document.blob_assets[]` keyed by `asset_id`; chunks reference them via `chunk.chunk_fields[].image_chunk_field.blob_asset_id`. The plan's `chunk.images[0].image` shape does not exist in the public SDK.
+  - Deviation: `chunk.page_headers` returns `ChunkPageHeader` proto objects (not strings); the worker extracts `.text` before serializing to `heading_path[]`.
+  - Deviation: migrations numbered `0006_ingest_jobs.sql` and `0007_claim_job.sql` (the next free numbers; the plan said 0003/0004 but those slots were already taken).
 - [ ] Plan 12 — `.agent/plans/12.gemini-chat-with-citations.md` — chat endpoint rewrite with hybrid retrieval and multimodal input, history moves to Supabase. 🔴 Complex.
 - [ ] Plan 13 — `.agent/plans/13.citation-image-ui-and-cleanup.md` — citation chips, figure thumbnails, PDF viewer, OpenAI removal. ⚠️ Medium.
 

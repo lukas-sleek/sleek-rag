@@ -70,7 +70,13 @@ export type FileItem = {
   size: string;
   type: "pdf" | "docx" | "csv" | "image";
   pages: number;
-  status: "complete" | "analyzing";
+  status: "complete" | "analyzing" | "failed";
+  // Raw backend status — drives the granular label in the file modal.
+  // 'uploading' | 'parsing' | 'embedding' | 'ready' | 'failed' for new files;
+  // 'pending' | 'indexed' | 'failed' for legacy OpenAI files.
+  ingestStatus?: string;
+  chunkCount?: number;
+  ingestError?: string | null;
   analysis: FileAnalysis | null;
 };
 
