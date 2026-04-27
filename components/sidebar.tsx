@@ -20,12 +20,14 @@ function ContextMenu({
   onRename,
   onDelete,
   anchorClass,
+  canDelete = true,
 }: {
   open: boolean;
   onClose: () => void;
   onRename: () => void;
   onDelete: () => void;
   anchorClass?: string;
+  canDelete?: boolean;
 }) {
   React.useEffect(() => {
     if (!open) return;
@@ -40,9 +42,11 @@ function ContextMenu({
       <button className="ctx-item" onClick={() => { onRename(); onClose(); }}>
         <Icon.Edit /> Umbenennen
       </button>
-      <button className="ctx-item danger" onClick={() => { onDelete(); onClose(); }}>
-        <Icon.Trash /> Löschen
-      </button>
+      {canDelete && (
+        <button className="ctx-item danger" onClick={() => { onDelete(); onClose(); }}>
+          <Icon.Trash /> Löschen
+        </button>
+      )}
     </div>
   );
 }
@@ -59,6 +63,7 @@ function ChatItem({
   onChatDrop,
   dragOver,
   setDragOverChat,
+  canDelete,
 }: {
   chat: { id: string; title: string };
   projectId: string;
@@ -69,6 +74,7 @@ function ChatItem({
   onChatDrop: (srcId: string, tgtId: string, before: boolean) => void;
   dragOver: DragOverChat;
   setDragOverChat: (v: DragOverChat) => void;
+  canDelete: boolean;
 }) {
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [editing, setEditing] = React.useState(false);
@@ -168,6 +174,7 @@ function ChatItem({
         onClose={() => setMenuOpen(false)}
         onRename={() => { setDraft(chat.title); setEditing(true); }}
         onDelete={onDelete}
+        canDelete={canDelete}
       />
     </div>
   );
@@ -192,6 +199,7 @@ function ProjectSection({
   onProjectDragEnd,
   projDragOver,
   isDragSource,
+  emptyChatIds,
 }: {
   proj: Project;
   activeChatId: string;
@@ -209,6 +217,7 @@ function ProjectSection({
   onProjectDragEnd: () => void;
   projDragOver: ProjDragOver;
   isDragSource: boolean;
+  emptyChatIds: Set<string>;
 }) {
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [editing, setEditing] = React.useState(false);
@@ -275,13 +284,15 @@ function ProjectSection({
           >
             <Icon.More />
           </button>
-          <button
-            className="add"
-            onClick={(e) => { e.stopPropagation(); onAdd(); }}
-            title={`Neuer Chat in ${proj.name}`}
-          >
-            <Icon.Plus />
-          </button>
+          {!proj.chats.some((c) => emptyChatIds.has(c.id)) && (
+            <button
+              className="add"
+              onClick={(e) => { e.stopPropagation(); onAdd(); }}
+              title={`Neuer Chat in ${proj.name}`}
+            >
+              <Icon.Plus />
+            </button>
+          )}
           <ContextMenu
             open={menuOpen}
             onClose={() => setMenuOpen(false)}
@@ -305,6 +316,7 @@ function ProjectSection({
               onChatDrop={(srcId, tgtId, before) => onChatDrop(proj.id, srcId, tgtId, before)}
               dragOver={dragOverChat}
               setDragOverChat={setDragOverChat}
+              canDelete={!(proj.chats.length === 1 && emptyChatIds.has(c.id))}
             />
           ))}
           {proj.chats.length === 0 && (
@@ -331,6 +343,7 @@ export function Sidebar({
   onDeleteProject,
   onReorderProjects,
   onToggleProject,
+  emptyChatIds,
   user,
   onOpenTemplate,
 }: {
@@ -348,6 +361,7 @@ export function Sidebar({
   onDeleteProject: (projectId: string, name: string) => void;
   onReorderProjects: (orderedIds: string[]) => void;
   onToggleProject: (projectId: string) => void;
+  emptyChatIds: Set<string>;
   user: LoginUser;
   onOpenTemplate: () => void;
 }) {
@@ -531,6 +545,7 @@ export function Sidebar({
                 onProjectDragEnd={onProjectDragEnd}
                 projDragOver={projDragOver}
                 isDragSource={draggingProjectId === proj.id}
+                emptyChatIds={emptyChatIds}
               />
             ))}
             {visibleProjects.length === 0 && (

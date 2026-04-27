@@ -231,9 +231,24 @@ export function App() {
           window.localStorage.setItem(LAST_CHAT_KEY, urlChatId);
         }
       } else {
-        pushToast("Chat nicht gefunden.", "warn");
-        router.replace("/");
-        setActiveChatId("__empty__");
+        // urlChatId points at a chat that's not in the user's project tree.
+        // Two cases:
+        //  (a) Internal nav in flight — we just selectChat()'d a new id (or
+        //      cleared to "__empty__") and the router.push/replace hasn't
+        //      landed yet, so urlChatId is the old / deleted one. If
+        //      activeChatId is itself a valid chat now, sync the URL silently.
+        //      If we already cleared to "__empty__", just send to /.
+        //  (b) External dead link (typed/bookmarked/back-button to a deleted
+        //      chat). No valid activeChatId → toast and reset.
+        if (activeChatId !== "__empty__" && ownedIds.has(activeChatId)) {
+          router.replace(`/c/${activeChatId}`);
+        } else if (activeChatId === "__empty__") {
+          router.replace("/");
+        } else {
+          pushToast("Chat nicht gefunden.", "warn");
+          router.replace("/");
+          setActiveChatId("__empty__");
+        }
       }
       initialRestoreDoneRef.current = true;
       setInitialPickDone(true);
@@ -536,6 +551,24 @@ export function App() {
   const messages = threads[activeChatId] || [];
   const isEmpty = activeChatId === "__empty__" || messages.length === 0;
   const noProjects = projectsLoaded && projects.length === 0;
+
+  // Chats considered "empty / unused": a freshly created chat the user
+  // hasn't sent the first message in. Used to gate the "+ Neuer Chat"
+  // button (already have one open) and the per-chat Löschen action (a
+  // project must always have ≥1 chat). When messages aren't loaded for a
+  // chat we fall back to the title heuristic — chats are auto-renamed off
+  // "Neuer Chat" right after the first message lands.
+  const emptyChatIds = React.useMemo(() => {
+    const set = new Set<string>();
+    for (const p of projects) {
+      for (const c of p.chats) {
+        const t = threads[c.id];
+        const isEmptyChat = t !== undefined ? t.length === 0 : c.title === "Neuer Chat";
+        if (isEmptyChat) set.add(c.id);
+      }
+    }
+    return set;
+  }, [projects, threads]);
   const displayName = React.useMemo(() => {
     const meta = session?.user.user_metadata as
       | { first_name?: string; full_name?: string; name?: string }
@@ -634,10 +667,47 @@ export function App() {
   };
 
   const doDeleteChat = async (projectId: string, chatId: string) => {
+    const proj = projects.find((p) => p.id === projectId);
+    const wasLast = !!proj && proj.chats.length === 1;
     const res = await api(`/api/chats/${chatId}`, { method: "DELETE" });
     if (!res.ok) {
       pushToast("Chat konnte nicht gelöscht werden.", "warn");
       return;
+    }
+    // Project must always have ≥1 chat. If this was the last chat, create
+    // the replacement BEFORE mutating local state so the swap commits
+    // atomically — no empty-list window where the sidebar shows nothing
+    // selected and the URL→state effect could toast against a stale id.
+    if (wasLast) {
+      const createRes = await api("/api/chats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: projectId, title: "Neuer Chat" }),
+      });
+      if (!createRes.ok) {
+        pushToast("Chat konnte nicht erstellt werden.", "warn");
+        // Fall through and finish the deletion bookkeeping below; the
+        // project will end up empty until the user manually creates one.
+      } else {
+        const row: { id: string; title: string } = await createRes.json();
+        setProjects((prev) =>
+          prev.map((p) =>
+            p.id === projectId
+              ? { ...p, expanded: true, chats: [{ id: row.id, title: row.title }] }
+              : p,
+          ),
+        );
+        setThreads((prev) => {
+          const next = { ...prev };
+          delete next[chatId];
+          next[row.id] = [];
+          return next;
+        });
+        loadedThreadsRef.current.delete(chatId);
+        loadedThreadsRef.current.add(row.id);
+        if (activeChatId === chatId) selectChat(row.id);
+        return;
+      }
     }
     setProjects((prev) =>
       prev.map((p) =>
@@ -657,6 +727,11 @@ export function App() {
   };
 
   const onDeleteChat = (projectId: string, chatId: string, title: string) => {
+    // Empty / unused chats have nothing to lose — skip the confirm dialog.
+    if (emptyChatIds.has(chatId)) {
+      void doDeleteChat(projectId, chatId);
+      return;
+    }
     setConfirmDialog({
       title: "Chat löschen?",
       body: (
@@ -1000,6 +1075,7 @@ export function App() {
           }
         }}
         onToggleProject={onToggleProject}
+        emptyChatIds={emptyChatIds}
         user={{ email: session.user.email ?? "" }}
         onOpenTemplate={() => setShowTemplate(true)}
       />
