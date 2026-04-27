@@ -387,7 +387,26 @@ input, textarea { font-family: inherit; }
   border-radius: 2px;
   pointer-events: none;
 }
-.sidebar-section { position: relative; }
+.sidebar-section {
+  position: relative;
+  /* Animate the source-collapse on drag. Properties that don't change
+     during normal use (max-height stays at the cap, margin/padding stay
+     constant) won't trigger transitions outside drag. */
+  max-height: 9999px;
+  transition:
+    max-height 180ms ease,
+    margin 180ms ease,
+    padding 180ms ease,
+    opacity 140ms ease;
+}
+.sidebar-section.dragging-source {
+  max-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  opacity: 0;
+  pointer-events: none;
+}
 
 .chat-item-wrap.drop-before::before {
   content: "";

@@ -198,6 +198,7 @@ export function App() {
         id: string;
         name: string;
         has_files: boolean;
+        expanded?: boolean;
         chats: { id: string; title: string }[];
       }[] = await res.json();
       if (ctrl.signal.aborted) return;
@@ -205,7 +206,7 @@ export function App() {
         rows.map((r) => ({
           id: r.id,
           name: r.name,
-          expanded: true,
+          expanded: r.expanded === true,
           hasFiles: r.has_files,
           chats: r.chats ?? [],
         })),
@@ -312,6 +313,53 @@ export function App() {
     }
     return null;
   }, [projects, activeChatId]);
+
+  // Once on initial load: expand the project that contains the active chat
+  // (if it isn't already) and persist the change. After that the user owns
+  // the expand/collapse state — switching chats does not auto-expand other
+  // projects.
+  const initialExpandDoneRef = React.useRef(false);
+  React.useEffect(() => {
+    if (initialExpandDoneRef.current) return;
+    if (!projectsLoaded || !initialPickDone) return;
+    if (!activeProjectId) {
+      initialExpandDoneRef.current = true;
+      return;
+    }
+    initialExpandDoneRef.current = true;
+    const proj = projects.find((p) => p.id === activeProjectId);
+    if (!proj || proj.expanded) return;
+    setProjects((prev) =>
+      prev.map((p) => (p.id === activeProjectId ? { ...p, expanded: true } : p)),
+    );
+    void api(`/api/projects/${activeProjectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expanded: true }),
+    });
+  }, [projectsLoaded, initialPickDone, activeProjectId, projects]);
+
+  const onToggleProject = React.useCallback(
+    async (projectId: string) => {
+      let nextExpanded = false;
+      setProjects((prev) =>
+        prev.map((p) => {
+          if (p.id !== projectId) return p;
+          nextExpanded = !p.expanded;
+          return { ...p, expanded: nextExpanded };
+        }),
+      );
+      const res = await api(`/api/projects/${projectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expanded: nextExpanded }),
+      });
+      if (!res.ok) {
+        pushToast("Status konnte nicht gespeichert werden.", "warn");
+      }
+    },
+    [pushToast],
+  );
 
   const loadedFilesRef = React.useRef<Set<string>>(new Set());
   React.useEffect(() => {
@@ -941,6 +989,17 @@ export function App() {
         onDeleteChat={onDeleteChat}
         onRenameProject={onRenameProject}
         onDeleteProject={onDeleteProject}
+        onReorderProjects={async (orderedIds) => {
+          const res = await api("/api/projects/order", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ project_ids: orderedIds }),
+          });
+          if (!res.ok) {
+            pushToast("Reihenfolge konnte nicht gespeichert werden.", "warn");
+          }
+        }}
+        onToggleProject={onToggleProject}
         user={{ email: session.user.email ?? "" }}
         onOpenTemplate={() => setShowTemplate(true)}
       />

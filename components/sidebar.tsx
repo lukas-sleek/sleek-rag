@@ -191,6 +191,7 @@ function ProjectSection({
   onProjectDrop,
   onProjectDragEnd,
   projDragOver,
+  isDragSource,
 }: {
   proj: Project;
   activeChatId: string;
@@ -207,6 +208,7 @@ function ProjectSection({
   onProjectDrop: (e: React.DragEvent<HTMLDivElement>, projectId: string) => void;
   onProjectDragEnd: () => void;
   projDragOver: ProjDragOver;
+  isDragSource: boolean;
 }) {
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [editing, setEditing] = React.useState(false);
@@ -234,7 +236,8 @@ function ProjectSection({
     <div
       className={
         "sidebar-section mt-3" +
-        (projIndicator ? (projDragOver!.before ? " drop-before" : " drop-after") : "")
+        (projIndicator ? (projDragOver!.before ? " drop-before" : " drop-after") : "") +
+        (isDragSource ? " dragging-source" : "")
       }
       onDragOver={(e) => onProjectDragOver(e, proj.id)}
       onDrop={(e) => onProjectDrop(e, proj.id)}
@@ -326,6 +329,8 @@ export function Sidebar({
   onDeleteChat,
   onRenameProject,
   onDeleteProject,
+  onReorderProjects,
+  onToggleProject,
   user,
   onOpenTemplate,
 }: {
@@ -341,17 +346,17 @@ export function Sidebar({
   onDeleteChat: (projectId: string, chatId: string, title: string) => void;
   onRenameProject: (projectId: string, name: string) => void;
   onDeleteProject: (projectId: string, name: string) => void;
+  onReorderProjects: (orderedIds: string[]) => void;
+  onToggleProject: (projectId: string) => void;
   user: LoginUser;
   onOpenTemplate: () => void;
 }) {
   const [search, setSearch] = React.useState("");
   const [projDragOver, setProjDragOver] = React.useState<ProjDragOver>(null);
-
-  const toggleProject = (pid: string) => {
-    setProjects((prev) =>
-      prev.map((p) => (p.id === pid ? { ...p, expanded: !p.expanded } : p))
-    );
-  };
+  // Source of an active project drag. Set after the browser has captured the
+  // drag image (via rAF) so flipping the .dragging-source class doesn't
+  // cancel the drag. Cleared on dragend / drop / non-drop release.
+  const [draggingProjectId, setDraggingProjectId] = React.useState<string | null>(null);
 
   const visibleProjects = !search.trim()
     ? projects
@@ -361,6 +366,9 @@ export function Sidebar({
     setDragRef({ kind: "project", projectId });
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", projectId);
+    // Defer so the browser snapshots the drag image at full size before we
+    // collapse the source.
+    requestAnimationFrame(() => setDraggingProjectId(projectId));
   };
   const onProjectDragOver = (e: React.DragEvent<HTMLDivElement>, projectId: string) => {
     const d = getDrag();
@@ -369,6 +377,22 @@ export function Sidebar({
     e.dataTransfer.dropEffect = "move";
     const r = e.currentTarget.getBoundingClientRect();
     const before = e.clientY < r.top + r.height / 2;
+    // Suppress the indicator for moves that resolve to a no-op: dropping on
+    // yourself, or above the immediate neighbour below, or below the
+    // immediate neighbour above. All three insert at the source's current
+    // index after removal.
+    const fromIdx = projects.findIndex((p) => p.id === d.projectId);
+    const toIdx = projects.findIndex((p) => p.id === projectId);
+    const isNoOp =
+      d.projectId === projectId ||
+      fromIdx === -1 ||
+      toIdx === -1 ||
+      (before && toIdx === fromIdx + 1) ||
+      (!before && toIdx === fromIdx - 1);
+    if (isNoOp) {
+      if (projDragOver) setProjDragOver(null);
+      return;
+    }
     setProjDragOver({ projectId, before });
   };
   const onProjectDrop = (e: React.DragEvent<HTMLDivElement>, projectId: string) => {
@@ -378,22 +402,32 @@ export function Sidebar({
     const r = e.currentTarget.getBoundingClientRect();
     const before = e.clientY < r.top + r.height / 2;
     if (d.projectId !== projectId) {
-      setProjects((prev) => {
-        const arr = [...prev];
-        const fromIdx = arr.findIndex((p) => p.id === d.projectId);
-        if (fromIdx === -1) return prev;
+      // Compute the new order outside the updater. setProjects's updater
+      // doesn't run until the next render commit, so reading a closure
+      // variable mutated inside it would observe null here and skip the
+      // server PUT — that's why the first drop "didn't stick" on reload.
+      const arr = [...projects];
+      const fromIdx = arr.findIndex((p) => p.id === d.projectId);
+      if (fromIdx !== -1) {
         const [moved] = arr.splice(fromIdx, 1);
         let toIdx = arr.findIndex((p) => p.id === projectId);
-        if (toIdx === -1) return prev;
-        if (!before) toIdx += 1;
-        arr.splice(toIdx, 0, moved);
-        return arr;
-      });
+        if (toIdx !== -1) {
+          if (!before) toIdx += 1;
+          arr.splice(toIdx, 0, moved);
+          setProjects(arr);
+          onReorderProjects(arr.map((p) => p.id));
+        }
+      }
     }
     setDragRef(null);
     setProjDragOver(null);
+    setDraggingProjectId(null);
   };
-  const onProjectDragEnd = () => { setDragRef(null); setProjDragOver(null); };
+  const onProjectDragEnd = () => {
+    setDragRef(null);
+    setProjDragOver(null);
+    setDraggingProjectId(null);
+  };
 
   const onChatDrop = (projectId: string, srcId: string, tgtId: string, before: boolean) => {
     if (srcId === tgtId) return;
@@ -484,7 +518,7 @@ export function Sidebar({
                 proj={proj}
                 activeChatId={activeChatId}
                 setActiveChatId={setActiveChatId}
-                onToggle={() => toggleProject(proj.id)}
+                onToggle={() => onToggleProject(proj.id)}
                 onAdd={() => onNewChat(proj.id)}
                 onRename={(name) => onRenameProject(proj.id, name)}
                 onDelete={() => onDeleteProject(proj.id, proj.name)}
@@ -496,6 +530,7 @@ export function Sidebar({
                 onProjectDrop={onProjectDrop}
                 onProjectDragEnd={onProjectDragEnd}
                 projDragOver={projDragOver}
+                isDragSource={draggingProjectId === proj.id}
               />
             ))}
             {visibleProjects.length === 0 && (
