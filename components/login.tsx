@@ -16,14 +16,12 @@ export function LoginScreen() {
   const [firstName, setFirstName] = React.useState("");
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [info, setInfo] = React.useState<string | null>(null);
 
   const isRegister = mode === "register";
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setInfo(null);
     if (!email || !password) return;
     if (isRegister && (!firstName || password !== password2)) {
       setError("Bitte Vornamen eingeben und Passwörter abgleichen.");
@@ -42,9 +40,11 @@ export function LoginScreen() {
           return;
         }
         if (!data.session) {
-          setInfo("Konto erstellt. Bitte E-Mail bestätigen, dann einloggen.");
-          setMode("login");
-          return;
+          const { error: signInErr } = await supabase.auth.signInWithPassword({ email, password });
+          if (signInErr) {
+            setError(signInErr.message);
+            return;
+          }
         }
       } else {
         const { error: err } = await supabase.auth.signInWithPassword({ email, password });
@@ -61,7 +61,6 @@ export function LoginScreen() {
   const switchMode = (next: "login" | "register") => {
     setMode(next);
     setError(null);
-    setInfo(null);
   };
 
   return (
@@ -162,9 +161,6 @@ export function LoginScreen() {
 
           {error && (
             <div className="text-xs text-[#d63a3a] -mt-3">{error}</div>
-          )}
-          {info && (
-            <div className="text-xs text-text-secondary -mt-3">{info}</div>
           )}
 
           <button className="btn-primary" type="submit" disabled={loading}>

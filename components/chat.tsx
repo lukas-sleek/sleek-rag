@@ -25,8 +25,8 @@ const MD_PROSE =
   "[&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_td]:align-top";
 
 const SUGGESTIONS = [
-  { title: "Projektanalyse erstellen", desc: "Strukturierte Auswertung über alle Dokumente im aktiven Projekt" },
-  { title: "Zusammenfassung aller Dateien im Projekt", desc: "Knappe Übersicht je Datei mit Quellenangabe" },
+  { title: "Projektanalyse erstellen", desc: "Strukturierte Auswertung über alle Dokumente (file_search)" },
+  { title: "Projektanalyse v2 erstellen", desc: "Volltext-Analyse — Dokumente komplett im Modell-Kontext" },
 ];
 
 export function Message({ msg, streaming }: { msg: Msg; streaming: boolean }) {

@@ -12,7 +12,9 @@ from app.openai_client import conversation_create, openai_client
 from app.projektanalyse import (
     PROJEKTANALYSE_INSTRUCTIONS,
     PROJEKTANALYSE_TOOL,
+    PROJEKTANALYSE_V2_TOOL,
     stream_projektanalyse,
+    stream_projektanalyse_v2,
 )
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
@@ -149,11 +151,16 @@ def list_messages(chat_id: str, user_id: str = Depends(current_user_id)):
     return out
 
 
-def _detect_projektanalyse_call(item) -> bool:
-    return (
-        getattr(item, "type", None) == "function_call"
-        and getattr(item, "name", None) == "run_projektanalyse"
-    )
+def _detect_projektanalyse_call(item) -> str | None:
+    """Returns 'v1', 'v2', or None depending on which tool the model called."""
+    if getattr(item, "type", None) != "function_call":
+        return None
+    name = getattr(item, "name", None)
+    if name == "run_projektanalyse":
+        return "v1"
+    if name == "run_projektanalyse_v2":
+        return "v2"
+    return None
 
 
 @traceable(run_type="chain", name="chats.send_message")
@@ -193,7 +200,7 @@ async def _send_message_stream(
     )
     vector_store_id = (project or {}).get("openai_vector_store_id")
 
-    tools: list[dict] = [PROJEKTANALYSE_TOOL]
+    tools: list[dict] = [PROJEKTANALYSE_TOOL, PROJEKTANALYSE_V2_TOOL]
     if vector_store_id:
         tools.append(
             {
@@ -217,24 +224,44 @@ async def _send_message_stream(
         kwargs["include"] = ["file_search_call.results"]
 
     stream = await asyncio.to_thread(openai_client().responses.create, **kwargs)
-    projektanalyse_triggered = False
+    triggered: str | None = None
     try:
         for event in stream:
             etype = getattr(event, "type", None)
             if etype == "response.output_text.delta":
                 yield f"data: {json.dumps({'delta': event.delta})}\n\n"
-            elif etype == "response.output_item.done" and _detect_projektanalyse_call(
-                getattr(event, "item", None)
-            ):
-                projektanalyse_triggered = True
-                break
+            elif etype == "response.output_item.done":
+                kind = _detect_projektanalyse_call(getattr(event, "item", None))
+                if kind:
+                    triggered = kind
+                    break
     finally:
         await asyncio.to_thread(stream.close)
 
-    if projektanalyse_triggered:
+    if triggered == "v1":
         async for sse in stream_projektanalyse(
             template=template,
             vector_store_id=vector_store_id,
+            conversation_id=chat["openai_thread_id"],
+        ):
+            yield sse
+        return
+
+    if triggered == "v2":
+        file_rows = await asyncio.to_thread(
+            lambda: supabase()
+            .table("project_files")
+            .select("openai_file_id,status")
+            .eq("project_id", chat["project_id"])
+            .eq("user_id", user_id)
+            .eq("status", "indexed")
+            .execute()
+            .data
+        )
+        file_ids = [r["openai_file_id"] for r in (file_rows or []) if r.get("openai_file_id")]
+        async for sse in stream_projektanalyse_v2(
+            template=template,
+            file_ids=file_ids,
             conversation_id=chat["openai_thread_id"],
         ):
             yield sse
