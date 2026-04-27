@@ -8,8 +8,9 @@ _client = None
 def gemini_client():
     """OpenAI-shaped client pointed at Gemini's v1beta/openai endpoint.
 
-    Same SDK surface as openai_client(); swap providers later by changing
-    base_url + api_key + model in settings.
+    Provider is swappable via env vars (GEMINI_BASE_URL + GEMINI_API_KEY +
+    GEMINI_CHAT_MODEL) — any OpenAI-compatible endpoint works (Ollama, vLLM,
+    OpenRouter, etc.).
     """
     global _client
     if _client is None:

@@ -1,47 +1,13 @@
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from langsmith import traceable
 from pydantic import BaseModel
 
 from app.auth import current_user_id
 from app.db import supabase
-from app.openai_client import vs_create, vs_delete
 
 logger = logging.getLogger(__name__)
-
-
-def _provision_vector_store(project_id: str, name: str) -> None:
-    """Background: create the OpenAI vector store and attach it to the project
-    row. Conditional on the column still being null so we don't clobber a
-    vs_id that the lazy upload path may have written in the meantime; if we
-    lose that race, delete the orphan we just created."""
-    try:
-        vs_id = vs_create(name=name)
-    except Exception:
-        logger.exception("vector store create failed for project %s", project_id)
-        return
-    try:
-        res = (
-            supabase()
-            .table("projects")
-            .update({"openai_vector_store_id": vs_id})
-            .eq("id", project_id)
-            .is_("openai_vector_store_id", None)
-            .execute()
-        )
-    except Exception:
-        logger.exception("vector store row update failed for project %s", project_id)
-        try:
-            vs_delete(vs_id)
-        except Exception:
-            pass
-        return
-    if not res.data:
-        try:
-            vs_delete(vs_id)
-        except Exception:
-            pass
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -123,7 +89,6 @@ def list_projects(user_id: str = Depends(current_user_id)):
 @traceable(run_type="chain", name="projects.create")
 def create_project(
     body: ProjectIn,
-    background_tasks: BackgroundTasks,
     user_id: str = Depends(current_user_id),
 ):
     # New projects land at min(sort_order)-1 so they appear at the top of
@@ -154,7 +119,6 @@ def create_project(
 
     res = supabase().table("projects").insert(payload).execute()
     row = res.data[0]
-    background_tasks.add_task(_provision_vector_store, row["id"], body.name)
     return ProjectOut(
         id=row["id"],
         name=row["name"],
@@ -231,18 +195,6 @@ def update_project(
 @router.delete("/{project_id}")
 @traceable(run_type="chain", name="projects.delete")
 def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
-    existing = (
-        supabase()
-        .table("projects")
-        .select("id,openai_vector_store_id")
-        .eq("id", project_id)
-        .eq("user_id", user_id)
-        .limit(1)
-        .execute()
-    )
-    if not existing.data:
-        raise HTTPException(404, "not found")
-    vs_id = existing.data[0].get("openai_vector_store_id")
     res = (
         supabase()
         .table("projects")
@@ -253,9 +205,4 @@ def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
     )
     if not res.data:
         raise HTTPException(404, "not found")
-    if vs_id:
-        try:
-            vs_delete(vs_id)
-        except Exception:
-            pass
     return {"deleted": project_id}
