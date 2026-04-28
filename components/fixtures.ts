@@ -81,6 +81,29 @@ export type FileAnalysis = {
   recommendations?: string[];
 };
 
+export type FileFigure = {
+  chunk_id: string;
+  figure_label: string | null;
+  page_start: number;
+  caption: string | null;
+  storage_path: string | null;
+};
+
+export type FileDetail = {
+  id: string;
+  filename: string;
+  size_bytes: number | null;
+  mime_type: string | null;
+  page_count: number | null;
+  chunk_count: number | null;
+  status: string;
+  ingest_error: string | null;
+  created_at: string | null;
+  block_breakdown: Record<string, number>;
+  outline: string[];
+  figures: FileFigure[];
+};
+
 export type FileItem = {
   id: string;
   name: string;

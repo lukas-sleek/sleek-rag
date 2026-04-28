@@ -1345,6 +1345,7 @@ export function App() {
       {showFiles.open && (
         <ProjectFilesModal
           projectName={activeChat?.projectName || "Projekt"}
+          projectId={activeChat?.projectId}
           onClose={() => setShowFiles({ open: false, autoPicker: false })}
           autoOpenPicker={showFiles.autoPicker}
           files={activeChat?.projectId ? (projectFiles[activeChat.projectId] || []) : undefined}

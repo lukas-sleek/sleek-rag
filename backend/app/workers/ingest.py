@@ -18,7 +18,9 @@ from langsmith import traceable
 from app.config import settings
 from app.db import supabase
 from app.documentai_client import documentai_client, processor_name
+from app.figure_caption import extract_figure_label
 from app.gemini_client import gemini_client
+from app.ingest_headings import extract_heading_path
 
 log = logging.getLogger(__name__)
 
@@ -195,20 +197,6 @@ def _run_batch(gcs_input_uri: str) -> documentai.Document:
     raise RuntimeError("batch parse produced no output JSON")
 
 
-_FIGURE_LABEL_RE = re.compile(
-    r"^\s*(Figure|Abbildung|Fig\.|Abb\.)\s*([\d.]+)", re.IGNORECASE
-)
-
-
-def _extract_figure_label(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = _FIGURE_LABEL_RE.match(text)
-    if not m:
-        return None
-    return f"{m.group(1).rstrip('.').title()} {m.group(2)}"
-
-
 def _block_type(chunk) -> str:
     """Map Layout Parser chunk to our block_type enum."""
     if any(cf.image_chunk_field for cf in chunk.chunk_fields):
@@ -259,12 +247,8 @@ def _persist_chunks(job: dict, document: documentai.Document) -> int:
             page_end = chunk.page_span.page_end or page_start
         else:
             page_start = page_end = 1
-        heading_path = (
-            [h.text for h in chunk.page_headers if h.text]
-            if chunk.page_headers
-            else None
-        ) or None
-        figure_label = _extract_figure_label(chunk.content)
+        heading_path = extract_heading_path(chunk.content)
+        figure_label = extract_figure_label(chunk.content)
         chunk_rows.append(
             {
                 "file_id": file_id,

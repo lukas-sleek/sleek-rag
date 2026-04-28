@@ -1,7 +1,6 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from langsmith import traceable
 from pydantic import BaseModel
 
 from app.auth import current_user_id
@@ -35,7 +34,6 @@ class ProjectOut(BaseModel):
 
 
 @router.get("", response_model=list[ProjectOut])
-@traceable(run_type="chain", name="projects.list")
 def list_projects(user_id: str = Depends(current_user_id)):
     # sort_order asc (nulls last) is the persisted drag-drop order; new
     # projects get min(sort_order)-1 in create_project so they land on top
@@ -86,7 +84,6 @@ def list_projects(user_id: str = Depends(current_user_id)):
 
 
 @router.post("", response_model=ProjectOut)
-@traceable(run_type="chain", name="projects.create")
 def create_project(
     body: ProjectIn,
     user_id: str = Depends(current_user_id),
@@ -133,7 +130,6 @@ class ProjectOrderIn(BaseModel):
 
 
 @router.put("/order")
-@traceable(run_type="chain", name="projects.reorder")
 def reorder_projects(
     body: ProjectOrderIn, user_id: str = Depends(current_user_id)
 ):
@@ -161,7 +157,6 @@ def reorder_projects(
 
 
 @router.patch("/{project_id}", response_model=ProjectOut)
-@traceable(run_type="chain", name="projects.update")
 def update_project(
     project_id: str, body: ProjectPatch, user_id: str = Depends(current_user_id)
 ):
@@ -193,7 +188,6 @@ def update_project(
 
 
 @router.delete("/{project_id}")
-@traceable(run_type="chain", name="projects.delete")
 def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
     res = (
         supabase()

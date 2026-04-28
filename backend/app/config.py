@@ -35,5 +35,28 @@ class Settings(BaseSettings):
     gemini_embedding_model: str = "gemini-embedding-001"
     gemini_embedding_dim: int = 768
 
+    # --- Retrieval (plan 16: hybrid + rerank) ---
+    # "hybrid" runs vector + FTS via match_chunks_hybrid, then reranks the top
+    # `pre_rerank_k` candidates down to the model's requested top_k via Vertex
+    # AI Ranking API. "vector_only" calls the same RPC with an empty query
+    # string (degenerate vector-only path), no rerank — escape hatch back to
+    # plan-14 behavior.
+    retrieval_mode: str = "hybrid"
+    pre_rerank_k: int = 30
+    rerank_model: str = "semantic-ranker-default-004"
+    rerank_timeout_sec: float = 4.0
+    # Projektanalyse v1 batch path (plan 16 T7): more candidates + bigger
+    # final context per question than the chat path can afford.
+    projektanalyse_top_k: int = 15
+    projektanalyse_pre_rerank_k: int = 80
+
+    # Plan 16 T6: when the user's question matches a "welche/wer" pattern
+    # AND is ≤8 tokens, expand to 2-3 synonym sub-queries via a fast Gemini
+    # call, run hybrid RPC per sub-query, RRF-merge the unions before
+    # rerank. Closes the synonym-cluster gap (Bauherr ↔ Grundeigentümer,
+    # Drittprojekt ↔ Schnittstellenprojekt) deterministically — doesn't rely
+    # on the chat agent deciding to retry.
+    query_expansion: bool = True
+
 
 settings = Settings()

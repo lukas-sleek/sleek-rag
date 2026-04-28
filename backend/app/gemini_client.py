@@ -3,6 +3,14 @@ from openai import OpenAI
 from app.config import settings
 
 _client = None
+_raw_client = None
+
+
+def _build_raw() -> OpenAI:
+    return OpenAI(
+        api_key=settings.gemini_api_key,
+        base_url=settings.gemini_base_url,
+    )
 
 
 def gemini_client():
@@ -14,10 +22,7 @@ def gemini_client():
     """
     global _client
     if _client is None:
-        raw = OpenAI(
-            api_key=settings.gemini_api_key,
-            base_url=settings.gemini_base_url,
-        )
+        raw = _build_raw()
         if settings.langsmith_api_key:
             from langsmith.wrappers import wrap_openai
 
@@ -25,3 +30,13 @@ def gemini_client():
         else:
             _client = raw
     return _client
+
+
+def gemini_client_untraced():
+    """Same provider as `gemini_client()` but never wrapped in LangSmith
+    tracing. Use for low-value background calls (e.g. chat auto-title) where
+    trace noise outweighs the signal."""
+    global _raw_client
+    if _raw_client is None:
+        _raw_client = _build_raw()
+    return _raw_client

@@ -1,5 +1,5 @@
 """Unit tests for the ingest helpers — no GCP / Supabase calls."""
-from app.workers.ingest import _extract_figure_label
+from app.figure_caption import extract_figure_label as _extract_figure_label
 
 
 def test_extract_figure_label_english():

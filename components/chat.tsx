@@ -101,15 +101,48 @@ export function Message({
     );
   }
   const citations = msg.citations ?? [];
-  const renderedContent = citations.length
-    ? linkifyCitations(msg.content, citations)
-    : msg.content;
-  // De-dup figure thumbs by image_path (LLM often cites the same figure
-  // multiple times). Cap at 3 so a chunky retrieval set doesn't blow up the
-  // message height.
+  const showLoadingDots = streaming && !msg.content;
+  // Backend sends one citation per `ref` index parallel to the chunks the
+  // model saw. Two transforms happen here in one pass so the prose, the
+  // chip list, and click-to-cite stay in lockstep:
+  //   1. Dedupe by chunk_id — the same chunk returned by two tool calls
+  //      should produce one chip, with both prose refs pointing at it.
+  //   2. Renumber sequentially per answer — original refs may have gaps
+  //      (only some retrievals were cited) and may not start at 1.
+  // Builds visibleCitations[i] paired with newRef = i+1, plus a map from
+  // each old ref appearing in prose to its new ref.
+  const { visibleCitations, renderedContent } = React.useMemo(() => {
+    const oldToNew = new Map<number, number>();
+    const chunkIdToNew = new Map<string, number>();
+    const visible: Citation[] = [];
+    for (const m of msg.content.matchAll(/\[(\d+)\]/g)) {
+      const oldRef = parseInt(m[1], 10);
+      if (oldToNew.has(oldRef)) continue;
+      if (oldRef < 1 || oldRef > citations.length) continue;
+      const c = citations[oldRef - 1];
+      const existingNew = chunkIdToNew.get(c.chunk_id);
+      if (existingNew != null) {
+        oldToNew.set(oldRef, existingNew);
+        continue;
+      }
+      visible.push(c);
+      const newRef = visible.length;
+      chunkIdToNew.set(c.chunk_id, newRef);
+      oldToNew.set(oldRef, newRef);
+    }
+    const rewritten = msg.content.replace(/\[(\d+)\]/g, (full, n) => {
+      const newN = oldToNew.get(parseInt(n, 10));
+      return newN != null ? `[${newN}]` : full;
+    });
+    const linked = visible.length ? linkifyCitations(rewritten, visible) : rewritten;
+    return { visibleCitations: visible, renderedContent: linked };
+  }, [msg.content, citations]);
+  // De-dup figure thumbs by image_path. Cap at 3 so a chunky retrieval
+  // set doesn't blow up the message height. Only includes figures the
+  // model actually cited.
   const figureCitations: Citation[] = [];
   const seenImage = new Set<string>();
-  for (const c of citations) {
+  for (const c of visibleCitations) {
     if (!c.image_path || seenImage.has(c.image_path)) continue;
     seenImage.add(c.image_path);
     figureCitations.push(c);
@@ -117,6 +150,17 @@ export function Message({
   }
   return (
     <div className="group flex flex-col items-stretch">
+      {showLoadingDots && (
+        <div
+          className="flex items-center gap-1.5 py-1"
+          role="status"
+          aria-label="Antwort wird vorbereitet"
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-[chat-dot_1s_infinite] [animation-delay:0ms]" />
+          <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-[chat-dot_1s_infinite] [animation-delay:150ms]" />
+          <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-[chat-dot_1s_infinite] [animation-delay:300ms]" />
+        </div>
+      )}
       <div className={MD_PROSE}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
@@ -154,19 +198,25 @@ export function Message({
         </ReactMarkdown>
       </div>
       {figureCitations.length > 0 && (
-        <div className="flex flex-wrap gap-3">
-          {figureCitations.map((c) => (
-            <FigureThumb
-              key={c.chunk_id}
-              citation={c}
-              onOpen={() => onCiteClick?.(c)}
-            />
-          ))}
-        </div>
+        <details className="mt-3 group/figs">
+          <summary className="cursor-pointer text-[12px] text-text-tertiary hover:text-text-secondary list-none [&::-webkit-details-marker]:hidden inline-flex items-center gap-1.5 select-none">
+            <span className="transition-transform duration-150 group-open/figs:rotate-90">›</span>
+            Bilder anzeigen ({figureCitations.length})
+          </summary>
+          <div className="flex flex-wrap gap-3 mt-2">
+            {figureCitations.map((c) => (
+              <FigureThumb
+                key={c.chunk_id}
+                citation={c}
+                onOpen={() => onCiteClick?.(c)}
+              />
+            ))}
+          </div>
+        </details>
       )}
-      {citations.length > 0 && (
+      {visibleCitations.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-3">
-          {citations.map((c, i) => (
+          {visibleCitations.map((c, i) => (
             <CitationChip
               key={`${c.chunk_id}-${i}`}
               citation={c}

@@ -1,10 +1,17 @@
-"""Hybrid retrieval over document_chunks. Returns ranked chunks + image refs."""
+"""Retrieval helpers over document_chunks.
+
+Building blocks for the agentic `search_chunks` tool (`app/tools/search.py`).
+The legacy regex router was deleted in plan 14 — the model decides what to
+retrieve via structured filters and the SQL helpers below back the unified
+`match_chunks_filtered` RPC.
+
+Projektanalyse v1 still uses `_by_vector` directly per question. Plan 15
+will migrate it to `search_chunks` so it can also benefit from filename-
+aware filters.
+"""
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-
-from langsmith import traceable
 
 from app.config import settings
 from app.db import supabase
@@ -40,60 +47,10 @@ class RetrievedChunk:
         }
 
 
-_PAGE_RE = re.compile(r"\b(?:page|seite|p\.?)\s*(\d+)", re.I)
-_FIGURE_RE = re.compile(r"\b(Figure|Abbildung|Fig\.?|Abb\.?)\s*([\d.]+)", re.I)
-_SECTION_RE = re.compile(
-    r"\b(?:Abschnitt|section|chapter|Kapitel)\s*([\d.]+)", re.I
-)
-_VISUAL_RE = re.compile(
-    r"(?i)\b(drawing|diagram|zeichnung|skizze|figure|abbildung|grafik|"
-    r"schaubild|technische\s*zeichnung)\b"
-)
-
 _CHUNK_COLS = (
     "id,file_id,project_id,content,page_start,page_end,"
     "figure_label,block_type,project_files(filename)"
 )
-
-
-@traceable(run_type="retriever", name="retrieval.run")
-def retrieve(
-    *,
-    query: str,
-    project_id: str,
-    user_id: str,  # noqa: ARG001 — RLS uses service-role; user scoping via project_id.
-    top_k: int = 8,
-) -> list[RetrievedChunk]:
-    """Pick a strategy, return ranked chunks. Always restricted by project_id."""
-    page_match = _PAGE_RE.search(query)
-    figure_match = _FIGURE_RE.search(query)
-    section_match = _SECTION_RE.search(query)
-    visual = bool(_VISUAL_RE.search(query))
-
-    if figure_match:
-        label = _normalize_figure_label(figure_match.group(1), figure_match.group(2))
-        rows = _by_figure_label(label, project_id)
-        if rows:
-            return _attach_images(rows)
-
-    if page_match:
-        page = int(page_match.group(1))
-        rows = _by_page(page, project_id)
-        if rows:
-            return _attach_images(rows)
-
-    if section_match:
-        rows = _by_heading(section_match.group(1), project_id)
-        if rows:
-            return _attach_images(rows[:top_k])
-
-    block_filter = "figure" if visual else None
-    rows = _by_vector(query, project_id, top_k, block_filter)
-    return _attach_images(rows)
-
-
-def _normalize_figure_label(prefix: str, num: str) -> str:
-    return f"{prefix.rstrip('.').title()} {num}"
 
 
 def _by_figure_label(label: str, project_id: str) -> list[RetrievedChunk]:

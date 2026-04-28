@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import AsyncGenerator
 
 from langsmith import traceable
@@ -20,7 +21,17 @@ from langsmith import traceable
 from app.config import settings
 from app.db import supabase
 from app.gemini_client import gemini_client
-from app.retrieval import retrieve
+from app.tools.search import execute_search_chunks
+
+log = logging.getLogger(__name__)
+
+
+def _gemini_error_placeholder(exc: Exception) -> str:  # noqa: ARG001 — kept for log parity at call site
+    """Vendor-neutral per-question fallback. A single upstream failure must
+    not kill a multi-question report — the placeholder keeps the question's
+    slot in the final markdown so the user can re-run just that one. Provider
+    name and status code stay in the backend log only."""
+    return "_⚠️ Antwort konnte nicht erzeugt werden — bitte Frage erneut stellen._"
 
 PROJEKTANALYSE_TOOL = {
     "type": "function",
@@ -191,31 +202,47 @@ def _load_full_corpus(project_id: str, user_id: str) -> str:
 
 @traceable(run_type="llm", name="projektanalyse.answer_one")
 def _answer_v1_sync(question: str, project_id: str, user_id: str) -> str:
-    chunks = retrieve(
-        query=question, project_id=project_id, user_id=user_id, top_k=8
+    # Plan 16: route through the same hybrid + rerank pipeline as the chat
+    # path, with batch-tuned settings (wider candidate pool, larger final
+    # top_k) — Projektanalyse is already a multi-second operation, can
+    # afford the extra recall headroom.
+    result = execute_search_chunks(
+        args={"query": question, "top_k": settings.projektanalyse_top_k},
+        project_id=project_id,
+        user_id=user_id,
+        pre_rerank_k_override=settings.projektanalyse_pre_rerank_k,
     )
+    chunks = result.get("_chunks") or []
     context = _format_chunks_block(chunks)
     user_text = f"Kontext:\n{context}\n\n---\n\nFrage: {question}"
-    resp = gemini_client().chat.completions.create(
-        model=settings.gemini_chat_model,
-        messages=[
-            {"role": "system", "content": ANSWER_INSTRUCTIONS},
-            {"role": "user", "content": user_text},
-        ],
-    )
+    try:
+        resp = gemini_client().chat.completions.create(
+            model=settings.gemini_chat_model,
+            messages=[
+                {"role": "system", "content": ANSWER_INSTRUCTIONS},
+                {"role": "user", "content": user_text},
+            ],
+        )
+    except Exception as exc:
+        log.warning("projektanalyse v1 question failed: %s", exc)
+        return _gemini_error_placeholder(exc)
     return (resp.choices[0].message.content or "").strip() or "_(keine Antwort)_"
 
 
 @traceable(run_type="llm", name="projektanalyse_v2.answer_one")
 def _answer_v2_sync(question: str, corpus: str) -> str:
     user_text = f"Projektdokumente:\n{corpus}\n\n---\n\nFrage: {question}"
-    resp = gemini_client().chat.completions.create(
-        model=settings.gemini_chat_model,
-        messages=[
-            {"role": "system", "content": ANSWER_INSTRUCTIONS},
-            {"role": "user", "content": user_text},
-        ],
-    )
+    try:
+        resp = gemini_client().chat.completions.create(
+            model=settings.gemini_chat_model,
+            messages=[
+                {"role": "system", "content": ANSWER_INSTRUCTIONS},
+                {"role": "user", "content": user_text},
+            ],
+        )
+    except Exception as exc:
+        log.warning("projektanalyse v2 question failed: %s", exc)
+        return _gemini_error_placeholder(exc)
     return (resp.choices[0].message.content or "").strip() or "_(keine Antwort)_"
 
 
