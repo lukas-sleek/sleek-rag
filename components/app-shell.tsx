@@ -1187,6 +1187,19 @@ export function App() {
         emptyChatIds={emptyChatIds}
         user={{ email: session.user.email ?? "" }}
         onOpenTemplate={() => setShowTemplate(true)}
+        onLogout={() => {
+          setConfirmDialog({
+            title: "Abmelden?",
+            body: <>Du wirst von <strong>{session.user.email}</strong> abgemeldet.</>,
+            confirmLabel: "Abmelden",
+            onConfirm: async () => {
+              const { error } = await supabase.auth.signOut();
+              if (error) {
+                pushToast("Abmelden fehlgeschlagen.", "warn");
+              }
+            },
+          });
+        }}
       />
 
       <main
