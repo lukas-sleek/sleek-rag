@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     # string (degenerate vector-only path), no rerank — escape hatch back to
     # plan-14 behavior.
     retrieval_mode: str = "hybrid"
-    pre_rerank_k: int = 30
+    # Plan 17: bumped 30→80 to match Vertex AI Ranking guidance for
+    # aggregation Q&A — retrieve 50–100 candidates, keep 15–20.
+    pre_rerank_k: int = 80
     rerank_model: str = "semantic-ranker-default-004"
     rerank_timeout_sec: float = 4.0
     # Projektanalyse v1 batch path (plan 16 T7): more candidates + bigger

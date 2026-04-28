@@ -62,11 +62,27 @@ PROJEKTANALYSE_V2_TOOL = {
     "function": {
         "name": "run_projektanalyse_v2",
         "description": (
-            "Führt die strukturierte Projektanalyse v2 (Volltext-Modus) aus — "
-            "die Projektdokumente werden komplett in den Modell-Kontext geladen "
-            "(kein Retrieval), Antworten sind dadurch vollständiger. "
-            "RUFE DIESES TOOL AUF, wenn der Nutzer explizit 'Projektanalyse v2', "
-            "'v2 Analyse' oder 'Volltext-Analyse' anfordert. Keine Argumente nötig."
+            "Volltext-Analyse: lädt das gesamte Projekt-Korpus in einen "
+            "einzigen Gemini-Aufruf und beantwortet die Vorlage-Fragen "
+            "darüber. Kein chunk-basiertes Retrieval — alles ist im "
+            "Kontext.\n\n"
+            "USE WHEN:\n"
+            "1. Der Nutzer fordert explizit eine Volltext-/v2-Analyse, "
+            "'Projektanalyse v2', 'v2-Analyse' oder 'Volltext-Analyse'.\n"
+            "2. ESKALATION: Du hast für die aktuelle Nutzer-Frage bereits "
+            "≥3 Retrieval-Tool-Aufrufe (search_chunks + list_document_outline "
+            "+ read_section) gemacht und die Antwort ist immer noch "
+            "unvollständig oder ein erwarteter Fakt fehlt (z.B. eine "
+            "Bildunterschrift mit einem Personennamen, eine Tabellenzeile "
+            "mit einem Total, eine Aufzählung über mehrere Dateien). Dann "
+            "ist Volltext oft günstiger als weitere Tool-Aufrufe.\n\n"
+            "USE SIBLING TOOL WHEN: search_chunks oder read_section "
+            "liefern klare Belege — diese sind deutlich günstiger und "
+            "genauso korrekt.\n\n"
+            "KOSTEN: lädt 100k+ Tokens. Nicht als Default verwenden — "
+            "nur wenn der Per-Tool-Deep-Dive nicht reicht oder der "
+            "Nutzer es explizit anfordert.\n\n"
+            "Keine Argumente nötig."
         ),
         "parameters": {
             "type": "object",
@@ -81,7 +97,11 @@ PROJEKTANALYSE_INSTRUCTIONS = (
     "Wenn du eines der Tools `run_projektanalyse` oder `run_projektanalyse_v2` "
     "aufrufst, gib das Tool-Ergebnis exakt und vollständig als deine Antwort "
     "aus. Keine Einleitung, keine Zusammenfassung, kein zusätzlicher "
-    "Kommentar — nur das Tool-Resultat."
+    "Kommentar — nur das Tool-Resultat. "
+    "Du darfst `run_projektanalyse_v2` als Eskalationsweg nutzen, wenn "
+    "der Per-Tool-Deep-Dive (search_chunks + list_document_outline + "
+    "read_section) eine komplexe Aggregations-/Synthesefrage über das "
+    "Korpus nicht abschliessend beantworten kann."
 )
 
 

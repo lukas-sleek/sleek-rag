@@ -197,141 +197,28 @@ def test_pre_rerank_k_override_wins(mocks, monkeypatch):
     assert params["p_top_k"] == 80
 
 
-def test_missing_query_short_circuits():
+def test_missing_query_returns_structured_error():
     out = search_module.execute_search_chunks(
         args={"query": ""},
         project_id="proj-1",
         user_id="user-1",
     )
-    assert out == {"results": [], "error": "missing query"}
+    assert out["results"] == []
+    err = out["error"]
+    assert err["code"] == "missing_required_argument"
+    assert err["argument"] == "query"
+    # Du-form directive — the model can't misroute this as a user prompt.
+    assert "NIEMALS" in err["guidance"]
 
 
-# --- T6 query-expansion tests ---
+# --- Plan 17.2 T3: opt-in query expansion via `expand_synonyms` ---
 
 
-def test_expansion_fans_out_and_rrf_merges(mocks, monkeypatch):
-    monkeypatch.setattr(settings, "retrieval_mode", "hybrid", raising=False)
-    monkeypatch.setattr(settings, "pre_rerank_k", 30, raising=False)
-    monkeypatch.setattr(settings, "query_expansion", True, raising=False)
-
-    monkeypatch.setattr(
-        search_module,
-        "_expand_query",
-        lambda q: ["Grundeigentümer", "Auftraggeber"],
-    )
-
-    # Different RPC results per query so we can verify RRF merging by id.
-    mocks["set_rpc_rows"](
-        {
-            "Welche Bauherren?": [
-                _make_rpc_row(0, prefix="orig"),
-                _make_rpc_row(1, prefix="orig"),
-            ],
-            "Grundeigentümer": [
-                _make_rpc_row(1, prefix="orig"),  # collides → boosted
-                _make_rpc_row(2, prefix="grund"),
-            ],
-            "Auftraggeber": [
-                _make_rpc_row(0, prefix="auftr"),
-            ],
-        }
-    )
-
-    monkeypatch.setattr(
-        search_module.ranking_client,
-        "rank",
-        lambda query, documents, top_n: [(i, 0.0) for i in range(len(documents))],
-    )
-
-    out = search_module.execute_search_chunks(
-        args={"query": "Welche Bauherren?", "top_k": 8},
-        project_id="proj-1",
-        user_id="user-1",
-    )
-
-    rpc_queries = [params["p_query"] for _, params in mocks["rpc_calls"]]
-    assert rpc_queries == ["Welche Bauherren?", "Grundeigentümer", "Auftraggeber"]
-
-    # orig-1 is in both first two queries → highest RRF, must rank first.
-    ids = [r["chunk_id"] for r in out["results"]]
-    assert ids[0] == "orig-1"
-    # All four distinct chunks surface in the merged pool.
-    assert set(ids) == {"orig-0", "orig-1", "grund-2", "auftr-0"}
-
-
-def test_expansion_skipped_with_structural_filter(mocks, monkeypatch):
+def test_expansion_off_by_default_no_regex_gate(mocks, monkeypatch):
+    """Plan 17.2 dropped the regex gate. No `expand_synonyms` flag → no
+    fan-out, even on welche-questions."""
     monkeypatch.setattr(settings, "retrieval_mode", "hybrid", raising=False)
     monkeypatch.setattr(settings, "query_expansion", True, raising=False)
-
-    expand_calls = []
-    monkeypatch.setattr(
-        search_module,
-        "_expand_query",
-        lambda q: expand_calls.append(q) or ["never used"],
-    )
-
-    search_module.execute_search_chunks(
-        args={"query": "Welche Bauherren?", "top_k": 5, "page": 7},
-        project_id="proj-1",
-        user_id="user-1",
-    )
-
-    # `page` filter pins to a known cluster — expansion is wasted recall.
-    assert expand_calls == []
-    assert len(mocks["rpc_calls"]) == 1
-
-
-def test_expansion_skipped_for_long_query(mocks, monkeypatch):
-    monkeypatch.setattr(settings, "retrieval_mode", "hybrid", raising=False)
-    monkeypatch.setattr(settings, "query_expansion", True, raising=False)
-
-    expand_calls = []
-    monkeypatch.setattr(
-        search_module,
-        "_expand_query",
-        lambda q: expand_calls.append(q) or [],
-    )
-
-    search_module.execute_search_chunks(
-        args={
-            "query": (
-                "Welche konkreten technischen Bauherren-Anforderungen "
-                "werden in dem Dokument festgelegt und wer trägt sie?"
-            ),
-            "top_k": 5,
-        },
-        project_id="proj-1",
-        user_id="user-1",
-    )
-
-    # Long descriptive query → don't expand.
-    assert expand_calls == []
-
-
-def test_expansion_skipped_for_non_trigger_query(mocks, monkeypatch):
-    monkeypatch.setattr(settings, "retrieval_mode", "hybrid", raising=False)
-    monkeypatch.setattr(settings, "query_expansion", True, raising=False)
-
-    expand_calls = []
-    monkeypatch.setattr(
-        search_module,
-        "_expand_query",
-        lambda q: expand_calls.append(q) or [],
-    )
-
-    # Neither 'welche/wer' interrogative NOR a domain-noun trigger.
-    search_module.execute_search_chunks(
-        args={"query": "Hallo, wie geht es dir?", "top_k": 5},
-        project_id="proj-1",
-        user_id="user-1",
-    )
-
-    assert expand_calls == []
-
-
-def test_expansion_off_when_flag_disabled(mocks, monkeypatch):
-    monkeypatch.setattr(settings, "retrieval_mode", "hybrid", raising=False)
-    monkeypatch.setattr(settings, "query_expansion", False, raising=False)
 
     expand_calls = []
     monkeypatch.setattr(
@@ -348,3 +235,118 @@ def test_expansion_off_when_flag_disabled(mocks, monkeypatch):
 
     assert expand_calls == []
     assert len(mocks["rpc_calls"]) == 1
+
+
+def test_expansion_fans_out_when_agent_opts_in(mocks, monkeypatch):
+    monkeypatch.setattr(settings, "retrieval_mode", "hybrid", raising=False)
+    monkeypatch.setattr(settings, "pre_rerank_k", 30, raising=False)
+    monkeypatch.setattr(settings, "query_expansion", True, raising=False)
+
+    monkeypatch.setattr(
+        search_module,
+        "_expand_query",
+        lambda q: ["Grundeigentümer", "Auftraggeber"],
+    )
+    mocks["set_rpc_rows"](
+        {
+            "Welche Bauherren?": [
+                _make_rpc_row(0, prefix="orig"),
+                _make_rpc_row(1, prefix="orig"),
+            ],
+            "Grundeigentümer": [
+                _make_rpc_row(1, prefix="orig"),
+                _make_rpc_row(2, prefix="grund"),
+            ],
+            "Auftraggeber": [
+                _make_rpc_row(0, prefix="auftr"),
+            ],
+        }
+    )
+    monkeypatch.setattr(
+        search_module.ranking_client,
+        "rank",
+        lambda query, documents, top_n: [(i, 0.0) for i in range(len(documents))],
+    )
+
+    out = search_module.execute_search_chunks(
+        args={
+            "query": "Welche Bauherren?",
+            "top_k": 8,
+            "expand_synonyms": True,
+        },
+        project_id="proj-1",
+        user_id="user-1",
+    )
+
+    rpc_queries = [params["p_query"] for _, params in mocks["rpc_calls"]]
+    assert rpc_queries == ["Welche Bauherren?", "Grundeigentümer", "Auftraggeber"]
+    ids = [r["chunk_id"] for r in out["results"]]
+    assert ids[0] == "orig-1"  # collides in 2 queries → highest RRF
+    assert set(ids) == {"orig-0", "orig-1", "grund-2", "auftr-0"}
+
+
+def test_expansion_off_when_global_flag_disabled(mocks, monkeypatch):
+    """Global kill-switch wins over the agent's opt-in."""
+    monkeypatch.setattr(settings, "retrieval_mode", "hybrid", raising=False)
+    monkeypatch.setattr(settings, "query_expansion", False, raising=False)
+
+    expand_calls = []
+    monkeypatch.setattr(
+        search_module,
+        "_expand_query",
+        lambda q: expand_calls.append(q) or ["never used"],
+    )
+
+    search_module.execute_search_chunks(
+        args={
+            "query": "Welche Bauherren?",
+            "top_k": 5,
+            "expand_synonyms": True,
+        },
+        project_id="proj-1",
+        user_id="user-1",
+    )
+
+    assert expand_calls == []
+
+
+def test_expansion_off_in_vector_only_mode(mocks, monkeypatch):
+    monkeypatch.setattr(settings, "retrieval_mode", "vector_only", raising=False)
+
+    expand_calls = []
+    monkeypatch.setattr(
+        search_module,
+        "_expand_query",
+        lambda q: expand_calls.append(q) or ["never used"],
+    )
+
+    search_module.execute_search_chunks(
+        args={
+            "query": "Welche Bauherren?",
+            "top_k": 5,
+            "expand_synonyms": True,
+        },
+        project_id="proj-1",
+        user_id="user-1",
+    )
+
+    assert expand_calls == []
+
+
+def test_unknown_file_id_returns_structured_error(mocks, monkeypatch):
+    monkeypatch.setattr(
+        search_module, "resolve_file_id_prefixes", lambda *_a, **_k: []
+    )
+
+    out = search_module.execute_search_chunks(
+        args={"query": "Bauherr", "file_ids": ["deadbeef"]},
+        project_id="proj-1",
+        user_id="user-1",
+    )
+
+    assert out["results"] == []
+    err = out["error"]
+    assert err["code"] == "unknown_file_id"
+    assert err["argument"] == "file_ids"
+    # Short-circuit before any RPC call when file_ids resolve to nothing.
+    assert mocks["rpc_calls"] == []

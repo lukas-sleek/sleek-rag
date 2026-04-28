@@ -54,44 +54,74 @@ SEARCH_CHUNKS_TOOL = {
     "function": {
         "name": "search_chunks",
         "description": (
-            "Sucht in den Projektdokumenten nach relevanten Stellen. "
-            "Rufe dieses Tool auf, sobald die Frage Inhaltliches aus den "
-            "Dokumenten betrifft. Nutze `file_ids`, wenn der Nutzer ein "
-            "konkretes Dokument nennt (z.B. 'Dokument A', 'in Teil B'); "
-            "nutze `page` für Seitenangaben; `figure_label` für 'Abbildung 3.6'; "
-            "`section` für Kapitel/Abschnitt 3.6. Lass Filter weg, wenn unklar."
+            "Globale, gerankte Suche über alle Projektdokumente. "
+            "Liefert die top-K relevantesten Chunks mit `ref`-Nummern für "
+            "Zitate.\n\n"
+            "USE WHEN: jede inhaltliche Frage. Standard-Einstieg ins "
+            "Retrieval. Bei Aggregations-/Sammelfragen ('welche Bauherren', "
+            "'alle Termine', 'wer leitet') darfst und sollst du MEHRERE "
+            "search_chunks-Aufrufe parallel im selben Turn emittieren — "
+            "z.B. einen pro Synonym/Facette/file_id. Gemini führt sie "
+            "parallel aus.\n\n"
+            "USE SIBLING TOOL WHEN: du kennst bereits einen konkreten "
+            "Section-Namen und willst den Abschnitt verbatim lesen → "
+            "`read_section`. Du brauchst eine Übersicht, welche Sections "
+            "in einer Datei existieren → `list_document_outline`. Du "
+            "kommst mit Per-Tool-Deep-Dive nicht weiter und brauchst eine "
+            "Volltext-Synthese → `run_projektanalyse_v2`.\n\n"
+            "PARAMETER `query` ist PFLICHT — leite einen kurzen Such-"
+            "String aus der Frage des Nutzers ab. Beispiel-"
+            "Transformationen:\n"
+            "  - 'Welche Termine sind vorgesehen?' → query='Termine "
+            "Meilensteine'\n"
+            "  - 'Was ist die Bausumme?' → query='Bausumme Baukosten "
+            "Total'\n"
+            "  - 'Wer ist der Projektleiter?' → query='Projektleiter "
+            "Name'\n"
+            "Niemals leer, niemals weglassen, niemals den Nutzer um "
+            "die Suchanfrage bitten."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Natürlichsprachige Suchanfrage. Pflicht.",
+                    "description": (
+                        "PFLICHT. Kurzer Such-String, abgeleitet aus der "
+                        "Frage des Nutzers. Beispiele: 'Bausumme', "
+                        "'Projektleiter', 'Schnittstellenprojekte Bushof'."
+                    ),
                 },
                 "file_ids": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "8-stellige file_id-Präfixe aus der Dokumenten-Liste, "
-                        "um die Suche auf bestimmte Dateien einzuschränken."
+                        "8-stellige file_id-Präfixe aus der Inventarliste. "
+                        "Setzen, wenn der Nutzer ein Dokument namentlich "
+                        "nennt ('Dokument A', 'Teil B', Dateiname). Bei "
+                        "Aggregations-Fragen kannst du mehrere parallele "
+                        "search_chunks-Aufrufe machen — je einen pro "
+                        "Datei."
                     ),
                 },
                 "page": {
                     "type": "integer",
                     "description": (
-                        "Exakte Seitenzahl. Treffer mit page_start == "
-                        "page_end == page werden bevorzugt."
+                        "Exakte Seitenzahl. Treffer auf genau dieser Seite "
+                        "werden bevorzugt."
                     ),
                 },
                 "figure_label": {
                     "type": "string",
                     "description": (
-                        "Abbildungs-Label, z.B. 'Figure 3.6' oder 'Abbildung 3.6'."
+                        "Abbildungs-Label, z.B. 'Abbildung 3.6'."
                     ),
                 },
                 "section": {
                     "type": "string",
-                    "description": "Heading-Präfix, z.B. '3.6' oder 'Installation'.",
+                    "description": (
+                        "Heading-Präfix, z.B. '3.6' oder 'Projektorganisation'."
+                    ),
                 },
                 "block_type": {
                     "type": "string",
@@ -100,7 +130,21 @@ SEARCH_CHUNKS_TOOL = {
                 },
                 "top_k": {
                     "type": "integer",
-                    "description": "Maximale Trefferzahl (1-20, Default 8).",
+                    "description": "Maximale Trefferzahl (1-25, Default 15).",
+                },
+                "expand_synonyms": {
+                    "type": "boolean",
+                    "description": (
+                        "Optional. true → das Tool generiert intern 2-3 "
+                        "Synonym-Suchanfragen (eine extra Gemini-Aufruf) "
+                        "und merged die Ergebnisse via RRF, bevor "
+                        "rerankt wird. Hilfreich bei deutschen Domain-"
+                        "Begriffen mit Synonym-Clustern (Bauherr↔"
+                        "Grundeigentümer, Bausumme↔Baukosten, Drittprojekt"
+                        "↔Schnittstellenprojekt). Sparsam einsetzen — nur "
+                        "wenn ein erster Aufruf ohne expand_synonyms zu "
+                        "wenig Treffer brachte. Default false."
+                    ),
                 },
             },
             "required": ["query"],
@@ -108,44 +152,6 @@ SEARCH_CHUNKS_TOOL = {
         },
     },
 }
-
-
-_EXPAND_TRIGGER = re.compile(
-    r"\b(welche[mnrs]?|welches|wer|wem|wen)\b",
-    re.IGNORECASE,
-)
-
-# Domain nouns where synonym recall reliably beats single-query cosine
-# (Bauherr ↔ Grundeigentümer, Bausumme ↔ Baukosten/Investitionskosten,
-# Termine ↔ Zeitplan/Meilensteine, Honorar ↔ Aufwand/Stunden, etc.). Trigger
-# expansion regardless of question shape when one of these surfaces — the
-# v2-vs-chat gap on the test corpus tracks this list almost 1:1.
-_EXPAND_NOUN_TRIGGER = re.compile(
-    r"\b("
-    r"bauherr(?:en|n)?|grundeigent(?:ü|ue)mer|auftraggeber|"
-    r"bausumme|baukosten|investitionskosten|gesamtkosten|honorar|"
-    r"termine?|zeitplan|meilenstein(?:e)?|"
-    r"drittprojekt(?:e)?|schnittstellen(?:projekt(?:e)?)?"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
-def _should_expand(query: str, *, has_structural_filter: bool) -> bool:
-    """Trigger query expansion on short, broad questions where single-query
-    cosine routinely misses synonym clusters. Two triggers, either suffices:
-      - 'welche/wer' interrogative pattern (aggregation questions)
-      - one of the high-value domain nouns (Bausumme, Termine, etc.)
-    Skipped when a structural filter is set — those already narrow the
-    search to a known cluster, expansion is wasted recall.
-    """
-    if not settings.query_expansion or has_structural_filter:
-        return False
-    if len(query.split()) > 8:
-        return False
-    return bool(
-        _EXPAND_TRIGGER.search(query) or _EXPAND_NOUN_TRIGGER.search(query)
-    )
 
 
 @traceable(run_type="llm", name="expand_query")
@@ -301,13 +307,25 @@ def execute_search_chunks(
     """
     query = (args.get("query") or "").strip()
     if not query:
-        return {"results": [], "error": "missing query"}
+        return {
+            "results": [],
+            "error": {
+                "code": "missing_required_argument",
+                "argument": "query",
+                "guidance": (
+                    "Übersetze die Frage des Nutzers in einen kurzen "
+                    "Such-String (z.B. Frage 'Was ist die Bausumme?' → "
+                    "query='Bausumme') und rufe `search_chunks` erneut "
+                    "auf. Frage NIEMALS den Nutzer nach einer Suchanfrage."
+                ),
+            },
+        }
 
-    raw_top_k = args.get("top_k") or 8
+    raw_top_k = args.get("top_k") or 15
     try:
-        top_k = max(1, min(int(raw_top_k), 20))
+        top_k = max(1, min(int(raw_top_k), 25))
     except (TypeError, ValueError):
-        top_k = 8
+        top_k = 15
 
     block_type = args.get("block_type") or None
     page = args.get("page")
@@ -328,29 +346,49 @@ def execute_search_chunks(
             [str(p) for p in file_ids_raw], project_id, user_id
         )
         if not resolved:
-            # Caller named files we don't have. Return empty so the model
-            # can re-plan rather than silently widening to all files.
-            return {"results": []}
+            return {
+                "results": [],
+                "error": {
+                    "code": "unknown_file_id",
+                    "argument": "file_ids",
+                    "guidance": (
+                        "Die angegebenen file_id-Präfixe existieren nicht "
+                        "in der Inventarliste des Projekts. Wähle 8-stellige "
+                        "Präfixe aus der Dokumentenliste im System-Prompt, "
+                        "oder lass `file_ids` weg, um über alle Dokumente "
+                        "zu suchen."
+                    ),
+                },
+            }
         full_file_ids = resolved
 
     mode = (settings.retrieval_mode or "hybrid").lower()
-    has_structural_filter = bool(
-        full_file_ids or page_int or figure_label or section
-    )
 
-    # T6: query expansion. Vector-only mode skips it (no synonyms help when
-    # FTS is disabled), and any structural filter skips it too — those
-    # filters already pin the search to a known cluster.
+    # Plan 17.2: query expansion is now opt-in via the `expand_synonyms`
+    # parameter — the agent decides when synonym fan-out is worth the extra
+    # Gemini call. Vector-only mode disables it (FTS is degenerate, no
+    # synonyms help). Structural filters (page/figure/file_ids) implicitly
+    # skip it because the search is already pinned to a known cluster, but
+    # we leave that decision to the model now too.
+    expand_synonyms = bool(args.get("expand_synonyms"))
     sub_queries: list[str] = []
-    if mode != "vector_only" and _should_expand(
-        query, has_structural_filter=has_structural_filter
-    ):
+    if mode != "vector_only" and expand_synonyms and settings.query_expansion:
         sub_queries = _expand_query(query)
 
     queries = [query] + sub_queries
     embeddings = _embed_many(queries)
     if embeddings is None:
-        return {"results": [], "error": "embedding_failed"}
+        return {
+            "results": [],
+            "error": {
+                "code": "embedding_failed",
+                "guidance": (
+                    "Der Embedding-Service ist gerade nicht erreichbar. "
+                    "Versuche es in ein paar Sekunden erneut oder mit einer "
+                    "anderen, kürzeren Suchanfrage."
+                ),
+            },
+        }
 
     if mode == "vector_only":
         # Pure-vector escape hatch: empty FTS query degrades match_chunks_hybrid

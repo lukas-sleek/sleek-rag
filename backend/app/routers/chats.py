@@ -32,61 +32,54 @@ from app.projektanalyse import (
     stream_projektanalyse_v2,
 )
 from app.retrieval import RetrievedChunk
-from app.tools.search import SEARCH_CHUNKS_TOOL, execute_search_chunks
+from app.sufficiency import assess_sufficiency, build_continuation_hint
+from app.tools import (
+    LIST_DOCUMENT_OUTLINE_TOOL,
+    READ_SECTION_TOOL,
+    SEARCH_CHUNKS_TOOL,
+    execute_search_chunks,
+    list_document_outline_executor,
+    read_section_executor,
+)
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
-MAX_TOOL_ITERATIONS = 4
+MAX_TOOL_ITERATIONS = 12
+
+RETRIEVAL_TOOL_NAMES = {
+    "search_chunks",
+    "list_document_outline",
+    "read_section",
+}
 
 CHAT_SYSTEM_PROMPT = (
-    "Du bist ein technischer RAG-Assistent für Schweizer Bahn-/Ingenieurprojekte. "
-    "Du beantwortest Fragen ausschließlich anhand der hochgeladenen "
-    "Projektdokumente, die du via dem Tool `search_chunks` abrufst.\n\n"
-    "REGELN:\n"
-    "1. Sobald die Frage Inhaltliches aus den Dokumenten betrifft, RUFE "
-    "`search_chunks` AUF — nicht raten, nicht aus dem Vorwissen antworten. "
-    "Du darfst NIEMALS den Nutzer nach Suchbegriffen, Synonymen oder "
-    "Suchanfragen fragen — du formulierst die `query` selbst aus der Frage "
-    "und rufst das Tool direkt auf.\n"
-    "2. Nutze die Filter strukturiert: `file_ids` wenn der Nutzer ein Dokument "
-    "namentlich nennt (z.B. 'Dokument A', 'Teil B', oder den Dateinamen — "
-    "ordne den Hinweis über die Dokumentliste unten dem 8-stelligen "
-    "file_id-Präfix zu); `page` für Seitenzahlen; `figure_label` für "
-    "Abbildungsverweise; `section` für Kapitel/Abschnitt-Nummern.\n"
-    "3. Bei Folgefragen, die einen Filter-Kontext der vorherigen Frage "
-    "übernehmen ('und auf seite X', 'und in abschnitt Y', 'und was steht "
-    "dort zu Z'), übernimm denselben `file_ids`-Filter wie im letzten "
-    "search_chunks-Aufruf, sofern der Nutzer ihn nicht explizit ändert "
-    "oder erweitert.\n"
-    "4. Zitiere Belege im Antworttext mit der `ref`-Nummer aus dem "
-    "Tool-Ergebnis in eckigen Klammern, z.B. [1] oder [2]. "
-    "Mehrere refs nacheinander sind ok ([1][3]).\n"
-    "5. Wenn ein Filter-Aufruf leer zurückkommt (`results: []`), rufe "
-    "`search_chunks` erneut mit weniger restriktiven Filtern auf — typischerweise "
-    "nur mit `query` (und ggf. `file_ids`), ohne `page`/`section`/`figure_label`. "
-    "Erst nach diesem Retry darfst du sagen, dass die Information nicht in den "
-    "Dokumenten steht.\n"
-    "6. Aggregations-/Aufzählungsfragen ('welche Bauherren', 'welche Termine', "
-    "'welche Drittprojekte' etc.) deckt der Retriever durch interne "
-    "Synonym-Erweiterung bereits ab — eine `search_chunks`-Suche reicht "
-    "üblicherweise. Wenn die Treffer den Punkt der Frage trotzdem nicht "
-    "vollständig belegen, mache EINEN weiteren Aufruf mit einem Synonym "
-    "(Bauherr↔Grundeigentümer, Drittprojekt↔Schnittstellenprojekt, "
-    "Honorar↔Aufwand, Bausumme↔Baukosten/Gesamtkosten) — als zusätzlichen "
-    "Tool-Aufruf, niemals als Rückfrage an den Nutzer.\n"
-    "7. PFLICHT-PRÜFUNG VOR 'nicht in den Dokumenten gefunden': Wenn die "
-    "Treffer den Punkt der Frage nicht klar belegen, mache eine zweite "
-    "Suche pro Datei (`file_ids` setzen, eine Datei nach der anderen), "
-    "bevor du sagst, dass die Information fehlt.\n"
-    "8. Scope-Fallback: Wenn die Beschaffung nur SIA-Phasen 21 "
-    "(Machbarkeit) und/oder 31 (Vorprojekt) umfasst und der Nutzer nach "
-    "Bauprojekt (SIA 32/41) oder Ausführung (SIA 51+) fragt, antworte: "
-    "\"Nicht Teil dieser Beschaffung — der Auftragsumfang umfasst nur "
-    "[konkrete Phasen].\" Das ist KEIN 'nicht gefunden'-Fall.\n"
-    "9. Antworte auf Deutsch. Halte dich an Fakten aus den Treffern; wenn "
-    "die Treffer keine Antwort hergeben, sag das offen.\n"
-    "10. Smalltalk und Meta-Fragen ('Hallo', 'wer bist du?') ohne "
-    "Tool-Aufruf kurz beantworten.\n\n"
+    "Du bist ein technischer RAG-Assistent für Schweizer Bahn-/Ingenieur-"
+    "projekt-Ausschreibungen. Du beantwortest Fragen ausschliesslich "
+    "anhand der hochgeladenen Projektdokumente.\n\n"
+    "VERHALTEN:\n"
+    "• Sprache: Deutsch.\n"
+    "• Tools: nutze die verfügbaren Retrieval-Tools, um Belege zu finden. "
+    "Lies die Tool-Beschreibungen — sie sagen dir, wann welches Tool "
+    "passt und wie sie sich abgrenzen. Bei Aggregations-Fragen (z.B. "
+    "\"welche Bauherren\", \"alle Termine\") darfst du mehrere Tool-"
+    "Aufrufe parallel emittieren.\n"
+    "• Du formulierst Suchanfragen und Filter immer selbst aus der "
+    "Frage des Nutzers. Du fragst NIEMALS den Nutzer nach Suchbegriffen, "
+    "Synonymen, Quellen oder einer Suchanfrage zurück. Wenn ein Tool "
+    "einen Fehler oder leere Treffer liefert, korrigiere den Aufruf "
+    "selbst und versuch es erneut — niemals den Nutzer um eine Eingabe "
+    "bitten.\n"
+    "• Zitate: jeder belegte Satz/Aufzählungspunkt bekommt die `ref`-"
+    "Nummer aus dem Tool-Ergebnis in eckigen Klammern, z.B. [1] oder "
+    "[3]. Mehrere refs nacheinander sind ok ([1][3]). Refs aus allen "
+    "Retrieval-Tools eines Turns sind fortlaufend durchnummeriert.\n"
+    "• Scope-Fallback: wenn die Beschaffung nur SIA-Phasen 21 "
+    "(Machbarkeit) und/oder 31 (Vorprojekt) umfasst und der Nutzer "
+    "nach Bauprojekt (SIA 32/41) oder Ausführung (SIA 51+) fragt, "
+    "antworte: \"Nicht Teil dieser Beschaffung — der Auftragsumfang "
+    "umfasst nur [konkrete Phasen].\" Das ist KEIN 'nicht gefunden'-Fall.\n"
+    "• Smalltalk und Meta-Fragen ('Hallo', 'wer bist du') ohne Tool-"
+    "Aufruf kurz beantworten.\n\n"
     + PROJEKTANALYSE_INSTRUCTIONS
 )
 
@@ -330,14 +323,30 @@ async def _send_message_stream(
     messages: list[dict] = [system_msg, *history, {"role": "user", "content": text}]
     tools: list[dict] = [
         SEARCH_CHUNKS_TOOL,
+        LIST_DOCUMENT_OUTLINE_TOOL,
+        READ_SECTION_TOOL,
         PROJEKTANALYSE_TOOL,
         PROJEKTANALYSE_V2_TOOL,
+    ]
+    # When tool_choice="required" is set we restrict the bound tool list to
+    # retrieval-only — otherwise Gemini happily satisfies the constraint by
+    # picking run_projektanalyse_v2 (the cheapest path to "I called *a*
+    # tool"), which is exactly the v2-fallback behavior the project rule
+    # forbids. v1/v2 stay bound on all non-forced turns so the user-elected
+    # path keeps working.
+    retrieval_only_tools: list[dict] = [
+        SEARCH_CHUNKS_TOOL,
+        LIST_DOCUMENT_OUTLINE_TOOL,
+        READ_SECTION_TOOL,
     ]
 
     collected_chunks: list[RetrievedChunk] = []
     ref_offset = 0
     parts: list[str] = []
     finished = False
+    sufficiency_already_nudged = False  # one continuation hint per turn
+    force_tool_next_iter = False  # plan 17.3 T1: bind sufficiency-fail to a tool call
+    tool_error_streak = 0  # plan 17.3 T2: count consecutive all-error tool turns
 
     for iteration in range(MAX_TOOL_ITERATIONS):
         try:
@@ -347,12 +356,28 @@ async def _send_message_stream(
             # on the surrounding `chats.send_message` chain still captures
             # tool calls and embedding lookups — we just lose the inner
             # chat.completions span.
+            # Plan 17.3 T1/T2: when sufficiency just nudged or the previous
+            # turn returned only error envelopes, refuse to let the model
+            # emit prose this turn. Gemini's OpenAI-compat shim honors
+            # `tool_choice="required"`. The flag is consumed for one turn,
+            # then cleared. We ALSO swap the bound tool list to retrieval-
+            # only so the forced call can't satisfy the constraint by
+            # invoking run_projektanalyse_v2 (the project rule forbids
+            # auto-escalation to v2; v2 stays user-/model-elected on
+            # non-forced turns only).
+            forced_this_turn = force_tool_next_iter
+            create_kwargs: dict = dict(
+                model=settings.gemini_chat_model,
+                messages=messages,
+                tools=retrieval_only_tools if forced_this_turn else tools,
+                stream=True,
+            )
+            if forced_this_turn:
+                create_kwargs["tool_choice"] = "required"
+                force_tool_next_iter = False
             stream = await asyncio.to_thread(
                 lambda: gemini_client_untraced().chat.completions.create(
-                    model=settings.gemini_chat_model,
-                    messages=messages,
-                    tools=tools,
-                    stream=True,
+                    **create_kwargs
                 )
             )
         except Exception as exc:
@@ -516,33 +541,97 @@ async def _send_message_stream(
             yield f"data: {json.dumps(done_payload)}\n\n"
             return
 
-        # No tool calls → final answer. Stream text out, finish.
-        search_calls = [
+        # No retrieval tool calls → final answer (or sufficiency-nudged
+        # continuation, see below).
+        retrieval_calls = [
             slot
             for slot in pending_tool_calls.values()
-            if slot.get("name") == "search_chunks"
+            if slot.get("name") in RETRIEVAL_TOOL_NAMES
         ]
-        if not search_calls:
+        if not retrieval_calls:
             assistant_text = "".join(iter_text_parts)
+
+            # Sufficiency check (Reasoning Agent / SCA pattern): before we
+            # let the model finalize, ask another Gemini call whether the
+            # collected chunks are enough to answer. If not, append the
+            # rater's feedback as a system message and let the loop run one
+            # more iteration. One nudge per turn — never block the answer.
+            iterations_remaining = MAX_TOOL_ITERATIONS - iteration - 1
+            if (
+                collected_chunks
+                and not sufficiency_already_nudged
+                and iterations_remaining > 0
+            ):
+                verdict = await asyncio.to_thread(
+                    assess_sufficiency,
+                    question=text,
+                    chunks=collected_chunks,
+                )
+                if not verdict["sufficient"]:
+                    sufficiency_already_nudged = True
+                    # Plan 17.3 T1: bind the next iteration to a tool call.
+                    # The plain "system message + continue" pattern (plan
+                    # 17.2) was advisory — UAT showed the model regularly
+                    # ignored it and emitted prose anyway. Forcing
+                    # tool_choice="required" on the next create() call
+                    # makes the contract enforceable rather than persuasive.
+                    force_tool_next_iter = True
+                    # Reflect the model's would-be-final text into the
+                    # message history (so the next iteration sees what it
+                    # was about to say) and append the continuation hint.
+                    if assistant_text:
+                        messages.append(
+                            {"role": "assistant", "content": assistant_text}
+                        )
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": build_continuation_hint(verdict),
+                        }
+                    )
+                    continue  # re-enter the loop for one more retrieval round
+
             if assistant_text:
                 yield f"data: {json.dumps({'type': 'delta', 'content': assistant_text})}\n\n"
                 parts.append(assistant_text)
             finished = True
             break
 
-        # Tool-call iteration: execute each search_chunks, append assistant
-        # message with tool_calls, append tool messages with results, loop.
-        # Don't stream any text from this iteration — the model will produce
-        # the final text in a later iteration after seeing tool results.
+        # Tool-call iteration: dispatch each retrieval tool by name, append
+        # assistant message with tool_calls, append tool messages with
+        # results, loop. Don't stream any text from this iteration — the
+        # model will produce the final text in a later iteration after
+        # seeing tool results. All three tools share the `ref_offset`
+        # accumulator so citations stay contiguous across the turn.
         assistant_tool_calls = []
         tool_messages = []
-        for slot in search_calls:
+        # Plan 17.3 T2: track structured-error envelopes per turn. If every
+        # call this turn errored, we replace the tool messages with one
+        # synthetic system directive so the model can't read the error
+        # `guidance` field and surface it to the user as prose (which is
+        # what UAT showed Q4 doing on the empty-`query` envelope).
+        turn_errors: list[dict] = []
+        turn_call_count = 0
+        for slot in retrieval_calls:
+            tool_name = slot.get("name") or ""
             try:
                 args = json.loads(slot.get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
+
+            if tool_name == "search_chunks":
+                executor = execute_search_chunks
+            elif tool_name == "list_document_outline":
+                executor = list_document_outline_executor
+            elif tool_name == "read_section":
+                executor = read_section_executor
+            else:
+                # Defensive: should not happen since RETRIEVAL_TOOL_NAMES
+                # gates membership, but keep the loop robust.
+                continue
+
             result = await asyncio.to_thread(
-                execute_search_chunks,
+                executor,
                 args=args,
                 project_id=project_id,
                 user_id=user_id,
@@ -551,6 +640,11 @@ async def _send_message_stream(
             chunks_added: list[RetrievedChunk] = result.pop("_chunks", []) or []
             collected_chunks.extend(chunks_added)
             ref_offset += len(result.get("results", []))
+
+            turn_call_count += 1
+            err = result.get("error") if isinstance(result, dict) else None
+            if isinstance(err, dict):
+                turn_errors.append({"tool": tool_name, **err})
 
             tc_id = slot.get("id") or f"call_{iteration}_{len(assistant_tool_calls)}"
             # Replay the parsed args we actually executed, not the raw stream
@@ -561,7 +655,7 @@ async def _send_message_stream(
                     "id": tc_id,
                     "type": "function",
                     "function": {
-                        "name": "search_chunks",
+                        "name": tool_name,
                         "arguments": json.dumps(args, ensure_ascii=False),
                     },
                 }
@@ -589,7 +683,55 @@ async def _send_message_stream(
                 "tool_calls": assistant_tool_calls,
             }
         )
-        messages.extend(tool_messages)
+
+        # Plan 17.3 T2: when every tool call this turn errored, the JSON
+        # envelopes still get fed back to the model so the call/response
+        # pairs stay balanced (Gemini rejects assistant.tool_calls without
+        # matching role:tool messages). But we ALSO append a directive
+        # system message instructing the model to retry, and force a tool
+        # call on the next iteration via tool_choice="required". This
+        # prevents the failure mode UAT exposed (model reads the error
+        # `guidance` field, paraphrases it as "Bitte geben Sie an…", and
+        # streams that to the user).
+        all_errored = turn_call_count > 0 and len(turn_errors) == turn_call_count
+        if all_errored:
+            tool_error_streak += 1
+            first_err = turn_errors[0]
+            retry_directive = (
+                "TOOL-RETRY: dein letzter Tool-Aufruf "
+                f"({first_err.get('tool', '?')}) hatte einen Fehler "
+                f"({first_err.get('code', 'unknown')}"
+                + (
+                    f", argument={first_err['argument']}"
+                    if first_err.get("argument")
+                    else ""
+                )
+                + "). Korrigiere die Argumente selbst aus der Frage "
+                "des Nutzers und rufe das Tool sofort erneut auf. "
+                "Antworte NICHT mit Prosa und frage NIEMALS den Nutzer "
+                "nach Eingaben — du musst das Tool jetzt erneut "
+                "aufrufen."
+            )
+            messages.extend(tool_messages)
+            messages.append({"role": "system", "content": retry_directive})
+            force_tool_next_iter = True
+            # Hard cap: if the model keeps producing broken tool calls
+            # despite force-tool, stop burning iterations and surface the
+            # generic warning at the end of the loop. Without v2 fallback
+            # (per project rule) this is the safe terminal state.
+            if tool_error_streak >= 3:
+                warn_text = (
+                    "_⚠️ Die Frage konnte mit den verfügbaren Tools "
+                    "nicht beantwortet werden. Bitte anders "
+                    "formulieren._"
+                )
+                yield f"data: {json.dumps({'type': 'delta', 'content': warn_text})}\n\n"
+                parts.append(warn_text)
+                finished = True
+                break
+        else:
+            tool_error_streak = 0
+            messages.extend(tool_messages)
 
         if is_final_iteration:
             # Loop cap reached without a final text answer. Tell the user.
