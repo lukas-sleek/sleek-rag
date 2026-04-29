@@ -151,7 +151,21 @@ ANSWER_INSTRUCTIONS = (
     "   **Nicht in den Dokumenten gefunden.**\n"
     "7. Wenn nur Teilinformationen vorhanden sind, gib das Vorhandene "
     "konkret an und vermerke in einem kurzen Satz, was fehlt.\n"
-    "8. Antworte auf Deutsch."
+    "8. Antworte auf Deutsch.\n"
+    "9. Bei Total-/Summen-Fragen (Bausumme, Gesamtkosten, Gesamtaufwand, "
+    "Stunden insgesamt): Du darfst NIEMALS Teilbeträge selbst summieren, "
+    "um einen Gesamtwert zu erzeugen. Wenn der Headline-/Total-Wert "
+    "nicht explizit im Kontext steht, antworte: \"Der Gesamt-/Headline-"
+    "Wert ist in den abgerufenen Chunks nicht explizit enthalten. Die "
+    "einzelnen Teilbeträge: …\" und liste die Teilbeträge auf — auch im "
+    "Projektanalyse-Tool-Output: keine Selbst-Summierung.\n"
+    "10. Bei Rollen-Fragen (\"wer ist der Projektleiter / Verantwortliche "
+    "/ Ansprechpartner / Bauherr\"): die Dokumente betreffen ein Tender-"
+    "Projekt vor Auftragsvergabe; die anbieter-seitigen Personen sind "
+    "typischerweise NICHT benannt. Antworte mit allen Personen aus den "
+    "Dokumenten, die zur Rollen-Familie passen (Projektleiter, Teil-"
+    "projektleiter, Projektkoordinator), MIT Rollen-Bezeichnung und "
+    "Fundstelle. Verweigere nur, wenn keine passende Person belegt ist."
 )
 
 

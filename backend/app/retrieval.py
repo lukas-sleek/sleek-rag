@@ -11,7 +11,7 @@ aware filters.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.config import settings
 from app.db import supabase
@@ -31,6 +31,13 @@ class RetrievedChunk:
     block_type: str
     score: float
     image_path: str | None = None
+    # Plan 17.4 T2a: heading_path + chunk_index let the rater see where each
+    # chunk sits in the document (so it can spot "all chunks are sub-rows of
+    # the same table; no headline row in the set"). Optional with sensible
+    # defaults so legacy callers (`_by_vector`, `_by_figure_label`,
+    # `_by_page`) that didn't carry these fields keep working.
+    heading_path: list[str] = field(default_factory=list)
+    chunk_index: int = 0
 
     def to_citation(self) -> dict:
         snippet = self.content[:200] + ("…" if len(self.content) > 200 else "")
@@ -159,6 +166,13 @@ def _row_to_chunk(row: dict, *, score: float) -> RetrievedChunk:
 
 
 def _rpc_row_to_chunk(row: dict, *, score: float) -> RetrievedChunk:
+    raw_heading = row.get("heading_path")
+    heading_path = list(raw_heading) if isinstance(raw_heading, list) else []
+    raw_idx = row.get("chunk_index")
+    try:
+        chunk_index = int(raw_idx) if raw_idx is not None else 0
+    except (TypeError, ValueError):
+        chunk_index = 0
     return RetrievedChunk(
         chunk_id=row["id"],
         file_id=row["file_id"],
@@ -170,4 +184,6 @@ def _rpc_row_to_chunk(row: dict, *, score: float) -> RetrievedChunk:
         figure_label=row.get("figure_label"),
         block_type=row["block_type"],
         score=score,
+        heading_path=heading_path,
+        chunk_index=chunk_index,
     )

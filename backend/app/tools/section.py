@@ -81,6 +81,22 @@ READ_SECTION_TOOL = {
                     "type": "integer",
                     "description": "Letzte Seite des Bereichs (inklusive).",
                 },
+                "include_page_neighbors": {
+                    "type": "boolean",
+                    "description": (
+                        "Optional, default false. Wenn true, liefere ALLE "
+                        "Chunks auf den betroffenen Seiten in Dokument-"
+                        "Reihenfolge zurück, nicht nur die Section-/Filter-"
+                        "gefilterten. Nützlich, wenn das gesuchte Element "
+                        "(z.B. Tabellen-Headline-Zeile mit Total) in einem "
+                        "benachbarten Chunk auf derselben Seite liegen "
+                        "könnte. Erhöht das Token-Budget — sparsam "
+                        "einsetzen, vorzugsweise nach einem ersten "
+                        "read_section-Aufruf, der Chunks fand aber nicht "
+                        "den gesuchten Fakt (z.B. nur Sub-Zeilen einer "
+                        "Tabelle ohne Headline)."
+                    ),
+                },
             },
             "required": ["file_id"],
             "additionalProperties": False,
@@ -96,11 +112,22 @@ def read_section_executor(
     project_id: str,
     user_id: str,
     ref_offset: int = 0,
+    outlined_file_ids: set[str] | None = None,
 ) -> dict:
     """Resolve file_id, call `chunks_in_range` with optional section / page
     filters. Returns the same envelope as `search_chunks`. Score is fixed at
     1.0 since these chunks are not ranked by relevance — they are explicitly
     requested by document position.
+
+    Plan 17.4 T4: when `section` is set we enforce that
+    `list_document_outline` was called on the same file_id earlier in the
+    turn. The chat agent loop threads `outlined_file_ids` (a set of full
+    UUIDs) into the executor; when the set is provided and the resolved
+    file_id is missing from it, we return a `section_without_outline`
+    structured-error envelope. Page-targeted reads (no `section`) bypass
+    the gate. When `outlined_file_ids is None` the gate is disabled —
+    legacy callers (Projektanalyse, tests not exercising the loop) keep
+    working unchanged.
     """
     _ = project_id  # ownership is enforced inside the RPC via user_id
 
@@ -136,6 +163,33 @@ def read_section_executor(
     full_file_id = resolved[0]
 
     section = (args.get("section") or "").strip() or None
+
+    if (
+        section
+        and outlined_file_ids is not None
+        and full_file_id not in outlined_file_ids
+    ):
+        return {
+            "results": [],
+            "_chunks": [],
+            "error": {
+                "code": "section_without_outline",
+                "argument": "section",
+                "guidance": (
+                    f"Du hast `read_section(section='{section}')` "
+                    f"aufgerufen, ohne vorher `list_document_outline` "
+                    f"auf der Datei '{raw_file_id}' auszuführen. "
+                    "Section-Namen müssen aus dem Outline stammen — "
+                    "Raten führt zu leeren Treffern. Rufe ZUERST "
+                    f"`list_document_outline(file_id='{raw_file_id}')` "
+                    "auf, lies die zurückgegebenen Section-Namen, und "
+                    "rufe `read_section` dann mit einem dieser Namen "
+                    "auf. Alternativ: `read_section` mit `page_from`/"
+                    "`page_to` ohne `section` — dann ist kein Outline "
+                    "nötig."
+                ),
+            },
+        }
     page_from = args.get("page_from")
     page_to = args.get("page_to")
     try:
@@ -180,6 +234,45 @@ def read_section_executor(
 
     rows = res.data or []
     chunks: list[RetrievedChunk] = [_rpc_row_to_chunk(r, score=1.0) for r in rows]
+
+    # Plan 17.4.1 F8b: when the agent passes include_page_neighbors=true,
+    # expand the result to ALL chunks on the same pages (in document
+    # order). Lets the model see the full page context — typically the
+    # Tabellen-Headline-Zeile with the Total when read_section initially
+    # returned only sub-rows. Hard cap stays at 30 to bound the token cost.
+    if args.get("include_page_neighbors") and chunks:
+        pages = sorted({c.page_start for c in chunks})
+        seen_ids: set[str] = set()
+        expanded: list[RetrievedChunk] = []
+        for p in pages:
+            try:
+                page_res = (
+                    supabase()
+                    .rpc(
+                        "chunks_on_page",
+                        {
+                            "p_file_id": full_file_id,
+                            "p_user_id": user_id,
+                            "p_page": int(p),
+                        },
+                    )
+                    .execute()
+                )
+            except Exception as exc:
+                log.warning(
+                    "read_section: chunks_on_page rpc failed for page %s: %s",
+                    p,
+                    exc,
+                )
+                continue
+            for r in page_res.data or []:
+                cid = r.get("id")
+                if cid and cid not in seen_ids:
+                    seen_ids.add(cid)
+                    expanded.append(_rpc_row_to_chunk(r, score=1.0))
+        if expanded:
+            chunks = expanded[:30]
+
     chunks = _attach_images(chunks)
 
     results = []

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -22,7 +23,7 @@ def _friendly_gemini_error(exc: Exception) -> str:
 from app.auth import current_user_id
 from app.config import settings
 from app.db import supabase
-from app.file_inventory import build_inventory_block
+from app.file_inventory import build_inventory_block, resolve_file_id_prefixes
 from app.gemini_client import gemini_client_untraced
 from app.projektanalyse import (
     PROJEKTANALYSE_INSTRUCTIONS,
@@ -31,6 +32,7 @@ from app.projektanalyse import (
     stream_projektanalyse,
     stream_projektanalyse_v2,
 )
+from app.answer_verifier import build_verifier_correction_hint, verify_answer
 from app.retrieval import RetrievedChunk
 from app.sufficiency import assess_sufficiency, build_continuation_hint
 from app.tools import (
@@ -79,7 +81,28 @@ CHAT_SYSTEM_PROMPT = (
     "antworte: \"Nicht Teil dieser Beschaffung — der Auftragsumfang "
     "umfasst nur [konkrete Phasen].\" Das ist KEIN 'nicht gefunden'-Fall.\n"
     "• Smalltalk und Meta-Fragen ('Hallo', 'wer bist du') ohne Tool-"
-    "Aufruf kurz beantworten.\n\n"
+    "Aufruf kurz beantworten.\n"
+    "• Bei Total-/Summen-Fragen (Bausumme, Gesamtkosten, Gesamtaufwand, "
+    "Stunden insgesamt): Du darfst NIEMALS Teilbeträge selbst summieren, "
+    "um einen Gesamtwert zu erzeugen. Wenn der Headline-/Total-Wert "
+    "nicht explizit in einem abgerufenen Chunk steht, antworte: \"Der "
+    "Gesamt-/Headline-Wert ist in den abgerufenen Chunks nicht explizit "
+    "enthalten. Die einzelnen Teilbeträge: …\" und liste die Teil-"
+    "beträge auf. Nur wenn die Frage erkennbar nach einer Summe "
+    "verlangt UND der Headline-Wert in einem Chunk steht, gib den "
+    "Headline-Wert mit Beleg aus.\n"
+    "• Rollen-Fragen (\"wer ist der Projektleiter / Verantwortliche / "
+    "Ansprechpartner / Bauherr\"): die abgerufenen Dokumente betreffen "
+    "ein Tender-Projekt vor Auftragsvergabe. Die anbieter-seitigen "
+    "Personen sind also typischerweise NICHT in den Dokumenten benannt "
+    "(das Angebot wurde noch nicht eingereicht). Wenn die Frage nach "
+    "einer Rolle ohne expliziten Anbieter-Kontext gestellt wird, "
+    "antworte mit allen Personen aus den Chunks, die zu der Rollen-"
+    "Familie passen, MIT Rollen-Bezeichnung und Seite/Section. Beispiel: "
+    "\"Thomas Kieliger ist Projektleiter für das Teilprojekt 2 "
+    "(Infrastruktur) auf Seite 21 der Bauherrschafts-Organisation [Beleg].\" "
+    "Verweigere nur, wenn keine einzige passende Person in den Chunks "
+    "belegt ist.\n\n"
     + PROJEKTANALYSE_INSTRUCTIONS
 )
 
@@ -245,6 +268,22 @@ def _build_system_message(project_id: str, user_id: str) -> dict:
     return {"role": "system", "content": content}
 
 
+def _top_cited_file_id_prefix(chunks: list[RetrievedChunk]) -> str | None:
+    """Pick the 8-char file_id prefix that appears in the most retrieved
+    chunks so far. Used to give the model a concrete starting point when
+    we force a `list_document_outline` retry — "explore some file" was too
+    vague in UAT. Plan 17.4 T3."""
+    if not chunks:
+        return None
+    counts = Counter(
+        (c.file_id or "").replace("-", "")[:8] for c in chunks if c.file_id
+    )
+    counts.pop("", None)
+    if not counts:
+        return None
+    return counts.most_common(1)[0][0]
+
+
 def _citations_by_ref(chunks: list[RetrievedChunk]) -> list[dict]:
     """One citation per `ref` index. Order is significant: `chunks[i]` IS
     the chunk the model saw as `ref = i + 1` (set by execute_search_chunks
@@ -345,8 +384,22 @@ async def _send_message_stream(
     parts: list[str] = []
     finished = False
     sufficiency_already_nudged = False  # one continuation hint per turn
+    verifier_already_nudged = False  # plan 17.4.1 G4: one verifier nudge per turn
+    last_sufficiency_question_type: str | None = None
     force_tool_next_iter = False  # plan 17.3 T1: bind sufficiency-fail to a tool call
     tool_error_streak = 0  # plan 17.3 T2: count consecutive all-error tool turns
+    # Plan 17.4 T3/T4: track which file_ids were outlined this turn (for the
+    # read_section gate) and whether outline was called at all (for the
+    # forced-retry routing decision). `outlined_file_ids` holds resolved
+    # full UUIDs because that's what `read_section` compares against after
+    # `resolve_file_id_prefixes`.
+    outlined_file_ids: set[str] = set()
+    outline_called_this_turn = False
+    search_called_this_turn = False
+    # Holds the function name we want to pin tool_choice to on the next
+    # iteration (plan 17.4 T3). None → fall back to "required" over the
+    # retrieval-only set when force_tool_next_iter is True.
+    force_tool_next_iter_target: str | None = None
 
     for iteration in range(MAX_TOOL_ITERATIONS):
         try:
@@ -366,6 +419,7 @@ async def _send_message_stream(
             # auto-escalation to v2; v2 stays user-/model-elected on
             # non-forced turns only).
             forced_this_turn = force_tool_next_iter
+            forced_target_this_turn = force_tool_next_iter_target
             create_kwargs: dict = dict(
                 model=settings.gemini_chat_model,
                 messages=messages,
@@ -373,8 +427,20 @@ async def _send_message_stream(
                 stream=True,
             )
             if forced_this_turn:
-                create_kwargs["tool_choice"] = "required"
+                # Plan 17.4 T3: when we know exactly which tool the model
+                # should call next (e.g. list_document_outline after a
+                # sufficiency-fail with no outline yet), pin tool_choice to
+                # that specific function. Otherwise fall back to "required"
+                # over the retrieval-only tool set.
+                if forced_target_this_turn:
+                    create_kwargs["tool_choice"] = {
+                        "type": "function",
+                        "function": {"name": forced_target_this_turn},
+                    }
+                else:
+                    create_kwargs["tool_choice"] = "required"
                 force_tool_next_iter = False
+                force_tool_next_iter_target = None
             stream = await asyncio.to_thread(
                 lambda: gemini_client_untraced().chat.completions.create(
                     **create_kwargs
@@ -567,6 +633,7 @@ async def _send_message_stream(
                     question=text,
                     chunks=collected_chunks,
                 )
+                last_sufficiency_question_type = verdict.get("question_type")
                 if not verdict["sufficient"]:
                     sufficiency_already_nudged = True
                     # Plan 17.3 T1: bind the next iteration to a tool call.
@@ -576,6 +643,30 @@ async def _send_message_stream(
                     # tool_choice="required" on the next create() call
                     # makes the contract enforceable rather than persuasive.
                     force_tool_next_iter = True
+                    # Plan 17.4 T3: when the model already searched but
+                    # never outlined this turn, pin the next call to
+                    # `list_document_outline` instead of generic
+                    # tool_choice="required". UAT showed forced retries
+                    # routinely landed on a near-duplicate search query
+                    # rather than the structural tools that close the gap.
+                    # Skip the routing if the rater explicitly suggested
+                    # synonym/expansion in `feedback` — leave the model a
+                    # search-shaped retry in that case.
+                    feedback_str = (verdict.get("feedback") or "").lower()
+                    rater_prefers_search = (
+                        "synonym" in feedback_str
+                        or "expand_synonyms" in feedback_str
+                    )
+                    file_id_hint: str | None = None
+                    if (
+                        search_called_this_turn
+                        and not outline_called_this_turn
+                        and not rater_prefers_search
+                    ):
+                        force_tool_next_iter_target = "list_document_outline"
+                        file_id_hint = _top_cited_file_id_prefix(
+                            collected_chunks
+                        )
                     # Reflect the model's would-be-final text into the
                     # message history (so the next iteration sees what it
                     # was about to say) and append the continuation hint.
@@ -586,10 +677,49 @@ async def _send_message_stream(
                     messages.append(
                         {
                             "role": "system",
-                            "content": build_continuation_hint(verdict),
+                            "content": build_continuation_hint(
+                                verdict,
+                                force_outline_file_id=file_id_hint,
+                            ),
                         }
                     )
                     continue  # re-enter the loop for one more retrieval round
+
+            # Plan 17.4.1 G4: answer-correctness verifier — second-pass
+            # autorater that catches inversions / fabrications / entity
+            # mix-ups the sufficiency rater can't (sufficiency rates
+            # COVERAGE; this rates CORRECTNESS). Skipped on phrase /
+            # out_of_scope (handled inside verify_answer) and on turns
+            # without chunks. Fires at most once per turn — caps
+            # together with sufficiency at 2 nudges total.
+            if (
+                collected_chunks
+                and not verifier_already_nudged
+                and iterations_remaining > 0
+                and assistant_text.strip()
+            ):
+                verifier_verdict = await asyncio.to_thread(
+                    verify_answer,
+                    question=text,
+                    draft=assistant_text,
+                    chunks=collected_chunks,
+                    question_type=last_sufficiency_question_type,
+                )
+                if not verifier_verdict["ok"]:
+                    verifier_already_nudged = True
+                    if assistant_text:
+                        messages.append(
+                            {"role": "assistant", "content": assistant_text}
+                        )
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": build_verifier_correction_hint(
+                                verifier_verdict
+                            ),
+                        }
+                    )
+                    continue  # one more iteration to rewrite
 
             if assistant_text:
                 yield f"data: {json.dumps({'type': 'delta', 'content': assistant_text})}\n\n"
@@ -630,13 +760,19 @@ async def _send_message_stream(
                 # gates membership, but keep the loop robust.
                 continue
 
-            result = await asyncio.to_thread(
-                executor,
+            # Plan 17.4 T4: read_section needs the per-turn outlined-file
+            # set so it can reject section-name guesses without a prior
+            # outline call on the same file.
+            executor_kwargs: dict = dict(
                 args=args,
                 project_id=project_id,
                 user_id=user_id,
                 ref_offset=ref_offset,
             )
+            if tool_name == "read_section":
+                executor_kwargs["outlined_file_ids"] = outlined_file_ids
+
+            result = await asyncio.to_thread(executor, **executor_kwargs)
             chunks_added: list[RetrievedChunk] = result.pop("_chunks", []) or []
             collected_chunks.extend(chunks_added)
             ref_offset += len(result.get("results", []))
@@ -645,6 +781,30 @@ async def _send_message_stream(
             err = result.get("error") if isinstance(result, dict) else None
             if isinstance(err, dict):
                 turn_errors.append({"tool": tool_name, **err})
+
+            # Plan 17.4 T3/T4: track per-turn tool usage for the
+            # sufficiency-fail routing decision and the read_section gate.
+            # Errored calls still count as "called" — the model was here,
+            # the next iteration shouldn't re-force them.
+            if tool_name == "search_chunks":
+                search_called_this_turn = True
+            elif tool_name == "list_document_outline":
+                outline_called_this_turn = True
+                # Resolve and remember the file_id so a later
+                # read_section(section=...) on the same file passes the
+                # gate. We re-resolve here (cheap inventory lookup) rather
+                # than reaching into the executor's internals.
+                hint = (args.get("file_id") or "").strip()
+                if hint and not isinstance(err, dict):
+                    try:
+                        for fid in resolve_file_id_prefixes(
+                            [hint], project_id, user_id
+                        ):
+                            outlined_file_ids.add(fid)
+                    except Exception:
+                        log.debug(
+                            "outlined_file_ids: prefix resolve failed", exc_info=True
+                        )
 
             tc_id = slot.get("id") or f"call_{iteration}_{len(assistant_tool_calls)}"
             # Replay the parsed args we actually executed, not the raw stream

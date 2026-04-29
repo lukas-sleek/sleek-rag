@@ -100,6 +100,18 @@ def loop_harness(monkeypatch):
         "_build_system_message",
         lambda pid, uid: {"role": "system", "content": "sys"},
     )
+    # Plan 17.4.1 G4: default verifier to ok=true so tests that don't
+    # exercise the verifier explicitly aren't surprised by an extra
+    # iteration. Tests that DO exercise it monkeypatch this again.
+    monkeypatch.setattr(
+        chats_module,
+        "verify_answer",
+        lambda *, question, draft, chunks, question_type: {
+            "ok": True,
+            "issue": None,
+            "fix": None,
+        },
+    )
     return captured
 
 
@@ -229,8 +241,15 @@ def test_sufficiency_fail_forces_tool_choice_required(loop_harness, monkeypatch)
     # Iter 0/1/3 — auto (no tool_choice override).
     assert "tool_choice" not in create_calls[0]
     assert "tool_choice" not in create_calls[1]
-    # Iter 2 — forced because sufficiency just nudged on iter 1.
-    assert create_calls[2].get("tool_choice") == "required"
+    # Iter 2 — forced because sufficiency just nudged on iter 1. Plan 17.4
+    # T3: since iter 0 ran search_chunks and no outline call happened yet,
+    # the retry is pinned to list_document_outline rather than generic
+    # "required" — gives the model a concrete structural starting point
+    # rather than letting it bounce back to a near-duplicate search.
+    assert create_calls[2].get("tool_choice") == {
+        "type": "function",
+        "function": {"name": "list_document_outline"},
+    }
     # Iter 3 — flag was consumed; back to auto.
     assert "tool_choice" not in create_calls[3]
 
@@ -381,6 +400,469 @@ def test_all_errored_tool_calls_force_retry(loop_harness, monkeypatch):
     deltas = [f["content"] for f in frames if f.get("type") == "delta"]
     assert any("Termine" in d for d in deltas)
     assert not any("ÜBERSETZE" in d for d in deltas)
+
+
+# ---------------------------------------------------------------------------
+# Plan 17.4 T3 — sufficiency-fail forces tool_choice=list_document_outline
+# when no outline ran yet this turn; falls back to "required" once outline
+# already happened.
+# ---------------------------------------------------------------------------
+
+
+def test_sufficiency_fail_pins_tool_choice_to_outline(loop_harness, monkeypatch):
+    """Iter 0: search_chunks. Iter 1: final text → sufficiency=insufficient.
+    Iter 2 must be issued with tool_choice pinned to list_document_outline
+    (not generic "required"), and the continuation hint must include the
+    file_id prefix derived from the most-cited chunk."""
+    events_per_iter = [
+        [
+            _mk_event(
+                tool_calls=[
+                    _mk_tool_delta(
+                        idx=0,
+                        tc_id="call_search",
+                        name="search_chunks",
+                        args=json.dumps({"query": "Bauherren"}),
+                    )
+                ]
+            ),
+        ],
+        [_mk_event(content="Nur Hochdorf [1].")],
+        # iter 2: model answers the forced outline call
+        [
+            _mk_event(
+                tool_calls=[
+                    _mk_tool_delta(
+                        idx=0,
+                        tc_id="call_outline",
+                        name="list_document_outline",
+                        args=json.dumps({"file_id": "abcd1234"}),
+                    )
+                ]
+            ),
+        ],
+        [_mk_event(content="Hochdorf, SBB, Manor [1].")],
+    ]
+    captured_messages = []
+
+    def fake_create(**kwargs):
+        loop_harness["create_calls"].append(
+            {k: v for k, v in kwargs.items() if k != "stream"}
+        )
+        captured_messages.append(list(kwargs.get("messages") or []))
+        i = len(loop_harness["create_calls"]) - 1
+        return iter(events_per_iter[i])
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=fake_create)
+        )
+    )
+    monkeypatch.setattr(
+        chats_module, "gemini_client_untraced", lambda: fake_client
+    )
+
+    def fake_search(*, args, project_id, user_id, ref_offset):
+        chunk = RetrievedChunk(
+            chunk_id="c1",
+            file_id="abcd1234-0000-0000-0000-000000000000",
+            filename="Teil_B.pdf",
+            project_id="proj-1",
+            content="Bauherr: Hochdorf",
+            page_start=1,
+            page_end=1,
+            figure_label=None,
+            block_type="paragraph",
+            score=0.9,
+        )
+        return {
+            "results": [{"ref": ref_offset + 1, "chunk_id": chunk.chunk_id}],
+            "_chunks": [chunk],
+        }
+
+    def fake_outline(*, args, project_id, user_id, ref_offset):
+        return {"file_id": args.get("file_id"), "outline": []}
+
+    monkeypatch.setattr(chats_module, "execute_search_chunks", fake_search)
+    monkeypatch.setattr(
+        chats_module, "list_document_outline_executor", fake_outline
+    )
+    monkeypatch.setattr(
+        chats_module,
+        "resolve_file_id_prefixes",
+        lambda prefixes, pid, uid: [
+            "abcd1234-0000-0000-0000-000000000000" for _ in prefixes
+        ],
+    )
+
+    sufficiency_calls = []
+
+    def fake_assess(*, question, chunks):
+        sufficiency_calls.append(len(chunks))
+        if len(sufficiency_calls) == 1:
+            return {
+                "sufficient": False,
+                "missing": "weitere Bauherren",
+                "feedback": "outline auf Teil B",
+            }
+        return {"sufficient": True, "missing": None, "feedback": None}
+
+    monkeypatch.setattr(chats_module, "assess_sufficiency", fake_assess)
+
+    chat = {"project_id": "proj-1", "id": "chat-1"}
+    _drain(
+        chats_module._send_message_stream(
+            chat=chat,
+            text="Welche Bauherren?",
+            chat_id="chat-1",
+            user_id="user-1",
+            template=None,
+        )
+    )
+
+    create_calls = loop_harness["create_calls"]
+    assert len(create_calls) == 4
+    # Iter 2 must be pinned to list_document_outline — not generic
+    # "required" — because no outline ran on iter 0.
+    iter2_choice = create_calls[2].get("tool_choice")
+    assert isinstance(iter2_choice, dict), iter2_choice
+    assert iter2_choice == {
+        "type": "function",
+        "function": {"name": "list_document_outline"},
+    }
+
+    # Continuation hint at iter 2 should mention list_document_outline AND
+    # the top-cited file_id prefix (8 chars).
+    iter2_msgs = captured_messages[2]
+    hints = [
+        m for m in iter2_msgs
+        if m.get("role") == "system"
+        and "SUFFICIENCY-CHECK" in (m.get("content") or "")
+    ]
+    assert hints, "expected sufficiency hint in iter-2 messages"
+    hint_content = hints[-1]["content"]
+    assert "list_document_outline" in hint_content
+    assert "abcd1234" in hint_content
+
+
+def test_sufficiency_fail_after_outline_falls_back_to_required(
+    loop_harness, monkeypatch
+):
+    """If list_document_outline already ran this turn, a second
+    sufficiency-fail must fall back to generic tool_choice='required' over
+    the retrieval-only set — not pin to outline again."""
+    events_per_iter = [
+        # iter 0: parallel search + outline (so collected_chunks is non-empty
+        # and outline_called_this_turn becomes True before sufficiency runs).
+        [
+            _mk_event(
+                tool_calls=[
+                    _mk_tool_delta(
+                        idx=0,
+                        tc_id="call_search",
+                        name="search_chunks",
+                        args=json.dumps({"query": "x"}),
+                    ),
+                    _mk_tool_delta(
+                        idx=1,
+                        tc_id="call_outline",
+                        name="list_document_outline",
+                        args=json.dumps({"file_id": "abcd1234"}),
+                    ),
+                ]
+            ),
+        ],
+        # iter 1: final text (insufficient)
+        [_mk_event(content="Outline besagt, dass…")],
+        # iter 2: forced retry — because outline already ran, fall back to
+        # generic tool_choice="required".
+        [
+            _mk_event(
+                tool_calls=[
+                    _mk_tool_delta(
+                        idx=0,
+                        tc_id="call_read",
+                        name="read_section",
+                        args=json.dumps(
+                            {"file_id": "abcd1234", "page_from": 1, "page_to": 2}
+                        ),
+                    )
+                ]
+            ),
+        ],
+        [_mk_event(content="Antwort.")],
+    ]
+    _install_streams(monkeypatch, loop_harness, events_per_iter)
+
+    def fake_search(*, args, project_id, user_id, ref_offset):
+        chunk = RetrievedChunk(
+            chunk_id="c1",
+            file_id="abcd1234-0000-0000-0000-000000000000",
+            filename="Teil_B.pdf",
+            project_id="proj-1",
+            content="content",
+            page_start=1,
+            page_end=1,
+            figure_label=None,
+            block_type="paragraph",
+            score=0.9,
+        )
+        return {
+            "results": [{"ref": ref_offset + 1, "chunk_id": chunk.chunk_id}],
+            "_chunks": [chunk],
+        }
+
+    monkeypatch.setattr(chats_module, "execute_search_chunks", fake_search)
+
+    def fake_outline(*, args, project_id, user_id, ref_offset):
+        return {"file_id": args.get("file_id"), "outline": []}
+
+    def fake_read(*, args, project_id, user_id, ref_offset, outlined_file_ids=None):
+        chunk = RetrievedChunk(
+            chunk_id="c1",
+            file_id="abcd1234-0000-0000-0000-000000000000",
+            filename="Teil_B.pdf",
+            project_id="proj-1",
+            content="content",
+            page_start=1,
+            page_end=1,
+            figure_label=None,
+            block_type="paragraph",
+            score=1.0,
+        )
+        return {
+            "results": [{"ref": ref_offset + 1, "chunk_id": chunk.chunk_id}],
+            "_chunks": [chunk],
+        }
+
+    monkeypatch.setattr(
+        chats_module, "list_document_outline_executor", fake_outline
+    )
+    monkeypatch.setattr(chats_module, "read_section_executor", fake_read)
+    monkeypatch.setattr(
+        chats_module,
+        "resolve_file_id_prefixes",
+        lambda prefixes, pid, uid: [
+            "abcd1234-0000-0000-0000-000000000000" for _ in prefixes
+        ],
+    )
+
+    sufficiency_calls = []
+
+    def fake_assess(*, question, chunks):
+        sufficiency_calls.append(len(chunks))
+        if len(sufficiency_calls) == 1:
+            return {
+                "sufficient": False,
+                "missing": "konkreter Inhalt",
+                "feedback": "lies die Section",
+            }
+        return {"sufficient": True, "missing": None, "feedback": None}
+
+    monkeypatch.setattr(chats_module, "assess_sufficiency", fake_assess)
+
+    chat = {"project_id": "proj-1", "id": "chat-1"}
+    _drain(
+        chats_module._send_message_stream(
+            chat=chat,
+            text="Was steht da?",
+            chat_id="chat-1",
+            user_id="user-1",
+            template=None,
+        )
+    )
+
+    create_calls = loop_harness["create_calls"]
+    # Iter 2 forced. Outline already ran → fall back to "required".
+    assert create_calls[2].get("tool_choice") == "required"
+
+
+# ---------------------------------------------------------------------------
+# Plan 17.4.1 G4 — answer-correctness verifier nudge in the chat agent loop.
+# ---------------------------------------------------------------------------
+
+
+def test_verifier_nudge_drives_one_more_iteration(loop_harness, monkeypatch):
+    """Sufficiency=true but the verifier flags an inversion → loop must
+    inject the correction hint as a system message and run one more
+    iteration; the iter-2 text becomes the streamed answer."""
+    events_per_iter = [
+        # iter 0: search_chunks
+        [
+            _mk_event(
+                tool_calls=[
+                    _mk_tool_delta(
+                        idx=0,
+                        tc_id="call_search",
+                        name="search_chunks",
+                        args=json.dumps({"query": "Vermessung"}),
+                    )
+                ]
+            ),
+        ],
+        # iter 1: draft answer (incorrect — will be flagged)
+        [_mk_event(content="Ja, Vermessung ist Teil des Auftrags.")],
+        # iter 2: corrected answer
+        [
+            _mk_event(
+                content="Nein, Vermessung ist NICHT Bestandteil — separate Mandate [1]."
+            )
+        ],
+    ]
+    captured_messages = []
+
+    def fake_create(**kwargs):
+        loop_harness["create_calls"].append(
+            {k: v for k, v in kwargs.items() if k != "stream"}
+        )
+        captured_messages.append(list(kwargs.get("messages") or []))
+        i = len(loop_harness["create_calls"]) - 1
+        return iter(events_per_iter[i])
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=fake_create)
+        )
+    )
+    monkeypatch.setattr(
+        chats_module, "gemini_client_untraced", lambda: fake_client
+    )
+
+    def fake_search(*, args, project_id, user_id, ref_offset):
+        chunks = [_mk_chunk("c1")]
+        return {
+            "results": [{"ref": ref_offset + 1, "chunk_id": "c1"}],
+            "_chunks": chunks,
+        }
+
+    monkeypatch.setattr(chats_module, "execute_search_chunks", fake_search)
+    monkeypatch.setattr(
+        chats_module,
+        "assess_sufficiency",
+        lambda *, question, chunks: {
+            "sufficient": True,
+            "missing": None,
+            "feedback": None,
+            "question_type": "point",
+        },
+    )
+
+    verifier_calls = []
+
+    def fake_verify(*, question, draft, chunks, question_type):
+        verifier_calls.append(
+            {
+                "question": question,
+                "draft": draft,
+                "qtype": question_type,
+            }
+        )
+        if len(verifier_calls) == 1:
+            return {
+                "ok": False,
+                "issue": "Entwurf invertiert die Aussage der Chunks.",
+                "fix": "Antworte: Vermessung ist NICHT Teil des Auftrags.",
+            }
+        return {"ok": True, "issue": None, "fix": None}
+
+    monkeypatch.setattr(chats_module, "verify_answer", fake_verify)
+
+    chat = {"project_id": "proj-1", "id": "chat-1"}
+    frames = _drain(
+        chats_module._send_message_stream(
+            chat=chat,
+            text="Ist Vermessung Bestandteil?",
+            chat_id="chat-1",
+            user_id="user-1",
+            template=None,
+        )
+    )
+
+    # Verifier called at least once; question_type was threaded through.
+    assert verifier_calls
+    assert verifier_calls[0]["qtype"] == "point"
+    assert "Teil des Auftrags" in verifier_calls[0]["draft"]
+
+    # 3 create calls — iter 2 must have been issued (the correction round).
+    assert len(loop_harness["create_calls"]) == 3
+    iter2_msgs = captured_messages[2]
+    correction = [
+        m
+        for m in iter2_msgs
+        if m.get("role") == "system"
+        and "KORREKTHEITS-CHECK" in (m.get("content") or "")
+    ]
+    assert correction, "expected correction hint in iter-2 messages"
+    assert "NICHT Teil" in correction[-1]["content"]
+
+    # Streamed answer is the iter-2 text, not the iter-1 incorrect draft.
+    deltas = [f["content"] for f in frames if f.get("type") == "delta"]
+    assert any("NICHT Bestandteil" in d for d in deltas)
+    assert not any("ist Teil des Auftrags" in d for d in deltas)
+
+
+def test_verifier_skipped_on_phrase_question(loop_harness, monkeypatch):
+    """When sufficiency reports question_type=phrase, the verifier still
+    gets called but short-circuits internally with ok=true. We assert on
+    the externally observable behavior: no extra iteration is forced."""
+    events_per_iter = [
+        [
+            _mk_event(
+                tool_calls=[
+                    _mk_tool_delta(
+                        idx=0,
+                        tc_id="call_search",
+                        name="search_chunks",
+                        args=json.dumps({"query": "Phrase"}),
+                    )
+                ]
+            ),
+        ],
+        [_mk_event(content="Ja, die Phrase steht auf S.5 [1].")],
+    ]
+    _install_streams(monkeypatch, loop_harness, events_per_iter)
+
+    monkeypatch.setattr(
+        chats_module,
+        "execute_search_chunks",
+        lambda *, args, project_id, user_id, ref_offset: {
+            "results": [{"ref": ref_offset + 1, "chunk_id": "c1"}],
+            "_chunks": [_mk_chunk("c1")],
+        },
+    )
+    monkeypatch.setattr(
+        chats_module,
+        "assess_sufficiency",
+        lambda *, question, chunks: {
+            "sufficient": True,
+            "missing": None,
+            "feedback": None,
+            "question_type": "phrase",
+        },
+    )
+
+    qtypes_seen = []
+
+    def fake_verify(*, question, draft, chunks, question_type):
+        qtypes_seen.append(question_type)
+        # Even if the chat loop calls us, phrase short-circuits inside
+        # verify_answer to ok=true. Mirror that here.
+        return {"ok": True, "issue": None, "fix": None}
+
+    monkeypatch.setattr(chats_module, "verify_answer", fake_verify)
+
+    chat = {"project_id": "proj-1", "id": "chat-1"}
+    _drain(
+        chats_module._send_message_stream(
+            chat=chat,
+            text='Steht "X" in den Plänen?',
+            chat_id="chat-1",
+            user_id="user-1",
+            template=None,
+        )
+    )
+    # Only 2 create calls — no extra iteration triggered by the verifier.
+    assert len(loop_harness["create_calls"]) == 2
 
 
 def test_three_consecutive_error_streaks_bails_with_warning(

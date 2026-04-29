@@ -187,7 +187,7 @@ def chat_loop_mocks(monkeypatch):
         )
         return {"file_id": args["file_id"], "outline": [{"heading": "X"}]}
 
-    def fake_read(*, args, project_id, user_id, ref_offset):
+    def fake_read(*, args, project_id, user_id, ref_offset, outlined_file_ids=None):
         captured["executor_calls"].append(("read_section", args, ref_offset))
         chunks = [_mk_chunk("c4"), _mk_chunk("c5")]
         results = [
@@ -201,6 +201,20 @@ def chat_loop_mocks(monkeypatch):
         chats_module, "list_document_outline_executor", fake_outline
     )
     monkeypatch.setattr(chats_module, "read_section_executor", fake_read)
+
+    # Plan 17.4.1 G4: keep the answer-correctness verifier inert by
+    # default; the standalone test_answer_verifier.py + the
+    # test_verifier_nudge_drives_one_more_iteration test cover the
+    # verifier-on path explicitly.
+    monkeypatch.setattr(
+        chats_module,
+        "verify_answer",
+        lambda *, question, draft, chunks, question_type: {
+            "ok": True,
+            "issue": None,
+            "fix": None,
+        },
+    )
 
     return captured
 
