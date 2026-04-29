@@ -16,11 +16,11 @@ from app.routers import files as files_router
 
 @pytest.fixture
 def client(monkeypatch):
-    # Skip the ingest worker startup; we don't want background tasks during tests.
-    async def _noop_run_worker():
+    # Skip the LRO poller startup; we don't want background tasks during tests.
+    async def _noop_poller():
         return
 
-    monkeypatch.setattr(main_module, "run_worker", _noop_run_worker)
+    monkeypatch.setattr(main_module, "run_poller", _noop_poller)
     # Stub auth
     main_module.app.dependency_overrides[files_router.current_user_id] = lambda: "user-1"
     yield TestClient(main_module.app)

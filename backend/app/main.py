@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.routers import chats, files, projects
-from app.workers.ingest import run_worker
+from app.workers.rag_lro_poller import run_poller
 
 if settings.langsmith_api_key:
     os.environ.setdefault("LANGSMITH_TRACING", "true")
@@ -20,7 +20,7 @@ if settings.langsmith_api_key:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(run_worker())
+    task = asyncio.create_task(run_poller())
     try:
         yield
     finally:
