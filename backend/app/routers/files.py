@@ -164,7 +164,7 @@ async def upload_file(
     file_id = str(uuid.uuid4())
     try:
         gs_uri = await asyncio.to_thread(
-            upload_pdf_bytes, user_id, project_id, file_id, contents
+            upload_pdf_bytes, user_id, project_id, file_id, contents, file.filename
         )
     except Exception as exc:
         raise HTTPException(502, f"GCS upload failed: {exc}") from exc
