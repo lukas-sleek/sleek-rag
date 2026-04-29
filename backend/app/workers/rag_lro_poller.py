@@ -1,13 +1,22 @@
-"""Polls outstanding rag.import_files LROs and updates project_files status.
+"""Drives rag.import_files LROs end-to-end.
 
-Plan 18.2 T5. Replaces the old Document AI ingest worker. The upload endpoint
-fires rag.import_files_async and persists the LRO name on the row; this
-worker resolves those operations and flips parsing -> ready / failed.
+Two responsibilities, both run on every tick:
+
+1. Dispatcher — for each project with rows in status='queued' AND no
+   in-flight LRO on its corpus, batch every queued GCS URI into a single
+   rag.import_files_async call. Vertex serialises operations per corpus,
+   so concurrent uploads MUST share an LRO instead of each firing one.
+
+2. Resolver — for each row in status='parsing', poll the LRO and flip
+   the status (ready / failed) when it resolves. When several rows share
+   one LRO, the resolver maps per-file partialFailures back to the right
+   row by GCS URI.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections import defaultdict
 
 from google.cloud.aiplatform_v1beta1.services.vertex_rag_data_service import (
     VertexRagDataServiceClient,
@@ -18,6 +27,7 @@ from vertexai.preview import rag
 
 from app.config import settings
 from app.db import supabase
+from app.rag_corpus import import_pdfs
 
 log = logging.getLogger(__name__)
 
@@ -64,45 +74,6 @@ def _resolve_rag_file_name(corpus_name: str, gcs_uri: str) -> str | None:
     return None
 
 
-def _import_failure_message(op) -> str | None:
-    """Return a failure summary if the LRO did not actually import the file.
-
-    Vertex returns done=true with no top-level error even when every file
-    in the batch failed (e.g. parser model 404). The real signal lives in
-    response.failedRagFilesCount + metadata.genericMetadata.partialFailures.
-    """
-    # Hard error first (auth, quota, etc.)
-    if op.HasField("error") and op.error.code != 0:
-        return (op.error.message or "import failed")[:500]
-
-    # No response payload at all — leave as soft success (rare; would mean
-    # Vertex returned done=true with neither error nor result set).
-    if not op.HasField("response"):
-        return None
-
-    payload = _proto_any_to_dict(op.response)
-    failed = int(payload.get("failedRagFilesCount", 0) or 0)
-    imported = int(payload.get("importedRagFilesCount", 0) or 0)
-    skipped = int(payload.get("skippedRagFilesCount", 0) or 0)
-    if imported > 0 and failed == 0:
-        return None  # genuine success
-
-    # Imported zero or some failed: surface a helpful summary. The first
-    # partialFailure message in metadata typically carries the root cause
-    # (e.g. parser model 404).
-    detail = ""
-    meta = _proto_any_to_dict(op.metadata) if op.HasField("metadata") else {}
-    pfs = (meta.get("genericMetadata") or {}).get("partialFailures") or []
-    if pfs:
-        detail = pfs[0].get("message") or ""
-    summary = (
-        f"import failed: {failed} failed, {imported} imported, {skipped} skipped"
-    )
-    if detail:
-        summary = f"{summary} — {detail}"
-    return summary[:500]
-
-
 def _proto_any_to_dict(any_msg) -> dict:
     """Best-effort decode of a google.protobuf.Any holding a known JSON-able type."""
     try:
@@ -115,43 +86,107 @@ def _proto_any_to_dict(any_msg) -> dict:
         return {}
 
 
-def _poll_one(row: dict) -> None:
-    op_name = row.get("ingest_lro_name")
-    file_id = row["id"]
-    corpus_name = row.get("rag_corpus_name") or (row.get("projects") or {}).get("rag_corpus_name")
-    gcs_uri = row.get("gcs_blob_path")
+def _row_corpus(row: dict) -> str | None:
+    return row.get("rag_corpus_name") or (row.get("projects") or {}).get("rag_corpus_name")
 
+
+def _partial_failure_uris(meta: dict) -> set[str]:
+    """Extract GCS URIs from partialFailures messages.
+
+    Vertex puts the offending URI into the failure message body
+    (e.g. "...processing gs://bucket/path/file.pdf"). We pattern-match it
+    out so multi-file LROs can mark only the failed rows as failed.
+    """
+    uris: set[str] = set()
+    pfs = (meta.get("genericMetadata") or {}).get("partialFailures") or []
+    for f in pfs:
+        msg = f.get("message") or ""
+        for token in msg.split():
+            if token.startswith("gs://"):
+                # strip trailing punctuation a Vertex message might tack on
+                uris.add(token.rstrip(".,)\""))
+    return uris
+
+
+def _resolve_lro(op_name: str, rows_for_op: list[dict]) -> None:
+    """Resolve one LRO and update every row that shares its operation name."""
     try:
         op = _ops_client().get_operation(GetOperationRequest(name=op_name))
-    except Exception as exc:
-        log.exception("get_operation failed for file %s op=%s: %s", file_id, op_name, exc)
+    except Exception:
+        log.exception("get_operation failed for op=%s", op_name)
         return
 
     if not op.done:
         return
 
-    failure = _import_failure_message(op)
-    if failure:
-        supabase().table("project_files").update({
-            "status": "failed",
-            "ingest_error": failure,
-            "ingest_lro_name": None,
-        }).eq("id", file_id).execute()
-        log.warning("file %s ingest failed: %s", file_id, failure)
+    # Hard error: every row in the batch fails with the same message.
+    if op.HasField("error") and op.error.code != 0:
+        msg = (op.error.message or "import failed")[:500]
+        for r in rows_for_op:
+            supabase().table("project_files").update({
+                "status": "failed",
+                "ingest_error": msg,
+                "ingest_lro_name": None,
+            }).eq("id", r["id"]).execute()
+        log.warning("LRO %s failed (hard): %s", op_name, msg)
         return
 
-    rag_file_name = (
-        _resolve_rag_file_name(corpus_name, gcs_uri) if corpus_name and gcs_uri else None
+    response_payload = _proto_any_to_dict(op.response) if op.HasField("response") else {}
+    metadata_payload = _proto_any_to_dict(op.metadata) if op.HasField("metadata") else {}
+    failed_count = int(response_payload.get("failedRagFilesCount", 0) or 0)
+    imported_count = int(response_payload.get("importedRagFilesCount", 0) or 0)
+
+    failed_uris = _partial_failure_uris(metadata_payload)
+    pfs = (metadata_payload.get("genericMetadata") or {}).get("partialFailures") or []
+    fallback_msg = (
+        (pfs[0].get("message") or "import failed")[:500]
+        if pfs
+        else f"import failed: {failed_count} failed, {imported_count} imported"
     )
-    update = {"status": "ready", "ingest_lro_name": None}
-    if rag_file_name:
-        update["rag_file_name"] = rag_file_name
-    supabase().table("project_files").update(update).eq("id", file_id).execute()
-    log.info("file %s ingest ready: %s", file_id, rag_file_name)
+
+    # If the LRO yielded zero imports AND we couldn't resolve which URIs failed,
+    # mark every row in the batch as failed — better than stranding them as
+    # parsing forever.
+    if imported_count == 0 and failed_count > 0 and not failed_uris:
+        for r in rows_for_op:
+            supabase().table("project_files").update({
+                "status": "failed",
+                "ingest_error": fallback_msg,
+                "ingest_lro_name": None,
+            }).eq("id", r["id"]).execute()
+        log.warning("LRO %s failed (all rows): %s", op_name, fallback_msg)
+        return
+
+    for r in rows_for_op:
+        gcs_uri = r.get("gcs_blob_path") or ""
+        corpus_name = _row_corpus(r)
+        if gcs_uri in failed_uris:
+            # Find the specific message for this URI, fall back to the first.
+            specific = next(
+                (f.get("message") for f in pfs if f.get("message") and gcs_uri in f["message"]),
+                fallback_msg,
+            )
+            supabase().table("project_files").update({
+                "status": "failed",
+                "ingest_error": (specific or fallback_msg)[:500],
+                "ingest_lro_name": None,
+            }).eq("id", r["id"]).execute()
+            log.warning("file %s ingest failed: %s", r["id"], specific)
+            continue
+
+        rag_file_name = (
+            _resolve_rag_file_name(corpus_name, gcs_uri)
+            if corpus_name and gcs_uri
+            else None
+        )
+        update = {"status": "ready", "ingest_lro_name": None}
+        if rag_file_name:
+            update["rag_file_name"] = rag_file_name
+        supabase().table("project_files").update(update).eq("id", r["id"]).execute()
+        log.info("file %s ingest ready: %s", r["id"], rag_file_name)
 
 
-def _claim_pending_rows() -> list[dict]:
-    """Rows currently being ingested. Joins projects to get the corpus name."""
+def _claim_in_flight_rows() -> list[dict]:
     res = (
         supabase()
         .table("project_files")
@@ -163,16 +198,86 @@ def _claim_pending_rows() -> list[dict]:
     return res.data or []
 
 
+def _claim_queued_rows() -> list[dict]:
+    res = (
+        supabase()
+        .table("project_files")
+        .select("id,gcs_blob_path,project_id,projects(rag_corpus_name)")
+        .eq("status", "queued")
+        .execute()
+    )
+    return res.data or []
+
+
+def _resolve_step() -> None:
+    rows = _claim_in_flight_rows()
+    if not rows:
+        return
+    by_op: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        op_name = r.get("ingest_lro_name")
+        if op_name:
+            by_op[op_name].append(r)
+    for op_name, rows_for_op in by_op.items():
+        _resolve_lro(op_name, rows_for_op)
+
+
+async def _dispatch_step() -> None:
+    """Batch queued rows into one LRO per corpus, skipping corpora with in-flight imports."""
+    queued = await asyncio.to_thread(_claim_queued_rows)
+    if not queued:
+        return
+
+    busy_corpora = await asyncio.to_thread(_corpora_with_in_flight_imports)
+
+    by_corpus: dict[str, list[dict]] = defaultdict(list)
+    for r in queued:
+        corpus = _row_corpus(r)
+        if not corpus or corpus in busy_corpora:
+            continue
+        by_corpus[corpus].append(r)
+
+    for corpus_name, rows in by_corpus.items():
+        uris = [r["gcs_blob_path"] for r in rows if r.get("gcs_blob_path")]
+        if not uris:
+            continue
+        try:
+            op_name = await import_pdfs(corpus_name, uris)
+        except Exception:
+            log.exception("dispatch failed for corpus %s", corpus_name)
+            continue
+        for r in rows:
+            supabase().table("project_files").update({
+                "status": "parsing",
+                "ingest_lro_name": op_name,
+            }).eq("id", r["id"]).execute()
+        log.info("dispatched %d file(s) on corpus %s as %s", len(rows), corpus_name, op_name)
+
+
+def _corpora_with_in_flight_imports() -> set[str]:
+    res = (
+        supabase()
+        .table("project_files")
+        .select("projects(rag_corpus_name)")
+        .eq("status", "parsing")
+        .not_.is_("ingest_lro_name", "null")
+        .execute()
+    )
+    busy: set[str] = set()
+    for r in res.data or []:
+        c = (r.get("projects") or {}).get("rag_corpus_name")
+        if c:
+            busy.add(c)
+    return busy
+
+
 async def run_poller() -> None:
-    """Main loop: every POLL_INTERVAL_SEC, resolve every in-flight LRO."""
+    """Main loop: every POLL_INTERVAL_SEC, dispatch queued + resolve in-flight."""
     log.info("rag LRO poller started (interval=%ss)", POLL_INTERVAL_SEC)
     while True:
         try:
-            rows = await asyncio.to_thread(_claim_pending_rows)
-            if rows:
-                await asyncio.gather(
-                    *(asyncio.to_thread(_poll_one, r) for r in rows)
-                )
+            await _dispatch_step()
+            await asyncio.to_thread(_resolve_step)
         except asyncio.CancelledError:
             log.info("rag LRO poller cancelled")
             raise

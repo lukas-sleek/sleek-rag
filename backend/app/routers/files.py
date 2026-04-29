@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from app.auth import current_user_id
 from app.db import supabase
 from app.gcs import gcs_uri, object_key, upload_pdf_bytes
-from app.rag_corpus import ensure_corpus_for_project, import_pdf
+from app.rag_corpus import ensure_corpus_for_project
 
 router = APIRouter(prefix="/api/projects/{project_id}/files", tags=["files"])
 
@@ -134,10 +134,11 @@ async def upload_file(
 ):
     """Upload a PDF (or office doc) into the project's Vertex RAG corpus.
 
-    Plan 18.2 T3: PDF lands in GCS at the canonical layout, rag.import_files
-    is fired async, and the LRO operation name is persisted on the row so the
-    poller (T5) can flip status parsing -> ready/failed when it resolves.
-    No Supabase Storage, no ingest_jobs row, no Document AI call.
+    The PDF lands in GCS at the canonical layout and the row is inserted
+    with status='queued'. The LRO poller batches all queued rows for a
+    project into a single rag.import_files_async call (Vertex serialises
+    operations per corpus, so single-file imports collide with each other
+    when uploads arrive concurrently).
     """
     _load_project(project_id, user_id)
     contents = await file.read()
@@ -158,11 +159,11 @@ async def upload_file(
     except Exception as exc:
         raise HTTPException(502, f"GCS upload failed: {exc}") from exc
 
+    # Make sure the corpus exists so the dispatcher can reference it. Race-safe.
     try:
-        corpus_name = await asyncio.to_thread(ensure_corpus_for_project, project_id)
-        lro_name = await import_pdf(corpus_name, gs_uri)
+        await asyncio.to_thread(ensure_corpus_for_project, project_id)
     except Exception as exc:
-        raise HTTPException(502, f"Vertex RAG import failed: {exc}") from exc
+        raise HTTPException(502, f"corpus init failed: {exc}") from exc
 
     insert = (
         supabase()
@@ -176,8 +177,7 @@ async def upload_file(
                 "size_bytes": size_bytes,
                 "mime_type": mime,
                 "gcs_blob_path": gs_uri,
-                "ingest_lro_name": lro_name,
-                "status": "parsing",
+                "status": "queued",
             }
         )
         .execute()
@@ -188,7 +188,7 @@ async def upload_file(
         id=row["id"],
         filename=file.filename,
         size_bytes=size_bytes,
-        status="parsing",
+        status="queued",
         chunk_count=0,
         page_count=None,
     )

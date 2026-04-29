@@ -1,6 +1,6 @@
-"""Plan 18.2 T3: file-upload endpoint hits GCS + rag.import_files_async,
-inserts a project_files row with status='parsing' and an LRO operation name.
-GCS, Vertex RAG and Supabase are stubbed — we assert the request flow."""
+"""Plan 18.2 T3: file-upload endpoint uploads to GCS, ensures the corpus,
+and queues the row (status='queued'). The poller's dispatcher batches
+queued rows into one rag.import_files_async LRO per corpus per tick."""
 from __future__ import annotations
 
 import io
@@ -79,22 +79,12 @@ def fake_supabase(monkeypatch):
     return state
 
 
-def test_upload_pdf_triggers_lro_and_persists_row(client, fake_supabase, monkeypatch):
+def test_upload_pdf_queues_row_for_dispatcher(client, fake_supabase, monkeypatch):
     upload_mock = MagicMock(return_value="gs://bucket/user-1/proj-1/abc/original.pdf")
     monkeypatch.setattr(files_router, "upload_pdf_bytes", upload_mock)
 
-    monkeypatch.setattr(
-        files_router,
-        "ensure_corpus_for_project",
-        MagicMock(return_value="projects/x/locations/eu/ragCorpora/c"),
-    )
-
-    async def fake_import(corpus_name, gs_uri):
-        assert corpus_name == "projects/x/locations/eu/ragCorpora/c"
-        assert gs_uri.startswith("gs://bucket/user-1/proj-1/")
-        return "projects/x/locations/eu/operations/op-42"
-
-    monkeypatch.setattr(files_router, "import_pdf", fake_import)
+    ensure_mock = MagicMock(return_value="projects/x/locations/eu/ragCorpora/c")
+    monkeypatch.setattr(files_router, "ensure_corpus_for_project", ensure_mock)
 
     pdf_bytes = b"%PDF-1.4\n%minimal\n%%EOF"
     res = client.post(
@@ -104,7 +94,7 @@ def test_upload_pdf_triggers_lro_and_persists_row(client, fake_supabase, monkeyp
 
     assert res.status_code == 200, res.text
     body = res.json()
-    assert body["status"] == "parsing"
+    assert body["status"] == "queued"
     assert body["filename"] == "smoke.pdf"
 
     # GCS upload was called with the PDF bytes
@@ -113,12 +103,15 @@ def test_upload_pdf_triggers_lro_and_persists_row(client, fake_supabase, monkeyp
     assert args[1] == "proj-1"
     assert args[3] == pdf_bytes
 
-    # The persisted row carries the LRO + the canonical gs:// path + status=parsing
+    # Corpus was ensured at upload time so the dispatcher has a target.
+    ensure_mock.assert_called_once_with("proj-1")
+
+    # The persisted row is queued (no LRO yet — dispatcher will set it).
     row_inserts = [p for tname, p in fake_supabase["inserts"] if tname == "project_files"]
     assert len(row_inserts) == 1
     payload = row_inserts[0]
-    assert payload["status"] == "parsing"
-    assert payload["ingest_lro_name"] == "projects/x/locations/eu/operations/op-42"
+    assert payload["status"] == "queued"
+    assert "ingest_lro_name" not in payload
     assert payload["gcs_blob_path"].startswith("gs://bucket/user-1/proj-1/")
     assert payload["gcs_blob_path"].endswith("/original.pdf")
     assert payload["mime_type"] == "application/pdf"

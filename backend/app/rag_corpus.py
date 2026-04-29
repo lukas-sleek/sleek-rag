@@ -162,11 +162,21 @@ def ensure_corpus_for_project(project_id: str) -> str:
 
 
 async def import_pdf(corpus_name: str, gcs_uri: str) -> str:
-    """Trigger ingestion. Returns the LRO operation name for polling."""
+    """Trigger ingestion of a single PDF. Returns the LRO operation name."""
+    return await import_pdfs(corpus_name, [gcs_uri])
+
+
+async def import_pdfs(corpus_name: str, gcs_uris: list[str]) -> str:
+    """Trigger a batched import. One LRO covers every path.
+
+    Vertex serialises operations per corpus, so concurrent uploads must
+    share a single LRO instead of firing one each (which 409s with
+    FailedPrecondition).
+    """
     _init_vertex()
     op = await rag.import_files_async(
         corpus_name,
-        paths=[gcs_uri],
+        paths=gcs_uris,
         llm_parser=_llm_parser_config(),
         transformation_config=_transformation_config(),
     )
