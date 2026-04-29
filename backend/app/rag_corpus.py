@@ -184,5 +184,22 @@ async def import_pdfs(corpus_name: str, gcs_uris: list[str]) -> str:
 
 
 def delete_corpus(corpus_name: str) -> None:
+    """Delete a corpus AND its files. The SDK wrapper refuses non-empty corpora."""
     _init_vertex()
-    rag.delete_corpus(corpus_name)
+    from google.cloud.aiplatform_v1beta1.services.vertex_rag_data_service import (
+        VertexRagDataServiceClient,
+    )
+    from google.cloud.aiplatform_v1beta1.types import DeleteRagCorpusRequest
+
+    creds = None
+    if settings.gcp_service_account_json_path:
+        creds = service_account.Credentials.from_service_account_file(
+            settings.gcp_service_account_json_path
+        )
+    client = VertexRagDataServiceClient(
+        credentials=creds,
+        client_options={
+            "api_endpoint": f"{settings.gcp_location}-aiplatform.googleapis.com"
+        },
+    )
+    client.delete_rag_corpus(DeleteRagCorpusRequest(name=corpus_name, force=True))

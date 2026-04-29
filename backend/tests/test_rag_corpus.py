@@ -236,8 +236,20 @@ def test_import_pdf_passes_llm_parser_and_chunking(reset_init, monkeypatch):
     assert chunking.chunk_overlap == 200
 
 
-def test_delete_corpus_calls_sdk(reset_init, monkeypatch):
-    delete_mock = MagicMock()
-    monkeypatch.setattr(rag_corpus.rag, "delete_corpus", delete_mock)
+def test_delete_corpus_uses_force_true(reset_init, monkeypatch):
+    """Must pass force=True so the request succeeds for non-empty corpora."""
+    captured = {}
+    fake_client = MagicMock()
+    fake_client.delete_rag_corpus.side_effect = lambda req: captured.setdefault("req", req)
+    fake_ctor = MagicMock(return_value=fake_client)
+    monkeypatch.setattr(
+        "google.cloud.aiplatform_v1beta1.services.vertex_rag_data_service.VertexRagDataServiceClient",
+        fake_ctor,
+    )
+
     rag_corpus.delete_corpus("projects/x/locations/eu/ragCorpora/c")
-    delete_mock.assert_called_once_with("projects/x/locations/eu/ragCorpora/c")
+
+    fake_client.delete_rag_corpus.assert_called_once()
+    req = captured["req"]
+    assert req.name == "projects/x/locations/eu/ragCorpora/c"
+    assert req.force is True
