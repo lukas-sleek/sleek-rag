@@ -1,36 +1,61 @@
-"""Plan 17.4.1 G3+G5: chat-side system prompt guardrails.
+"""Plan 18.3 T5: SYSTEM_INSTRUCTION content checks.
 
-Asserts the load-bearing rules added to CHAT_SYSTEM_PROMPT and to
-projektanalyse.ANSWER_INSTRUCTIONS — pure content checks. The runtime
-behavior is exercised in test_chat_force_tool.py / test_chat_multi_tool_loop.py.
+Pure-text guardrails on the consolidated Pattern A system_instruction. The
+runtime behavior they enforce is exercised in test_chat_pattern_a_stream.py
+and the Task 10 manual smoke (incl. 5–10 adversarial prompts that probe
+the no-v2-escalation clause).
 """
 from __future__ import annotations
 
-from app.projektanalyse import ANSWER_INSTRUCTIONS
-from app.routers.chats import CHAT_SYSTEM_PROMPT
+from app.system_instructions import SYSTEM_INSTRUCTION
 
 
-def test_chat_prompt_contains_no_self_summing_rule():
-    assert "NIEMALS Teilbeträge selbst summieren" in CHAT_SYSTEM_PROMPT
-    assert "Total-/Summen-Fragen" in CHAT_SYSTEM_PROMPT
+def test_no_self_summing_clause_present():
+    assert "NIEMALS Teilbeträge selbst summieren" in SYSTEM_INSTRUCTION
 
 
-def test_chat_prompt_contains_role_policy_rule():
-    """Tender-Projekt vor Auftragsvergabe wording is the load-bearing
-    cue that lets the model surface client-side Projektleiter (Q3
-    Kieliger) instead of refusing because the offerer side is unfilled."""
-    assert "Tender-Projekt vor Auftragsvergabe" in CHAT_SYSTEM_PROMPT
-    assert "Rollen-Familie" in CHAT_SYSTEM_PROMPT
-    assert "Verweigere nur" in CHAT_SYSTEM_PROMPT
+def test_role_policy_clause_present():
+    """The Tender-Projekt-vor-Auftragsvergabe wording is the load-bearing
+    cue that lets the model surface client-side Projektleiter (Q3 Kieliger)
+    instead of refusing because the offerer side is unfilled."""
+    assert "Tender-Projekt vor Auftragsvergabe" in SYSTEM_INSTRUCTION
+    assert "Rollen-Familie" in SYSTEM_INSTRUCTION
+    assert "Verweigere nur" in SYSTEM_INSTRUCTION
 
 
-def test_projektanalyse_answer_instructions_carry_no_self_summing():
-    """Parallel rule on the projektanalyse v1/v2 path so v1 rerun-from-
-    chat doesn't bypass the chat-side guardrail."""
-    assert "keine Selbst-Summierung" in ANSWER_INSTRUCTIONS
-    assert "NIEMALS Teilbeträge selbst summieren" in ANSWER_INSTRUCTIONS
+def test_scope_fallback_sia_21_31_clause_present():
+    assert "SIA-Phasen 21" in SYSTEM_INSTRUCTION
+    assert "BAUPROJEKT (SIA 32/41)" in SYSTEM_INSTRUCTION
+    assert "Nicht Teil dieser Beschaffung" in SYSTEM_INSTRUCTION
 
 
-def test_projektanalyse_answer_instructions_carry_role_policy():
-    assert "Tender-Projekt vor Auftragsvergabe" in ANSWER_INSTRUCTIONS
-    assert "Rollen-Familie" in ANSWER_INSTRUCTIONS
+def test_honesty_uncertainty_clause_present():
+    """Replaces the deleted answer_verifier (master plan §"Domain rules
+    that MUST survive" item 3)."""
+    assert "HONESTY UND UNSICHERHEIT" in SYSTEM_INSTRUCTION
+    assert "Erfinde keine Werte" in SYSTEM_INSTRUCTION
+    assert "nicht angegeben" in SYSTEM_INSTRUCTION
+
+
+def test_aggregation_clause_present():
+    """Replaces the aggregation portion of the deleted sufficiency rater
+    (master plan §"Domain rules that MUST survive" item 4)."""
+    assert "Aggregations-" in SYSTEM_INSTRUCTION
+    assert "mindestens N, weitere sind möglich" in SYSTEM_INSTRUCTION
+
+
+def test_no_v2_escalation_clause_present():
+    """Replaces the deleted force_tool_next_iter code-level guard. The
+    no-v2 rule now lives entirely in this prompt — if the model violates
+    it, it's a prompt-tightening issue, not a code issue (master plan
+    §"Domain rules that MUST survive" item 1)."""
+    assert "NO-V2-ESCALATION" in SYSTEM_INSTRUCTION
+    assert "run_projektanalyse_v2" in SYSTEM_INSTRUCTION
+    assert "user-elected" in SYSTEM_INSTRUCTION
+    assert "NIEMALS proaktiv" in SYSTEM_INSTRUCTION
+
+
+def test_projektanalyse_tool_passthrough_clause_present():
+    """Tool result must be emitted verbatim — no summary, no commentary."""
+    assert "run_projektanalyse" in SYSTEM_INSTRUCTION
+    assert "exakt und vollständig" in SYSTEM_INSTRUCTION
