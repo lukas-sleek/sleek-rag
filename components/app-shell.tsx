@@ -550,7 +550,7 @@ export function App() {
               existing.id === placeholderId ? rowToFileItem(row) : existing,
             ),
           }));
-          if (row.status !== "indexed" && row.status !== "parsing" && row.status !== "ready") {
+          if (row.status !== "indexed" && row.status !== "parsing" && row.status !== "queued" && row.status !== "ready") {
             pushToast(`„${row.filename}“: Status ${row.status}.`, "warn");
           }
         } catch (err) {

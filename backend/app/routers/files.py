@@ -151,6 +151,16 @@ async def upload_file(
     mime = "application/pdf"
     size_bytes = len(contents)
 
+    # PyMuPDF page-count read; it's the only signal we still own under the
+    # Vertex pipeline (RAG Engine doesn't expose page count anywhere).
+    page_count: int | None = None
+    try:
+        import fitz
+        with fitz.open(stream=contents, filetype="pdf") as doc:
+            page_count = doc.page_count
+    except Exception:
+        page_count = None
+
     file_id = str(uuid.uuid4())
     try:
         gs_uri = await asyncio.to_thread(
@@ -177,6 +187,7 @@ async def upload_file(
                 "size_bytes": size_bytes,
                 "mime_type": mime,
                 "gcs_blob_path": gs_uri,
+                "page_count": page_count,
                 "status": "queued",
             }
         )
@@ -190,7 +201,7 @@ async def upload_file(
         size_bytes=size_bytes,
         status="queued",
         chunk_count=0,
-        page_count=None,
+        page_count=page_count,
     )
 
 
