@@ -1,6 +1,7 @@
 import asyncio
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -9,6 +10,8 @@ from pydantic import BaseModel
 
 from app.auth import current_user_id
 from app.db import supabase
+from app.gcs import gcs_uri, object_key, upload_pdf_bytes
+from app.rag_corpus import ensure_corpus_for_project, import_pdf
 
 router = APIRouter(prefix="/api/projects/{project_id}/files", tags=["files"])
 
@@ -129,75 +132,60 @@ async def upload_file(
     file: UploadFile = File(...),
     user_id: str = Depends(current_user_id),
 ):
+    """Upload a PDF (or office doc) into the project's Vertex RAG corpus.
+
+    Plan 18.2 T3: PDF lands in GCS at the canonical layout, rag.import_files
+    is fired async, and the LRO operation name is persisted on the row so the
+    poller (T5) can flip status parsing -> ready/failed when it resolves.
+    No Supabase Storage, no ingest_jobs row, no Document AI call.
+    """
     _load_project(project_id, user_id)
     contents = await file.read()
-    original_size = len(contents)
-    mime = file.content_type or "application/octet-stream"
     src_ext = (file.filename.rsplit(".", 1)[-1] if "." in (file.filename or "") else "").lower()
+
+    if src_ext in _OFFICE_EXTS:
+        contents = await _convert_office_to_pdf(contents, src_ext)
+    elif src_ext != "pdf":
+        raise HTTPException(415, f"unsupported file type: .{src_ext}")
+    mime = "application/pdf"
+    size_bytes = len(contents)
+
+    file_id = str(uuid.uuid4())
+    try:
+        gs_uri = await asyncio.to_thread(
+            upload_pdf_bytes, user_id, project_id, file_id, contents
+        )
+    except Exception as exc:
+        raise HTTPException(502, f"GCS upload failed: {exc}") from exc
+
+    try:
+        corpus_name = await asyncio.to_thread(ensure_corpus_for_project, project_id)
+        lro_name = await import_pdf(corpus_name, gs_uri)
+    except Exception as exc:
+        raise HTTPException(502, f"Vertex RAG import failed: {exc}") from exc
 
     insert = (
         supabase()
         .table("project_files")
         .insert(
             {
+                "id": file_id,
                 "project_id": project_id,
                 "user_id": user_id,
                 "filename": file.filename,
-                "size_bytes": original_size,
+                "size_bytes": size_bytes,
                 "mime_type": mime,
-                "status": "uploading",
+                "gcs_blob_path": gs_uri,
+                "ingest_lro_name": lro_name,
+                "status": "parsing",
             }
         )
         .execute()
     )
-    file_row = insert.data[0]
-    file_id = file_row["id"]
-
-    # Office formats are converted to PDF up-front so Document AI's PDF-only
-    # Layout Parser can ingest them. Original filename is preserved in the DB
-    # for display; only the storage bytes change.
-    if src_ext in _OFFICE_EXTS:
-        try:
-            contents = await _convert_office_to_pdf(contents, src_ext)
-        except HTTPException as exc:
-            supabase().table("project_files").update(
-                {"status": "failed", "ingest_error": str(exc.detail)[:500]}
-            ).eq("id", file_id).execute()
-            raise
-        mime = "application/pdf"
-        store_ext = "pdf"
-    else:
-        # Storage keys must be ASCII (Supabase rejects non-ASCII with InvalidKey),
-        # so we use a sanitized constant suffix instead of the human filename.
-        store_ext = "".join(c for c in src_ext if c.isalnum())[:8] or "bin"
-
-    size_bytes = len(contents)
-    blob_path = f"{user_id}/{file_id}/source.{store_ext}"
-    try:
-        supabase().storage.from_("project-files").upload(
-            blob_path, contents, {"content-type": mime}
-        )
-    except Exception as exc:
-        supabase().table("project_files").update(
-            {"status": "failed", "ingest_error": f"storage upload failed: {exc}"[:500]}
-        ).eq("id", file_id).execute()
-        raise HTTPException(502, f"storage upload failed: {exc}") from exc
-
-    supabase().table("project_files").update(
-        {
-            "gcs_blob_path": blob_path,
-            "mime_type": mime,
-            "size_bytes": size_bytes,
-            "status": "parsing",
-        }
-    ).eq("id", file_id).execute()
-
-    supabase().table("ingest_jobs").insert(
-        {"file_id": file_id, "user_id": user_id, "state": "queued"}
-    ).execute()
+    row = insert.data[0]
 
     return FileOut(
-        id=file_id,
+        id=row["id"],
         filename=file.filename,
         size_bytes=size_bytes,
         status="parsing",
@@ -325,10 +313,18 @@ def delete_file(
     blob_path = row.get("gcs_blob_path")
 
     if blob_path:
-        try:
-            supabase().storage.from_("project-files").remove([blob_path])
-        except Exception:
-            pass
+        if blob_path.startswith("gs://"):
+            from app.gcs import storage_client
+            try:
+                bucket_name, key = blob_path[len("gs://"):].split("/", 1)
+                storage_client().bucket(bucket_name).blob(key).delete()
+            except Exception:
+                pass
+        else:
+            try:
+                supabase().storage.from_("project-files").remove([blob_path])
+            except Exception:
+                pass
 
     # Chunk images live in a separate bucket and aren't covered by the
     # project_files cascade. Collect their paths before the DB delete drops

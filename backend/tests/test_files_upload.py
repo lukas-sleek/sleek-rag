@@ -1,93 +1,135 @@
-"""Smoke test for the new file-upload path: row insert, Storage upload,
-ingest_jobs enqueue. Uses the service-role client (bypasses RLS) so we
-can self-clean after."""
+"""Plan 18.2 T3: file-upload endpoint hits GCS + rag.import_files_async,
+inserts a project_files row with status='parsing' and an LRO operation name.
+GCS, Vertex RAG and Supabase are stubbed — we assert the request flow."""
+from __future__ import annotations
+
 import io
-import uuid
+import types
+from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
-from app.db import supabase
+from app import main as main_module
+from app.routers import files as files_router
 
 
 @pytest.fixture
-def test_project():
-    """Create a temp project owned by the seeded test user."""
-    user_res = (
-        supabase().auth.admin.list_users()
+def client(monkeypatch):
+    # Skip the ingest worker startup; we don't want background tasks during tests.
+    async def _noop_run_worker():
+        return
+
+    monkeypatch.setattr(main_module, "run_worker", _noop_run_worker)
+    # Stub auth
+    main_module.app.dependency_overrides[files_router.current_user_id] = lambda: "user-1"
+    yield TestClient(main_module.app)
+    main_module.app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def fake_supabase(monkeypatch):
+    """In-memory supabase stub. Captures inserts so the test can assert payload."""
+    state = {
+        "project": {"id": "proj-1", "name": "P"},
+        "inserts": [],
+    }
+
+    class _Q:
+        def __init__(self, table_name):
+            self.table_name = table_name
+            self._insert = None
+            self._where = []
+
+        def select(self, *_):
+            return self
+
+        def insert(self, payload):
+            self._insert = payload
+            return self
+
+        def update(self, payload):
+            self._insert = ("update", payload)
+            return self
+
+        def eq(self, *args):
+            self._where.append(args)
+            return self
+
+        def limit(self, *_):
+            return self
+
+        def single(self):
+            return self
+
+        def execute(self):
+            if self._insert is not None and not isinstance(self._insert, tuple):
+                state["inserts"].append((self.table_name, self._insert))
+                # Echo the row back as if Postgres assigned defaults.
+                row = dict(self._insert)
+                return types.SimpleNamespace(data=[row])
+            if self.table_name == "projects":
+                return types.SimpleNamespace(data=[state["project"]])
+            return types.SimpleNamespace(data=[])
+
+    fake = MagicMock()
+    fake.table.side_effect = lambda name: _Q(name)
+
+    monkeypatch.setattr(files_router, "supabase", lambda: fake)
+    return state
+
+
+def test_upload_pdf_triggers_lro_and_persists_row(client, fake_supabase, monkeypatch):
+    upload_mock = MagicMock(return_value="gs://bucket/user-1/proj-1/abc/original.pdf")
+    monkeypatch.setattr(files_router, "upload_pdf_bytes", upload_mock)
+
+    monkeypatch.setattr(
+        files_router,
+        "ensure_corpus_for_project",
+        MagicMock(return_value="projects/x/locations/eu/ragCorpora/c"),
     )
-    user = next(u for u in user_res if u.email == "test@test.com")
-    user_id = user.id
 
-    proj = (
-        supabase()
-        .table("projects")
-        .insert({"user_id": user_id, "name": f"smoke-{uuid.uuid4().hex[:8]}"})
-        .execute()
+    async def fake_import(corpus_name, gs_uri):
+        assert corpus_name == "projects/x/locations/eu/ragCorpora/c"
+        assert gs_uri.startswith("gs://bucket/user-1/proj-1/")
+        return "projects/x/locations/eu/operations/op-42"
+
+    monkeypatch.setattr(files_router, "import_pdf", fake_import)
+
+    pdf_bytes = b"%PDF-1.4\n%minimal\n%%EOF"
+    res = client.post(
+        "/api/projects/proj-1/files",
+        files={"file": ("smoke.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
     )
-    project_id = proj.data[0]["id"]
-    yield user_id, project_id
-    supabase().table("projects").delete().eq("id", project_id).execute()
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["status"] == "parsing"
+    assert body["filename"] == "smoke.pdf"
+
+    # GCS upload was called with the PDF bytes
+    args = upload_mock.call_args.args
+    assert args[0] == "user-1"
+    assert args[1] == "proj-1"
+    assert args[3] == pdf_bytes
+
+    # The persisted row carries the LRO + the canonical gs:// path + status=parsing
+    row_inserts = [p for tname, p in fake_supabase["inserts"] if tname == "project_files"]
+    assert len(row_inserts) == 1
+    payload = row_inserts[0]
+    assert payload["status"] == "parsing"
+    assert payload["ingest_lro_name"] == "projects/x/locations/eu/operations/op-42"
+    assert payload["gcs_blob_path"].startswith("gs://bucket/user-1/proj-1/")
+    assert payload["gcs_blob_path"].endswith("/original.pdf")
+    assert payload["mime_type"] == "application/pdf"
+
+    # No ingest_jobs row written under the new pipeline
+    assert all(tname != "ingest_jobs" for tname, _ in fake_supabase["inserts"])
 
 
-def test_upload_creates_storage_blob_and_job(test_project):
-    user_id, project_id = test_project
-    pdf_bytes = b"%PDF-1.4\n%fake\n%%EOF"
-    filename = f"smoke-{uuid.uuid4().hex[:8]}.pdf"
-
-    insert = (
-        supabase()
-        .table("project_files")
-        .insert(
-            {
-                "project_id": project_id,
-                "user_id": user_id,
-                "filename": filename,
-                "size_bytes": len(pdf_bytes),
-                "mime_type": "application/pdf",
-                "status": "uploading",
-            }
-        )
-        .execute()
+def test_upload_rejects_unknown_extension(client, fake_supabase, monkeypatch):
+    res = client.post(
+        "/api/projects/proj-1/files",
+        files={"file": ("foo.bin", io.BytesIO(b"\x00\x01"), "application/octet-stream")},
     )
-    file_id = insert.data[0]["id"]
-
-    blob_path = f"{user_id}/{file_id}/{filename}"
-    try:
-        supabase().storage.from_("project-files").upload(
-            blob_path, pdf_bytes, {"content-type": "application/pdf"}
-        )
-        supabase().table("project_files").update(
-            {"gcs_blob_path": blob_path, "status": "parsing"}
-        ).eq("id", file_id).execute()
-        supabase().table("ingest_jobs").insert(
-            {"file_id": file_id, "user_id": user_id, "state": "queued"}
-        ).execute()
-
-        row = (
-            supabase()
-            .table("project_files")
-            .select("status,gcs_blob_path")
-            .eq("id", file_id)
-            .single()
-            .execute()
-            .data
-        )
-        assert row["status"] == "parsing"
-        assert row["gcs_blob_path"] == blob_path
-
-        job = (
-            supabase()
-            .table("ingest_jobs")
-            .select("state")
-            .eq("file_id", file_id)
-            .single()
-            .execute()
-            .data
-        )
-        assert job["state"] == "queued"
-    finally:
-        try:
-            supabase().storage.from_("project-files").remove([blob_path])
-        except Exception:
-            pass
-        supabase().table("project_files").delete().eq("id", file_id).execute()
+    assert res.status_code == 415
