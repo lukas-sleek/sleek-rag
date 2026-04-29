@@ -23,7 +23,6 @@ from google.cloud.aiplatform_v1beta1.services.vertex_rag_data_service import (
 )
 from google.longrunning.operations_pb2 import GetOperationRequest
 from google.oauth2 import service_account
-from vertexai.preview import rag
 
 from app.config import settings
 from app.db import supabase
@@ -54,23 +53,24 @@ def _ops_client() -> VertexRagDataServiceClient:
 
 
 def _resolve_rag_file_name(corpus_name: str, gcs_uri: str) -> str | None:
-    """After a successful import LRO, find the RagFile resource matching gcs_uri.
+    """Find the RagFile resource imported from this gcs_uri.
 
-    The SDK names imported files after the source URI; we do a simple
-    display_name match. None if not found (treated as a soft warning).
+    Uses the GAPIC client directly (vertexai's rag.list_files wrapper drops
+    gcs_source from the returned RagFile, leaving only display_name — which
+    collides because Vertex sets display_name to the GCS basename and our
+    keys all end in either "original.pdf" or the sanitized filename).
     """
     try:
-        for f in rag.list_files(corpus_name):
-            if f.display_name and (f.display_name == gcs_uri or gcs_uri.endswith(f.display_name)):
+        from google.cloud.aiplatform_v1beta1.types import ListRagFilesRequest
+        pager = _ops_client().list_rag_files(
+            ListRagFilesRequest(parent=corpus_name)
+        )
+        for f in pager:
+            uris = list(f.gcs_source.uris) if f.gcs_source else []
+            if gcs_uri in uris:
                 return f.name
-        # Fallback: if the corpus has exactly one file post-import (single-shot
-        # uploads), trust it. Many display_name conventions exist depending on
-        # SDK version.
-        files = list(rag.list_files(corpus_name))
-        if len(files) == 1:
-            return files[0].name
     except Exception:
-        log.exception("list_files failed for corpus %s", corpus_name)
+        log.exception("list_rag_files failed for corpus %s", corpus_name)
     return None
 
 
