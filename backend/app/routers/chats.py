@@ -287,6 +287,41 @@ def _extract_function_call(chunk) -> types.FunctionCall | None:
     return None
 
 
+def _chunk_text(chunk) -> str:
+    """Extract joined text from a streamed chunk's text parts.
+
+    Avoids `chunk.text` — that property emits warnings (and in some genai
+    versions raises) when the chunk has no text part, e.g. function-call
+    or terminal-finish chunks. We read the parts directly so a chunk
+    without text deltas just returns ''."""
+    candidates = getattr(chunk, "candidates", None) or []
+    if not candidates:
+        return ""
+    content = getattr(candidates[0], "content", None)
+    if content is None:
+        return ""
+    pieces: list[str] = []
+    for part in getattr(content, "parts", None) or []:
+        text = getattr(part, "text", None)
+        if text:
+            pieces.append(text)
+    return "".join(pieces)
+
+
+def _chunk_has_grounding(chunk) -> bool:
+    """True iff the chunk's candidate carries grounding_chunks. Vertex emits
+    grounding_metadata on whichever streamed chunk completes the retrieval —
+    not necessarily the last chunk overall, so we track the latest grounded
+    chunk separately for citation extraction (plan 18.3 Pattern A bug fix)."""
+    candidates = getattr(chunk, "candidates", None) or []
+    if not candidates:
+        return False
+    meta = getattr(candidates[0], "grounding_metadata", None)
+    if meta is None:
+        return False
+    return bool(getattr(meta, "grounding_chunks", None))
+
+
 @traceable(run_type="chain", name="chats.send_message")
 async def _send_message_stream(
     *,
@@ -348,13 +383,13 @@ async def _send_message_stream(
     )
 
     answer_parts: list[str] = []
-    final_chunk = None
+    grounded_chunk = None  # latest chunk whose candidate carried grounding_chunks
     handed_off = False
 
     try:
         stream = await chat_session.send_message_stream(text)
         async for chunk in stream:
-            chunk_text = getattr(chunk, "text", None)
+            chunk_text = _chunk_text(chunk)
             if chunk_text:
                 answer_parts.append(chunk_text)
                 yield f"data: {json.dumps({'type': 'delta', 'content': chunk_text})}\n\n"
@@ -379,9 +414,15 @@ async def _send_message_stream(
                 log.warning("unknown function_call from model: %s", fc.name)
                 handed_off = False
 
-            final_chunk = chunk
+            if _chunk_has_grounding(chunk):
+                grounded_chunk = chunk
     except Exception as exc:  # noqa: BLE001
-        log.warning("gemini chat stream failed: %s", exc, exc_info=True)
+        log.warning(
+            "gemini chat stream failed: %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
         notice = _friendly_gemini_error(exc)
         if answer_parts:
             yield f"data: {json.dumps({'type': 'delta', 'content': chr(10) + chr(10) + notice})}\n\n"
@@ -396,7 +437,7 @@ async def _send_message_stream(
         return
 
     # 4. Citations + persist + done.
-    citations = await grounding_to_citations(final_chunk, project_id)
+    citations = await grounding_to_citations(grounded_chunk, project_id)
     yield f"data: {json.dumps({'type': 'meta', 'citations': citations})}\n\n"
 
     assistant_text = "".join(answer_parts).strip()

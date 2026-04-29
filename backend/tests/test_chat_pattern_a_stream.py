@@ -77,15 +77,28 @@ class _SupabaseStub:
 
 
 class _FakeChunk:
-    """Minimal stand-in for google.genai.types.GenerateContentResponse chunks."""
+    """Minimal stand-in for google.genai.types.GenerateContentResponse chunks.
+
+    Mirrors the genai response shape the production code reads — text comes
+    from `candidates[0].content.parts[*].text`, not the convenience
+    `.text` property (which can raise on function-call-only chunks)."""
 
     def __init__(self, text=None, function_call=None, candidates=None):
-        self.text = text
         if candidates is not None:
             self.candidates = candidates
-        elif function_call is not None:
-            part = SimpleNamespace(function_call=function_call)
-            self.candidates = [SimpleNamespace(content=SimpleNamespace(parts=[part]))]
+            return
+        parts: list[SimpleNamespace] = []
+        if text is not None:
+            parts.append(SimpleNamespace(text=text, function_call=None))
+        if function_call is not None:
+            parts.append(SimpleNamespace(text=None, function_call=function_call))
+        if parts:
+            self.candidates = [
+                SimpleNamespace(
+                    content=SimpleNamespace(parts=parts),
+                    grounding_metadata=None,
+                )
+            ]
         else:
             self.candidates = []
 
@@ -300,6 +313,53 @@ def test_stream_error_emits_friendly_banner(monkeypatch):
     # Don't persist a banner-only assistant turn — would poison subsequent
     # turns in this chat (history-poisoning cascade noted in old loop).
     assert not stub.assistant_inserts
+
+
+def test_picks_latest_grounded_chunk_not_final_chunk(monkeypatch):
+    """Vertex emits grounding_metadata on the chunk that completes retrieval —
+    typically mid-stream, not on the trailing finish chunk. Citations must
+    come from the last grounded chunk we saw, not blindly from the final one
+    (which often has empty metadata and would yield zero citations)."""
+    grounded_meta = SimpleNamespace(
+        grounding_chunks=[SimpleNamespace(retrieved_context=SimpleNamespace())]
+    )
+    grounded_candidate = SimpleNamespace(
+        content=SimpleNamespace(parts=[SimpleNamespace(text="grounded delta", function_call=None)]),
+        grounding_metadata=grounded_meta,
+    )
+    grounded_chunk = SimpleNamespace(candidates=[grounded_candidate])
+
+    trailing_candidate = SimpleNamespace(
+        content=SimpleNamespace(parts=[]),
+        grounding_metadata=None,
+    )
+    trailing_chunk = SimpleNamespace(candidates=[trailing_candidate])
+
+    chunks = [_FakeChunk(text="hi "), grounded_chunk, trailing_chunk]
+    stub = _SupabaseStub()
+    _wire_common(monkeypatch, chunks, stub)
+
+    captured: list[object] = []
+
+    async def _capturing_extractor(resp, _project_id):
+        captured.append(resp)
+        return [{"chunk_id": "fake", "filename": "f.pdf"}]
+
+    monkeypatch.setattr(chats_module, "grounding_to_citations", _capturing_extractor)
+
+    frames = _drain_async(
+        chats_module._send_message_stream(
+            chat={"project_id": "p1"},
+            text="Frage?",
+            chat_id="c1",
+            user_id="u1",
+            template=None,
+        )
+    )
+
+    assert captured == [grounded_chunk]
+    meta_frame = next(f for f in frames if f["type"] == "meta")
+    assert meta_frame["citations"] == [{"chunk_id": "fake", "filename": "f.pdf"}]
 
 
 def test_history_drops_just_inserted_user_turn(monkeypatch):
