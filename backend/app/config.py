@@ -28,6 +28,15 @@ class Settings(BaseSettings):
     documentai_processor_id: str = ""
     gcs_staging_bucket: str = ""
 
+    # --- Vertex AI RAG Engine (plan 18.x migration) ---
+    gcp_location: str = "europe-west3"
+    gcs_files_bucket: str = "sleek-rag-files-dev"
+    vertex_rag_embedding_model: str = "text-embedding-005"
+    vertex_rag_embedding_dim: int = 768
+    vertex_rag_generation_model: str = "gemini-2.5-pro"
+    vertex_rag_parsing_model: str = "gemini-2.5-pro"
+    vertex_rag_parsing_max_requests_per_min: int = 10
+
     # --- Gemini (OpenAI-compatible endpoint) ---
     gemini_api_key: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
