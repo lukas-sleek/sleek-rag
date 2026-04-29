@@ -5,6 +5,8 @@ from pydantic import BaseModel
 
 from app.auth import current_user_id
 from app.db import supabase
+from app.gcs import delete_prefix
+from app.rag_corpus import delete_corpus
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +191,39 @@ def update_project(
 
 @router.delete("/{project_id}")
 def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
+    """Delete the project + its Vertex RAG corpus + its GCS prefix (plan 18.2 T7).
+
+    Cascade order:
+      1. Vertex RAG corpus (so failures here don't strand a half-deleted DB).
+      2. GCS prefix gs://{bucket}/{user}/{project}/.
+      3. Postgres row (cascades to project_files / chats / chat_messages).
+    GCS / Vertex failures are logged but do not block the DB delete — orphan
+    cleanup is cheaper than a phantom project the user cannot remove.
+    """
+    row_res = (
+        supabase()
+        .table("projects")
+        .select("rag_corpus_name")
+        .eq("id", project_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not row_res.data:
+        raise HTTPException(404, "not found")
+    corpus_name = (row_res.data[0] or {}).get("rag_corpus_name")
+
+    if corpus_name:
+        try:
+            delete_corpus(corpus_name)
+        except Exception:
+            logger.exception("rag corpus delete failed for %s", corpus_name)
+
+    try:
+        delete_prefix(f"{user_id}/{project_id}/")
+    except Exception:
+        logger.exception("gcs prefix delete failed for %s/%s", user_id, project_id)
+
     res = (
         supabase()
         .table("projects")
