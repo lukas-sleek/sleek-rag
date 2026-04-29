@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     vertex_rag_embedding_dim: int = 768
     vertex_rag_generation_model: str = "gemini-2.5-pro"
     vertex_rag_parsing_model: str = "gemini-2.5-pro"
+    # Gemini 2.5 Pro is not published in europe-west3; the LLM Parser
+    # references the publisher model in `global` (or any region where it
+    # exists). The corpus + embeddings still live in gcp_location.
+    vertex_rag_parsing_model_location: str = "global"
     vertex_rag_parsing_max_requests_per_min: int = 10
 
     # --- Gemini (OpenAI-compatible endpoint) ---

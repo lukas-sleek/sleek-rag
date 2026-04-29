@@ -6,6 +6,9 @@ and deleted on project deletion.
 """
 from __future__ import annotations
 
+import logging
+import threading
+
 import vertexai
 from google.oauth2 import service_account
 from vertexai.preview import rag
@@ -13,6 +16,8 @@ from vertexai.preview import rag
 from app.config import settings
 from app.db import supabase
 from app.parsing_prompts import SIA_PARSING_PROMPT
+
+log = logging.getLogger(__name__)
 
 _initialized = False
 
@@ -48,9 +53,12 @@ def _embedding_config() -> rag.RagEmbeddingModelConfig:
 
 
 def _llm_parser_config() -> rag.LlmParserConfig:
+    # Parsing model lives in `vertex_rag_parsing_model_location` (default
+    # "global"), independent of the corpus region — Gemini 2.5 Pro is not
+    # published in europe-west3.
     parsing_model = (
         f"projects/{settings.gcp_project_id}"
-        f"/locations/{settings.gcp_location}"
+        f"/locations/{settings.vertex_rag_parsing_model_location}"
         f"/publishers/google/models/{settings.vertex_rag_parsing_model}"
     )
     return rag.LlmParserConfig(
@@ -66,9 +74,25 @@ def _transformation_config() -> rag.TransformationConfig:
     )
 
 
-def ensure_corpus_for_project(project_id: str) -> str:
-    """Return the corpus resource name for this project, creating it on first call."""
-    _init_vertex()
+_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+
+def _project_lock(project_id: str) -> threading.Lock:
+    """Per-project lock so concurrent uploads don't race to create N corpora.
+
+    Process-local. Multi-process deploys still need the post-create
+    reconciliation below as a backstop.
+    """
+    with _locks_guard:
+        lock = _locks.get(project_id)
+        if lock is None:
+            lock = threading.Lock()
+            _locks[project_id] = lock
+        return lock
+
+
+def _read_corpus_name(project_id: str) -> str | None:
     row = (
         supabase()
         .table("projects")
@@ -77,20 +101,64 @@ def ensure_corpus_for_project(project_id: str) -> str:
         .single()
         .execute()
     )
-    existing = (row.data or {}).get("rag_corpus_name")
+    return (row.data or {}).get("rag_corpus_name")
+
+
+def ensure_corpus_for_project(project_id: str) -> str:
+    """Return the corpus resource name for this project, creating on first call.
+
+    Race-safe: a per-project in-process lock serialises concurrent callers,
+    and a post-create read+reconcile step deletes any duplicate corpus that
+    sneaks past (e.g. multi-process worker setups).
+    """
+    _init_vertex()
+    existing = _read_corpus_name(project_id)
     if existing:
         return existing
 
-    corpus = rag.create_corpus(
-        display_name=f"sleek-rag-{project_id}",
-        backend_config=rag.RagVectorDbConfig(
-            rag_embedding_model_config=_embedding_config()
-        ),
-    )
-    supabase().table("projects").update(
-        {"rag_corpus_name": corpus.name}
-    ).eq("id", project_id).execute()
-    return corpus.name
+    with _project_lock(project_id):
+        # Re-check inside the lock — another thread may have created it
+        # between our read above and acquiring the lock.
+        existing = _read_corpus_name(project_id)
+        if existing:
+            return existing
+
+        corpus = rag.create_corpus(
+            display_name=f"sleek-rag-{project_id}",
+            backend_config=rag.RagVectorDbConfig(
+                rag_embedding_model_config=_embedding_config()
+            ),
+        )
+        # Conditional update: only set rag_corpus_name if still NULL. If
+        # another process already wrote one (multi-worker race), this
+        # update returns no row and we delete our duplicate.
+        upd = (
+            supabase()
+            .table("projects")
+            .update({"rag_corpus_name": corpus.name})
+            .eq("id", project_id)
+            .is_("rag_corpus_name", "null")
+            .execute()
+        )
+        if upd.data:
+            return corpus.name
+
+        # Lost the race: another process beat us to the persisted name.
+        # Drop our orphan corpus and return the persisted one.
+        log.warning(
+            "lost ensure_corpus race for project %s; deleting duplicate %s",
+            project_id, corpus.name,
+        )
+        try:
+            rag.delete_corpus(corpus.name)
+        except Exception:
+            log.exception("failed to delete duplicate corpus %s", corpus.name)
+        winner = _read_corpus_name(project_id)
+        if not winner:
+            raise RuntimeError(
+                f"corpus reconciliation failed for project {project_id}"
+            )
+        return winner
 
 
 async def import_pdf(corpus_name: str, gcs_uri: str) -> str:

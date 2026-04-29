@@ -64,6 +64,57 @@ def _resolve_rag_file_name(corpus_name: str, gcs_uri: str) -> str | None:
     return None
 
 
+def _import_failure_message(op) -> str | None:
+    """Return a failure summary if the LRO did not actually import the file.
+
+    Vertex returns done=true with no top-level error even when every file
+    in the batch failed (e.g. parser model 404). The real signal lives in
+    response.failedRagFilesCount + metadata.genericMetadata.partialFailures.
+    """
+    # Hard error first (auth, quota, etc.)
+    if op.HasField("error") and op.error.code != 0:
+        return (op.error.message or "import failed")[:500]
+
+    # No response payload at all — leave as soft success (rare; would mean
+    # Vertex returned done=true with neither error nor result set).
+    if not op.HasField("response"):
+        return None
+
+    payload = _proto_any_to_dict(op.response)
+    failed = int(payload.get("failedRagFilesCount", 0) or 0)
+    imported = int(payload.get("importedRagFilesCount", 0) or 0)
+    skipped = int(payload.get("skippedRagFilesCount", 0) or 0)
+    if imported > 0 and failed == 0:
+        return None  # genuine success
+
+    # Imported zero or some failed: surface a helpful summary. The first
+    # partialFailure message in metadata typically carries the root cause
+    # (e.g. parser model 404).
+    detail = ""
+    meta = _proto_any_to_dict(op.metadata) if op.HasField("metadata") else {}
+    pfs = (meta.get("genericMetadata") or {}).get("partialFailures") or []
+    if pfs:
+        detail = pfs[0].get("message") or ""
+    summary = (
+        f"import failed: {failed} failed, {imported} imported, {skipped} skipped"
+    )
+    if detail:
+        summary = f"{summary} — {detail}"
+    return summary[:500]
+
+
+def _proto_any_to_dict(any_msg) -> dict:
+    """Best-effort decode of a google.protobuf.Any holding a known JSON-able type."""
+    try:
+        from google.protobuf.json_format import MessageToDict
+        # Any messages can be unpacked when their type_url is known. For
+        # response/metadata we only need the JSON-like field map, so use
+        # MessageToDict on the wrapper which yields {'@type': ..., ...fields}.
+        return MessageToDict(any_msg, preserving_proto_field_name=False)
+    except Exception:
+        return {}
+
+
 def _poll_one(row: dict) -> None:
     op_name = row.get("ingest_lro_name")
     file_id = row["id"]
@@ -79,14 +130,14 @@ def _poll_one(row: dict) -> None:
     if not op.done:
         return
 
-    if op.HasField("error") and op.error.code != 0:
-        msg = (op.error.message or "import failed")[:500]
+    failure = _import_failure_message(op)
+    if failure:
         supabase().table("project_files").update({
             "status": "failed",
-            "ingest_error": msg,
+            "ingest_error": failure,
             "ingest_lro_name": None,
         }).eq("id", file_id).execute()
-        log.warning("file %s ingest failed: %s", file_id, msg)
+        log.warning("file %s ingest failed: %s", file_id, failure)
         return
 
     rag_file_name = (

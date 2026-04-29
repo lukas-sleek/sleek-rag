@@ -5,10 +5,22 @@ import types
 from unittest.mock import MagicMock
 
 import pytest
+from google.cloud.aiplatform_v1beta1.types.vertex_rag_data_service import (
+    ImportRagFilesOperationMetadata,
+    ImportRagFilesResponse,
+)
 from google.longrunning.operations_pb2 import Operation
+from google.protobuf.any_pb2 import Any as AnyProto
 from google.rpc.status_pb2 import Status
 
 from app.workers import rag_lro_poller
+
+
+def _pack(msg) -> AnyProto:
+    """Wrap a message proto in google.protobuf.Any (proto-plus → raw pb)."""
+    any_msg = AnyProto()
+    any_msg.Pack(type(msg).pb(msg))
+    return any_msg
 
 
 @pytest.fixture
@@ -79,6 +91,60 @@ def test_poll_failed_op_marks_row_failed(fake_supabase, monkeypatch):
     assert payload["status"] == "failed"
     assert "parser blew up" in payload["ingest_error"]
     assert payload["ingest_lro_name"] is None
+
+
+def test_poll_op_with_failed_files_marks_row_failed(fake_supabase, monkeypatch):
+    """done=true, no top-level error, but failedRagFilesCount>0 = real failure."""
+    response = ImportRagFilesResponse(failed_rag_files_count=1)
+    metadata = ImportRagFilesOperationMetadata()
+    metadata.generic_metadata.partial_failures.append(
+        Status(code=5, message="404 Publisher Model gemini-2.5-pro not found in europe-west3")
+    )
+    op = Operation(name="op", done=True, response=_pack(response), metadata=_pack(metadata))
+    client = MagicMock()
+    client.get_operation.return_value = op
+    monkeypatch.setattr(rag_lro_poller, "_ops_client", lambda: client)
+
+    rag_lro_poller._poll_one(_row())
+
+    assert len(fake_supabase["updates"]) == 1
+    table, payload = fake_supabase["updates"][0]
+    assert payload["status"] == "failed"
+    assert "1 failed" in payload["ingest_error"]
+    assert "Publisher Model" in payload["ingest_error"]
+    assert payload["ingest_lro_name"] is None
+
+
+def test_poll_op_with_imported_count_zero_marks_failed(fake_supabase, monkeypatch):
+    """No imports, no failures explicitly counted: still surface as failure."""
+    response = ImportRagFilesResponse(failed_rag_files_count=0, imported_rag_files_count=0)
+    op = Operation(name="op", done=True, response=_pack(response))
+    client = MagicMock()
+    client.get_operation.return_value = op
+    monkeypatch.setattr(rag_lro_poller, "_ops_client", lambda: client)
+
+    rag_lro_poller._poll_one(_row())
+
+    payload = fake_supabase["updates"][0][1]
+    assert payload["status"] == "failed"
+
+
+def test_poll_op_with_imported_count_one_marks_ready(fake_supabase, monkeypatch):
+    response = ImportRagFilesResponse(imported_rag_files_count=1)
+    op = Operation(name="op", done=True, response=_pack(response))
+    client = MagicMock()
+    client.get_operation.return_value = op
+    monkeypatch.setattr(rag_lro_poller, "_ops_client", lambda: client)
+    monkeypatch.setattr(
+        rag_lro_poller, "_resolve_rag_file_name",
+        lambda corpus, gcs: "projects/x/locations/eu/ragCorpora/c/ragFiles/f-1",
+    )
+
+    rag_lro_poller._poll_one(_row())
+
+    payload = fake_supabase["updates"][0][1]
+    assert payload["status"] == "ready"
+    assert payload["rag_file_name"].endswith("/ragFiles/f-1")
 
 
 def test_poll_succeeded_op_marks_row_ready_and_sets_rag_file_name(
