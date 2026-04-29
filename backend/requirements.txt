@@ -2,12 +2,16 @@ fastapi==0.115.5
 uvicorn[standard]==0.32.1
 pydantic-settings==2.6.1
 python-dotenv==1.0.1
-supabase==2.10.0
+supabase>=2.29.0  # bumped from 2.10.0: required by httpx>=0.28 from google-genai (plan 18.1 T6)
 PyJWT==2.10.1
 cryptography==47.0.0
-httpx==0.27.2
+httpx>=0.28.1  # bumped from 0.27.2: required by google-genai (plan 18.1 T6)
 python-multipart==0.0.17
 openai==1.109.1  # SDK only — used by gemini_client.py to call Gemini's OpenAI-compatible endpoint
 langsmith==0.7.37
 google-cloud-documentai>=3.5.0
 google-cloud-storage>=3.0.0
+# Plan 18.x — Vertex AI RAG Engine migration
+google-cloud-aiplatform[rag]>=1.108.0
+google-genai>=1.0.0
+pymupdf>=1.24.0
