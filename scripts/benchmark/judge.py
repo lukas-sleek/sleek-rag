@@ -105,7 +105,8 @@ def judge_answer(
         system_instruction=JUDGE_SYSTEM,
         response_mime_type="application/json",
         response_schema=JudgeVerdict,
-        thinking_config=types.ThinkingConfig(thinking_level="LOW"),
+        # Vertex API doesn't accept thinking_level — use thinking_budget.
+        thinking_config=types.ThinkingConfig(thinking_budget=2048),
         safety_settings=[
             types.SafetySetting(category=c, threshold="OFF")
             for c in [
@@ -122,9 +123,26 @@ def judge_answer(
     return JudgeVerdict.model_validate_json(resp.text)
 
 
+def _judge_with_retry(client, source_parts, question, label, answer):
+    """Wraps judge_answer with quota-aware backoff (429 = RESOURCE_EXHAUSTED)."""
+    from google.genai.errors import ClientError
+
+    delay = 4.0
+    for attempt in range(6):
+        try:
+            return judge_answer(client, source_parts, question, label, answer)
+        except ClientError as exc:
+            if getattr(exc, "code", None) == 429 and attempt < 5:
+                time.sleep(delay)
+                delay = min(delay * 2, 60.0)
+                continue
+            raise
+
+
 def judge_results(
     per_question: list[dict],
     source_dir: str | None = None,
+    throttle_s: float = 1.5,
 ) -> list[dict]:
     """per_question: list of {id, question, variants: {A: {answer,...}, B: ..., C: ...}}.
 
@@ -138,13 +156,15 @@ def judge_results(
         for label, payload in entry["variants"].items():
             answer = payload.get("answer", "") or ""
             t0 = time.monotonic()
-            verdict = judge_answer(
+            verdict = _judge_with_retry(
                 client, source_parts, entry["question"], label, answer
             )
             judgments[label] = {
                 **verdict.model_dump(),
                 "_judge_latency_s": round(time.monotonic() - t0, 2),
             }
+            if throttle_s > 0:
+                time.sleep(throttle_s)
         out.append(
             {
                 "id": entry["id"],

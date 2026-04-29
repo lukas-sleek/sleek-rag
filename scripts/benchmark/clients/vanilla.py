@@ -49,7 +49,12 @@ def make_chat(client: genai.Client):
         temperature=1.0,
         top_p=0.95,
         tools=tools,
-        thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+        # Vertex AI's Gemini 2.5 endpoint rejects thinking_level (string
+        # enum) — only thinking_budget (token count) is accepted. HIGH on
+        # Flash corresponds to the model's 24576-token max thinking budget;
+        # this is the faithful Vertex-side translation of the JS test's
+        # thinking_level="HIGH". 18.3 must use the same mapping.
+        thinking_config=types.ThinkingConfig(thinking_budget=24576),
         safety_settings=[
             types.SafetySetting(category=c, threshold="OFF")
             for c in [
