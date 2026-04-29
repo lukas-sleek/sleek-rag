@@ -16,6 +16,7 @@ import json
 import logging
 from typing import AsyncGenerator
 
+from google.genai import types
 from langsmith import traceable
 
 from app.config import settings
@@ -33,75 +34,51 @@ def _gemini_error_placeholder(exc: Exception) -> str:  # noqa: ARG001 — kept f
     name and status code stay in the backend log only."""
     return "_⚠️ Antwort konnte nicht erzeugt werden — bitte Frage erneut stellen._"
 
-PROJEKTANALYSE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "run_projektanalyse",
-        "description": (
-            "Führt die strukturierte Projektanalyse für das aktive Projekt aus. "
-            "Beantwortet alle in der Nutzer-Vorlage hinterlegten Fragen parallel "
-            "anhand der hochgeladenen Projektdokumente und liefert einen "
-            "formatierten Bericht zurück. RUFE DIESES TOOL AUF, wenn der Nutzer "
-            "eine Projektanalyse anfordert — z.B. 'erstelle mir eine "
-            "Projektanalyse', 'Projektanalyse erstellen', 'mach mal ne Analyse', "
-            "'projektanalys', 'kannst du das Projekt analysieren'. Keine Argumente "
-            "nötig — die Vorlage und das aktive Projekt werden serverseitig "
-            "aufgelöst."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        },
+
+# Plan 18.3: chat session uses google-genai. The function declarations here
+# (FunctionDeclaration objects) are what `app/routers/chats.py` registers
+# alongside the Vertex RAG grounding tool. v1/v2 internals still call
+# Gemini's OpenAI-compat endpoint per question — that's untouched in 18.3
+# and rewired to native Vertex in 18.5/18.6.
+PROJEKTANALYSE_DECL = types.FunctionDeclaration(
+    name="run_projektanalyse",
+    description=(
+        "Führt die strukturierte Projektanalyse für das aktive Projekt aus. "
+        "Beantwortet alle in der Nutzer-Vorlage hinterlegten Fragen parallel "
+        "anhand der hochgeladenen Projektdokumente und liefert einen "
+        "formatierten Bericht zurück. RUFE DIESES TOOL AUF, wenn der Nutzer "
+        "eine Projektanalyse anfordert — z.B. 'erstelle mir eine "
+        "Projektanalyse', 'Projektanalyse erstellen', 'mach mal ne Analyse', "
+        "'projektanalys', 'kannst du das Projekt analysieren'. Keine Argumente "
+        "nötig — die Vorlage und das aktive Projekt werden serverseitig "
+        "aufgelöst."
+    ),
+    parameters_json_schema={
+        "type": "object",
+        "properties": {},
     },
-}
+)
 
 
-PROJEKTANALYSE_V2_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "run_projektanalyse_v2",
-        "description": (
-            "Volltext-Analyse: lädt das gesamte Projekt-Korpus in einen "
-            "einzigen Gemini-Aufruf und beantwortet die Vorlage-Fragen "
-            "darüber. Kein chunk-basiertes Retrieval — alles ist im "
-            "Kontext.\n\n"
-            "USE WHEN:\n"
-            "1. Der Nutzer fordert explizit eine Volltext-/v2-Analyse, "
-            "'Projektanalyse v2', 'v2-Analyse' oder 'Volltext-Analyse'.\n"
-            "2. ESKALATION: Du hast für die aktuelle Nutzer-Frage bereits "
-            "≥3 Retrieval-Tool-Aufrufe (search_chunks + list_document_outline "
-            "+ read_section) gemacht und die Antwort ist immer noch "
-            "unvollständig oder ein erwarteter Fakt fehlt (z.B. eine "
-            "Bildunterschrift mit einem Personennamen, eine Tabellenzeile "
-            "mit einem Total, eine Aufzählung über mehrere Dateien). Dann "
-            "ist Volltext oft günstiger als weitere Tool-Aufrufe.\n\n"
-            "USE SIBLING TOOL WHEN: search_chunks oder read_section "
-            "liefern klare Belege — diese sind deutlich günstiger und "
-            "genauso korrekt.\n\n"
-            "KOSTEN: lädt 100k+ Tokens. Nicht als Default verwenden — "
-            "nur wenn der Per-Tool-Deep-Dive nicht reicht oder der "
-            "Nutzer es explizit anfordert.\n\n"
-            "Keine Argumente nötig."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        },
+PROJEKTANALYSE_V2_DECL = types.FunctionDeclaration(
+    name="run_projektanalyse_v2",
+    description=(
+        "Volltext-Analyse: lädt das gesamte Projekt-Korpus in einen "
+        "einzigen Gemini-Aufruf und beantwortet die Vorlage-Fragen "
+        "darüber. Kein retrieval-basiertes Grounding — alles ist im "
+        "Kontext.\n\n"
+        "USE WHEN: Der Nutzer fordert explizit eine Volltext-/v2-Analyse, "
+        "'Projektanalyse v2', 'v2-Analyse' oder 'vollständige Analyse mit "
+        "allen Dokumenten'.\n\n"
+        "DO NOT auto-escalate: rufe v2 NIEMALS proaktiv auf, auch wenn die "
+        "Standard-Suche oder run_projektanalyse unzureichend erscheint. "
+        "v2 ist ausschliesslich user-elected.\n\n"
+        "KOSTEN: lädt 100k+ Tokens. Nur auf explizite Nutzer-Anfrage."
+    ),
+    parameters_json_schema={
+        "type": "object",
+        "properties": {},
     },
-}
-
-
-PROJEKTANALYSE_INSTRUCTIONS = (
-    "Wenn du eines der Tools `run_projektanalyse` oder `run_projektanalyse_v2` "
-    "aufrufst, gib das Tool-Ergebnis exakt und vollständig als deine Antwort "
-    "aus. Keine Einleitung, keine Zusammenfassung, kein zusätzlicher "
-    "Kommentar — nur das Tool-Resultat. "
-    "Du darfst `run_projektanalyse_v2` als Eskalationsweg nutzen, wenn "
-    "der Per-Tool-Deep-Dive (search_chunks + list_document_outline + "
-    "read_section) eine komplexe Aggregations-/Synthesefrage über das "
-    "Korpus nicht abschliessend beantworten kann."
 )
 
 
