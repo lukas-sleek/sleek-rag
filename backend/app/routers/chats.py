@@ -501,19 +501,17 @@ async def _send_message_stream(
             )
             error_text = _friendly_gemini_error(exc)
             citations = _citations_by_ref(collected_chunks)
-            msg_id = await asyncio.to_thread(
-                _persist_error_message,
-                chat_id=chat_id,
-                user_id=user_id,
-                content=error_text,
-                citations=citations,
-            )
+            # Do NOT persist the failure banner. Persisting it polluted
+            # `chat_messages` with `_⚠️ ...` rows that subsequent turns
+            # in the same chat then loaded as assistant context — the
+            # model conditioned on its own past failures and degraded
+            # quality on follow-up answers (the "history poisoning"
+            # cascade). The banner is still streamed to the client so
+            # the user sees the live error; reloading the chat just
+            # skips the failed turn, which is the desired behavior.
             yield f"data: {json.dumps({'type': 'delta', 'content': error_text})}\n\n"
             yield f"data: {json.dumps({'type': 'meta', 'citations': citations})}\n\n"
-            done_payload: dict = {"type": "done"}
-            if msg_id:
-                done_payload["message_id"] = msg_id
-            yield f"data: {json.dumps(done_payload)}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
             return
 
         is_final_iteration = iteration == MAX_TOOL_ITERATIONS - 1
@@ -592,19 +590,12 @@ async def _send_message_stream(
             assistant_text = "".join(parts) + "".join(iter_text_parts)
             tail = f"\n\n{notice}" if assistant_text.strip() else notice
             yield f"data: {json.dumps({'type': 'delta', 'content': assistant_text + tail if not parts else tail})}\n\n"
-            assistant_text += tail
-            msg_id = await asyncio.to_thread(
-                _persist_error_message,
-                chat_id=chat_id,
-                user_id=user_id,
-                content=assistant_text.strip(),
-                citations=citations,
-            )
+            # Do NOT persist (Fix A — see the matching comment in the
+            # create-error handler above). Same reasoning: the banner
+            # in chat_messages poisons subsequent turns in the same
+            # chat. Live SSE still shows the error.
             yield f"data: {json.dumps({'type': 'meta', 'citations': citations})}\n\n"
-            done_payload = {"type": "done"}
-            if msg_id:
-                done_payload["message_id"] = msg_id
-            yield f"data: {json.dumps(done_payload)}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
             return
 
         # No retrieval tool calls → final answer (or sufficiency-nudged

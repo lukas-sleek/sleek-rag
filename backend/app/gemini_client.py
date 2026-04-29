@@ -7,9 +7,18 @@ _raw_client = None
 
 
 def _build_raw() -> OpenAI:
+    # Bumped from the SDK default of 2 retries to 5 because Google's
+    # AI Studio compat shim (`generativelanguage.googleapis.com`) returns
+    # 503 UNAVAILABLE under capacity spikes far more often than e.g.
+    # native Vertex. The SDK retries on >=500 / 429 / 408 / 409 and on
+    # connection errors with exponential backoff + jitter; 5 attempts
+    # absorbs the multi-second 503 bursts we see during incidents.
+    # The 18.3 migration replaces this client entirely with native
+    # Vertex; until then this knob is the cheapest reliability win.
     return OpenAI(
         api_key=settings.gemini_api_key,
         base_url=settings.gemini_base_url,
+        max_retries=5,
     )
 
 
