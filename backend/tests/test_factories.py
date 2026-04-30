@@ -60,9 +60,9 @@ def test_rag_specialist_uses_flash():
     assert len(spec.tools) == 1
 
 
-def test_chat_orchestrator_uses_pro_and_three_tools():
+def test_chat_orchestrator_uses_flash_and_three_tools():
     orch = make_chat_orchestrator("c1")
     assert orch.name == "chat_orchestrator"
-    assert orch.model == "gemini-2.5-pro"
+    assert orch.model == "gemini-2.5-flash"
     tool_names = [t.name for t in orch.tools]
     assert tool_names == ["rag_specialist", "web_researcher", "run_projektanalyse_v2"]

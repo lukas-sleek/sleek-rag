@@ -156,7 +156,12 @@ def make_chat_orchestrator(corpus_name: str) -> LlmAgent:
     """
     return LlmAgent(
         name="chat_orchestrator",
-        model="gemini-2.5-pro",
+        # Flash for orchestrator latency. The original plan called for Pro
+        # because of routing/rephrasing nuance, but live testing showed
+        # Flash with a tightened instruction (explicit counting rule + worked
+        # multi-question examples) handles N-way fan-out reliably and ships
+        # 2-3x faster.
+        model="gemini-2.5-flash",
         description=(
             "Hauptagent im Dialog mit dem Nutzer. Versteht die Nutzeranfrage, "
             "entscheidet ueber das Routing (rag_specialist fuer Projekt-"
