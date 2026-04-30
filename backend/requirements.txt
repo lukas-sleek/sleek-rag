@@ -18,3 +18,4 @@ pymupdf>=1.24.0
 
 # Plan 19.0 — ADK multi-agent chat
 google-adk>=1.16,<2.0
+pytest-asyncio>=1.3.0

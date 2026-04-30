@@ -7,6 +7,7 @@ and deleted on project deletion.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 
 import vertexai
@@ -23,7 +24,13 @@ _initialized = False
 
 
 def _init_vertex() -> None:
-    """Lazy vertexai.init using the existing service account JSON key."""
+    """Lazy vertexai.init using the existing service account JSON key.
+
+    Also exports `GOOGLE_APPLICATION_CREDENTIALS` so every downstream Google
+    client that resolves credentials via `google.auth.default()` (notably
+    google-adk's google_llm path, which calls Gemini directly and does NOT
+    inherit `vertexai.init()` credentials) picks up the same service account.
+    """
     global _initialized
     if _initialized:
         return
@@ -34,6 +41,22 @@ def _init_vertex() -> None:
         creds = service_account.Credentials.from_service_account_file(
             settings.gcp_service_account_json_path
         )
+        os.environ.setdefault(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            settings.gcp_service_account_json_path,
+        )
+        # ADK's genai client honours these to skip ADC entirely and force
+        # the Vertex AI endpoint (instead of the Generative Language API,
+        # which doesn't accept service-account creds).
+        #
+        # Location override: gemini-2.5-pro (used by chat_orchestrator) is
+        # NOT published in europe-west3. We pin the genai client to `global`
+        # so both Pro and Flash are reachable. RAG retrieval still uses
+        # europe-west3 because `vertexai.preview.rag` reads its location
+        # from `vertexai.init()` (call below), not from these env vars.
+        os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
+        os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings.gcp_project_id)
+        os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "global")
     vertexai.init(
         project=settings.gcp_project_id,
         location=settings.gcp_location,

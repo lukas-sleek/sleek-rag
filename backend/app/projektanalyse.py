@@ -35,51 +35,10 @@ def _gemini_error_placeholder(exc: Exception) -> str:  # noqa: ARG001 — kept f
     return "_⚠️ Antwort konnte nicht erzeugt werden — bitte Frage erneut stellen._"
 
 
-# Plan 18.3: chat session uses google-genai. The function declarations here
-# (FunctionDeclaration objects) are what `app/routers/chats.py` registers
-# alongside the Vertex RAG grounding tool. v1/v2 internals still call
-# Gemini's OpenAI-compat endpoint per question — that's untouched in 18.3
-# and rewired to native Vertex in 18.5/18.6.
-PROJEKTANALYSE_DECL = types.FunctionDeclaration(
-    name="run_projektanalyse",
-    description=(
-        "Führt die strukturierte Projektanalyse für das aktive Projekt aus. "
-        "Beantwortet alle in der Nutzer-Vorlage hinterlegten Fragen parallel "
-        "anhand der hochgeladenen Projektdokumente und liefert einen "
-        "formatierten Bericht zurück. RUFE DIESES TOOL AUF, wenn der Nutzer "
-        "eine Projektanalyse anfordert — z.B. 'erstelle mir eine "
-        "Projektanalyse', 'Projektanalyse erstellen', 'mach mal ne Analyse', "
-        "'projektanalys', 'kannst du das Projekt analysieren'. Keine Argumente "
-        "nötig — die Vorlage und das aktive Projekt werden serverseitig "
-        "aufgelöst."
-    ),
-    parameters_json_schema={
-        "type": "object",
-        "properties": {},
-    },
-)
-
-
-PROJEKTANALYSE_V2_DECL = types.FunctionDeclaration(
-    name="run_projektanalyse_v2",
-    description=(
-        "Volltext-Analyse: lädt das gesamte Projekt-Korpus in einen "
-        "einzigen Gemini-Aufruf und beantwortet die Vorlage-Fragen "
-        "darüber. Kein retrieval-basiertes Grounding — alles ist im "
-        "Kontext.\n\n"
-        "USE WHEN: Der Nutzer fordert explizit eine Volltext-/v2-Analyse, "
-        "'Projektanalyse v2', 'v2-Analyse' oder 'vollständige Analyse mit "
-        "allen Dokumenten'.\n\n"
-        "DO NOT auto-escalate: rufe v2 NIEMALS proaktiv auf, auch wenn die "
-        "Standard-Suche oder run_projektanalyse unzureichend erscheint. "
-        "v2 ist ausschliesslich user-elected.\n\n"
-        "KOSTEN: lädt 100k+ Tokens. Nur auf explizite Nutzer-Anfrage."
-    ),
-    parameters_json_schema={
-        "type": "object",
-        "properties": {},
-    },
-)
+# Plan 19.0 T11: Pattern A FunctionDeclarations for v1/v2 are gone — the
+# orchestrator owns its own ADK FunctionTool for v2 (app/projektanalyse_v2_tool.py)
+# and v1 is no longer in any tool list. v2 is still wired to the
+# stream_projektanalyse_v2 streamer below via the chat handler's hand-off.
 
 
 ANSWER_INSTRUCTIONS = (

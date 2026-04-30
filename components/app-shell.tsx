@@ -933,12 +933,20 @@ export function App() {
           if (data === "[DONE]") break outer;
           try {
             const payload = JSON.parse(data) as {
-              type?: "meta" | "delta" | "done";
+              type?: "meta" | "delta" | "done" | "trace";
               content?: string;
               citations?: import("./fixtures").Citation[];
               message_id?: string;
               delta?: string;
               progress?: { done: number; total: number; question?: string };
+              // trace fields (debug accounts only)
+              id?: string;
+              author?: string;
+              kind?: import("./fixtures").TraceStep["kind"];
+              name?: string;
+              args?: string;
+              response?: string;
+              text?: string;
             };
             if (payload.progress) {
               const { done, total, question } = payload.progress;
@@ -954,6 +962,34 @@ export function App() {
               continue;
             }
             switch (payload.type) {
+              case "trace": {
+                // Debug-only frame: backend gates emission to allowlisted
+                // user emails. Append the step to the in-progress assistant
+                // turn's traces array and let the chat.tsx Message render
+                // the activity panel.
+                if (!payload.id || !payload.author || !payload.kind) break;
+                const step: import("./fixtures").TraceStep = {
+                  id: payload.id,
+                  author: payload.author,
+                  kind: payload.kind,
+                  name: payload.name ?? null,
+                  args: payload.args ?? null,
+                  response: payload.response ?? null,
+                  text: payload.text ?? null,
+                };
+                setThreads((prev) => {
+                  const arr = [...(prev[chatId] || [])];
+                  const last = arr[arr.length - 1];
+                  if (last?.role !== "assistant") return prev;
+                  const existing = last.traces ?? [];
+                  arr[arr.length - 1] = {
+                    ...last,
+                    traces: [...existing, step],
+                  };
+                  return { ...prev, [chatId]: arr };
+                });
+                break;
+              }
               case "meta": {
                 if (process.env.NODE_ENV !== "production") {
                   // eslint-disable-next-line no-console

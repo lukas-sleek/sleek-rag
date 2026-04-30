@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
-import { Inter, Inter_Tight, JetBrains_Mono } from "next/font/google";
+import { Inter, Inter_Tight, JetBrains_Mono, Geist } from "next/font/google";
 import "./globals.css";
+import { cn } from "@/lib/utils";
+
+const geist = Geist({subsets:['latin'],variable:'--font-sans'});
 
 const inter = Inter({
   subsets: ["latin"],
@@ -34,7 +37,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="de" className={`${inter.variable} ${interTight.variable} ${jetbrains.variable}`}>
+    <html lang="de" className={cn(inter.variable, interTight.variable, jetbrains.variable, "font-sans", geist.variable)}>
       <body>
         <div id="root">{children}</div>
       </body>

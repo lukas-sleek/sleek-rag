@@ -52,11 +52,26 @@ export type Citation = {
   score: number | null;
 };
 
+// One step in the agent trace surfaced for debug accounts. The backend emits
+// these alongside `delta` / `meta` / `done` SSE frames; the activity panel
+// in `Message` renders them as a collapsible reasoning view. Production
+// users never see traces — frames are gated server-side by user email.
+export type TraceStep = {
+  id: string;
+  author: string;             // agent name, e.g. "chat_orchestrator"
+  kind: "tool_call" | "tool_response" | "model_text";
+  name?: string | null;       // tool name on tool_call / tool_response
+  args?: string | null;       // truncated JSON of tool_call args
+  response?: string | null;   // truncated JSON of tool_response body
+  text?: string | null;       // truncated model text
+};
+
 export type Message = {
   role: "user" | "assistant";
   content: string;
   id?: string;
   citations?: Citation[] | null;
+  traces?: TraceStep[] | null;
 };
 
 export const SAMPLE_THREAD: Record<string, Message[]> = {

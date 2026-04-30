@@ -1,14 +1,21 @@
-"""Chat endpoints — Pattern A (plan 18.3).
+"""Chat endpoints — ADK multi-agent edition (plan 19.0).
 
-A chat turn = one Vertex RAG-grounded Gemini chat session. The custom
-multi-iteration tool loop, sufficiency rater, answer verifier, force-tool
-guard, multi-tool dispatch, and ref_offset accounting are gone. Domain
-rules live in app.system_instructions.SYSTEM_INSTRUCTION; retrieval is
-delegated to Vertex via the grounding tool from app.vertex_rag_grounding.
+A chat turn = one orchestrator-driven AdkApp run. The orchestrator
+(gemini-2.5-pro) routes to:
+  - rag_specialist (per-question Flash worker) — Projektfragen
+  - web_researcher (Flash + Google search + UrlContext) — externe Fragen
+  - run_projektanalyse_v2 — explicit user-elected handoff to v2 streamer
 
-The session still hands off to the projektanalyse v1/v2 streamers when
-the model elects either function tool — both keep their existing SSE
-shape so the frontend is unchanged.
+Per-turn lifecycle:
+  1. Persist user message to chat_messages.
+  2. Resolve corpus -> get-or-build a per-corpus AdkApp (LRU-cached).
+  3. Seed a fresh in-memory ADK session with replayed Supabase history.
+  4. Stream events; forward orchestrator model_text deltas to SSE.
+     If the orchestrator emits a run_projektanalyse_v2 tool_response,
+     abort and resume from stream_projektanalyse_v2.
+  5. Read state["citations"], dedupe + globally renumber, persist.
+
+SSE shape unchanged from 18.3: delta -> meta -> done.
 """
 from __future__ import annotations
 
@@ -18,59 +25,27 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from google import genai
-from google.genai import types
-from google.oauth2 import service_account
 from langsmith import traceable
 from pydantic import BaseModel
 
+from app.adk.app_factory import get_or_build_app
+from app.adk.citation_aggregator import dedupe_and_renumber, rewrite_refs
+from app.adk.event_translator import (
+    event_author,
+    event_kind,
+    event_text,
+    is_v2_handoff,
+)
+from app.adk.history import seed_session
 from app.auth import current_user_id
-from app.citations import annotate_answer_with_refs, grounding_to_citations
 from app.config import settings
 from app.db import supabase
 from app.gemini_client import gemini_client_untraced
-from app.projektanalyse import (
-    PROJEKTANALYSE_DECL,
-    PROJEKTANALYSE_V2_DECL,
-    stream_projektanalyse,
-    stream_projektanalyse_v2,
-)
-from app.system_instructions import SYSTEM_INSTRUCTION
-from app.vertex_rag_grounding import grounding_tool_for_project
+from app.projektanalyse import stream_projektanalyse_v2
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
-
-
-# Vertex AI's Gemini 2.5 endpoint rejects thinking_level (string enum).
-# Only thinking_budget (token count) is accepted. HIGH on Flash maps to
-# 24576 — same translation used by the 18.0.1 vanilla benchmark client
-# (scripts/benchmark/clients/vanilla.py); 18.3 mirrors it verbatim.
-_THINKING_BUDGET_HIGH = 24576
-_HISTORY_LIMIT = 20
-
-
-_genai_client: genai.Client | None = None
-
-
-def _client() -> genai.Client:
-    global _genai_client
-    if _genai_client is not None:
-        return _genai_client
-    creds = None
-    if settings.gcp_service_account_json_path:
-        creds = service_account.Credentials.from_service_account_file(
-            settings.gcp_service_account_json_path,
-            scopes=["https://www.googleapis.com/auth/cloud-platform"],
-        )
-    _genai_client = genai.Client(
-        vertexai=True,
-        project=settings.gcp_project_id,
-        location=settings.gcp_location,
-        credentials=creds,
-    )
-    return _genai_client
 
 
 def _friendly_gemini_error(_exc: Exception) -> str:
@@ -81,6 +56,79 @@ def _friendly_gemini_error(_exc: Exception) -> str:
         "_⚠️ Die Antwort konnte gerade nicht erzeugt werden. "
         "Bitte in ein paar Sekunden erneut versuchen._"
     )
+
+
+# Trace SSE emission is gated to debug accounts so production users don't see
+# raw agent internals (and pay the bandwidth tax for events we'd otherwise
+# discard). Set DEBUG_TRACE_USER_EMAILS to a comma-separated list to expand.
+_DEBUG_TRACE_USER_EMAILS = {"test@test.com"}
+_user_email_cache: dict[str, str | None] = {}
+
+
+def _is_debug_user(user_id: str) -> bool:
+    """Look up the user's email in Supabase Auth, cache the result, return
+    True iff it's in the debug allow-list. Cache is process-local, never
+    invalidated — email changes are rare and a stale negative just means
+    no traces for one session."""
+    cached = _user_email_cache.get(user_id)
+    if cached is None and user_id not in _user_email_cache:
+        try:
+            res = supabase().auth.admin.get_user_by_id(user_id)
+            email = getattr(res.user, "email", None) if res and res.user else None
+        except Exception as exc:  # noqa: BLE001
+            log.debug("debug-user lookup failed for %s: %s", user_id, exc)
+            email = None
+        _user_email_cache[user_id] = email
+        cached = email
+    return (cached or "").lower() in _DEBUG_TRACE_USER_EMAILS
+
+
+_TRACE_TEXT_PREVIEW_LIMIT = 600
+_TRACE_ARGS_PREVIEW_LIMIT = 400
+
+
+def _build_trace_frame(event: dict, *, event_id: int) -> dict | None:
+    """Reduce one ADK event dict into a compact trace frame for the UI.
+
+    Shape:
+      {type: "trace", id, author, kind,
+       name?,        # tool name for tool_call / tool_response
+       args?,        # truncated tool_call arguments (str)
+       response?,    # truncated tool_response body (str)
+       text?}        # truncated model text preview
+    """
+    kind = event_kind(event)
+    if kind == "other":
+        return None
+    author = event_author(event) or "unknown"
+    frame: dict = {
+        "type": "trace",
+        "id": f"evt-{event_id}",
+        "author": author,
+        "kind": kind,
+    }
+    parts = (event.get("content") or {}).get("parts") or []
+    if kind == "tool_call":
+        for p in parts:
+            fc = p.get("function_call")
+            if fc:
+                frame["name"] = fc.get("name")
+                frame["args"] = json.dumps(fc.get("args") or {}, ensure_ascii=False)[
+                    :_TRACE_ARGS_PREVIEW_LIMIT
+                ]
+                break
+    elif kind == "tool_response":
+        for p in parts:
+            fr = p.get("function_response")
+            if fr:
+                frame["name"] = fr.get("name")
+                frame["response"] = json.dumps(
+                    fr.get("response") or {}, ensure_ascii=False
+                )[:_TRACE_ARGS_PREVIEW_LIMIT]
+                break
+    elif kind == "model_text":
+        frame["text"] = event_text(event)[:_TRACE_TEXT_PREVIEW_LIMIT]
+    return frame
 
 
 class ChatIn(BaseModel):
@@ -126,6 +174,54 @@ def _load_chat(chat_id: str, user_id: str) -> dict:
     if not res.data:
         raise HTTPException(404, "chat not found")
     return res.data[0]
+
+
+def _persist_user_message(chat_id: str, user_id: str, text: str) -> None:
+    (
+        supabase()
+        .table("chat_messages")
+        .insert(
+            {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "role": "user",
+                "content": text,
+            }
+        )
+        .execute()
+    )
+
+
+def _persist_assistant_message(
+    chat_id: str, user_id: str, text: str, citations: list[dict]
+) -> dict:
+    res = (
+        supabase()
+        .table("chat_messages")
+        .insert(
+            {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "role": "assistant",
+                "content": text,
+                "citations": citations,
+            }
+        )
+        .execute()
+    )
+    return res.data[0]
+
+
+def _load_corpus_name(project_id: str) -> str | None:
+    row = (
+        supabase()
+        .table("projects")
+        .select("rag_corpus_name")
+        .eq("id", project_id)
+        .single()
+        .execute()
+    )
+    return (row.data or {}).get("rag_corpus_name")
 
 
 @router.get("", response_model=list[ChatOut])
@@ -203,125 +299,6 @@ def list_messages(chat_id: str, user_id: str = Depends(current_user_id)):
     ]
 
 
-def _build_config(project_id: str) -> types.GenerateContentConfig:
-    """Mirror the vanilla benchmark client config verbatim (18.3 acceptance
-    criterion). Returns a fresh config per turn so the bound corpus reflects
-    the project's current rag_corpus_name."""
-    grounding = grounding_tool_for_project(project_id)
-    function_tools = types.Tool(
-        function_declarations=[PROJEKTANALYSE_DECL, PROJEKTANALYSE_V2_DECL]
-    )
-    tools: list[types.Tool] = [function_tools]
-    if grounding is not None:
-        tools.insert(0, grounding)
-
-    return types.GenerateContentConfig(
-        max_output_tokens=65535,
-        temperature=1.0,
-        top_p=0.95,
-        thinking_config=types.ThinkingConfig(
-            thinking_budget=_THINKING_BUDGET_HIGH
-        ),
-        safety_settings=[
-            types.SafetySetting(category=c, threshold="OFF")
-            for c in (
-                "HARM_CATEGORY_HATE_SPEECH",
-                "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "HARM_CATEGORY_HARASSMENT",
-            )
-        ],
-        system_instruction=SYSTEM_INSTRUCTION,
-        tools=tools,
-    )
-
-
-def _load_history_sync(chat_id: str, user_id: str) -> list[types.Content]:
-    """Last `_HISTORY_LIMIT` messages from this chat, newest-last, formatted
-    as google-genai Content. The just-inserted user turn is excluded by
-    upstream callers — it's passed as the new message to send_message_stream.
-    Per CLAUDE.md ("Module 2+ uses stateless completions"), we re-load
-    history per request rather than reusing a long-lived chat session."""
-    rows = (
-        supabase()
-        .table("chat_messages")
-        .select("id,role,content,created_at")
-        .eq("chat_id", chat_id)
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(_HISTORY_LIMIT)
-        .execute()
-        .data
-        or []
-    )
-    history: list[types.Content] = []
-    for r in reversed(rows):
-        role = r["role"]
-        if role not in ("user", "assistant"):
-            continue
-        # genai uses "model" for assistant turns
-        genai_role = "model" if role == "assistant" else "user"
-        content = r["content"] or ""
-        history.append(
-            types.Content(
-                role=genai_role, parts=[types.Part.from_text(text=content)]
-            )
-        )
-    return history
-
-
-def _extract_function_call(chunk) -> types.FunctionCall | None:
-    """Pull the first function_call part out of a streamed chunk, if any.
-    Vertex emits function calls as their own Part — they don't interleave
-    with text in the same chunk."""
-    candidates = getattr(chunk, "candidates", None) or []
-    if not candidates:
-        return None
-    content = getattr(candidates[0], "content", None)
-    if content is None:
-        return None
-    for part in getattr(content, "parts", None) or []:
-        fc = getattr(part, "function_call", None)
-        if fc is not None and getattr(fc, "name", None):
-            return fc
-    return None
-
-
-def _chunk_text(chunk) -> str:
-    """Extract joined text from a streamed chunk's text parts.
-
-    Avoids `chunk.text` — that property emits warnings (and in some genai
-    versions raises) when the chunk has no text part, e.g. function-call
-    or terminal-finish chunks. We read the parts directly so a chunk
-    without text deltas just returns ''."""
-    candidates = getattr(chunk, "candidates", None) or []
-    if not candidates:
-        return ""
-    content = getattr(candidates[0], "content", None)
-    if content is None:
-        return ""
-    pieces: list[str] = []
-    for part in getattr(content, "parts", None) or []:
-        text = getattr(part, "text", None)
-        if text:
-            pieces.append(text)
-    return "".join(pieces)
-
-
-def _chunk_has_grounding(chunk) -> bool:
-    """True iff the chunk's candidate carries grounding_chunks. Vertex emits
-    grounding_metadata on whichever streamed chunk completes the retrieval —
-    not necessarily the last chunk overall, so we track the latest grounded
-    chunk separately for citation extraction (plan 18.3 Pattern A bug fix)."""
-    candidates = getattr(chunk, "candidates", None) or []
-    if not candidates:
-        return False
-    meta = getattr(candidates[0], "grounding_metadata", None)
-    if meta is None:
-        return False
-    return bool(getattr(meta, "grounding_chunks", None))
-
-
 @traceable(run_type="chain", name="chats.send_message")
 async def _send_message_stream(
     *,
@@ -331,143 +308,124 @@ async def _send_message_stream(
     user_id: str,
     template: list[str] | None,
 ):
-    """Pattern A streaming chat turn.
-
-    1. Persist the user message.
-    2. Build a chat session bound to the project's RAG corpus + the two
-       projektanalyse function tools.
-    3. Stream the model's response. Text deltas → SSE delta frames.
-       Function calls (run_projektanalyse / run_projektanalyse_v2) hand
-       the rest of the SSE stream off to the matching streamer.
-    4. After the stream completes, regex-enrich grounding_metadata into
-       citations, emit an SSE meta frame, persist the assistant message,
-       emit done.
-    """
+    """ADK-driven streaming chat turn (plan 19.0)."""
     project_id = chat["project_id"]
+    debug_trace = await asyncio.to_thread(_is_debug_user, user_id)
 
     # 1. Persist user message.
-    await asyncio.to_thread(
-        lambda: supabase()
-        .table("chat_messages")
-        .insert(
-            {
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "role": "user",
-                "content": text,
-            }
-        )
-        .execute()
-    )
+    await asyncio.to_thread(_persist_user_message, chat_id, user_id, text)
 
-    # 2. Load history + build the chat session.
-    try:
-        history = await asyncio.to_thread(_load_history_sync, chat_id, user_id)
-        config = await asyncio.to_thread(_build_config, project_id)
-    except Exception as exc:  # noqa: BLE001 — coarse so we can always surface a banner
-        log.exception("chat session build failed: %s", exc)
-        yield f"data: {json.dumps({'type': 'delta', 'content': _friendly_gemini_error(exc)})}\n\n"
-        yield f"data: {json.dumps({'type': 'meta', 'citations': []})}\n\n"
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+    # 2. Resolve corpus.
+    corpus_name = await asyncio.to_thread(_load_corpus_name, project_id)
+    if not corpus_name:
+        yield "data: " + json.dumps(
+            {"type": "delta", "content": "_Bitte zuerst Dokumente hochladen._"}
+        ) + "\n\n"
+        yield "data: " + json.dumps({"type": "meta", "citations": []}) + "\n\n"
+        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
         return
 
-    # `_load_history_sync` includes the just-persisted user turn — drop it
-    # so we can pass the message as send_message_stream's argument instead.
-    if history and history[-1].role == "user":
-        history = history[:-1]
-
-    chat_session = _client().aio.chats.create(
-        model=settings.gemini_chat_model,
-        config=config,
-        history=history,
-    )
+    # 3. Get-or-build the per-corpus AdkApp; seed a fresh session with replayed history.
+    try:
+        app = await get_or_build_app(corpus_name)
+        session = await seed_session(app=app, user_id=user_id, chat_id=chat_id)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("adk session build failed: %s", exc)
+        yield "data: " + json.dumps(
+            {"type": "delta", "content": _friendly_gemini_error(exc)}
+        ) + "\n\n"
+        yield "data: " + json.dumps({"type": "meta", "citations": []}) + "\n\n"
+        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+        return
 
     answer_parts: list[str] = []
-    grounded_chunk = None  # latest chunk whose candidate carried grounding_chunks
     handed_off = False
-
+    trace_id = 0
     try:
-        stream = await chat_session.send_message_stream(text)
-        async for chunk in stream:
-            chunk_text = _chunk_text(chunk)
-            if chunk_text:
-                answer_parts.append(chunk_text)
-                yield f"data: {json.dumps({'type': 'delta', 'content': chunk_text})}\n\n"
+        async for event in app.async_stream_query(
+            message=text,
+            session_id=session.id,
+            user_id=user_id,
+        ):
+            kind = event_kind(event)
+            author = event_author(event)
 
-            fc = _extract_function_call(chunk)
-            if fc is not None:
+            # Debug-only: emit a trace frame for every event before any
+            # SSE-shape filtering. Frontend gates display behind the same
+            # debug flag, but we keep the bytes off the wire for prod
+            # accounts to avoid leaking agent internals.
+            if debug_trace:
+                trace_id += 1
+                frame = _build_trace_frame(event, event_id=trace_id)
+                if frame is not None:
+                    yield "data: " + json.dumps(frame) + "\n\n"
+
+            # Forward only orchestrator model-text events; sub-agent
+            # intermediate output stays inside the agent tree.
+            if kind == "model_text" and author == "chat_orchestrator":
+                piece = event_text(event)
+                if piece:
+                    answer_parts.append(piece)
+                    yield "data: " + json.dumps(
+                        {"type": "delta", "content": piece}
+                    ) + "\n\n"
+
+            elif kind == "tool_response" and is_v2_handoff(event):
                 handed_off = True
-                if fc.name == "run_projektanalyse":
-                    async for sse in stream_projektanalyse(
-                        template=template, chat_id=chat_id, user_id=user_id
-                    ):
-                        yield sse
-                    return
-                if fc.name == "run_projektanalyse_v2":
-                    async for sse in stream_projektanalyse_v2(
-                        template=template, chat_id=chat_id, user_id=user_id
-                    ):
-                        yield sse
-                    return
-                # Unknown function call — log + ignore. Continue the stream
-                # so the model has a chance to recover with a text answer.
-                log.warning("unknown function_call from model: %s", fc.name)
-                handed_off = False
-
-            if _chunk_has_grounding(chunk):
-                grounded_chunk = chunk
+                async for sse in stream_projektanalyse_v2(
+                    template=template, chat_id=chat_id, user_id=user_id
+                ):
+                    yield sse
+                return
     except Exception as exc:  # noqa: BLE001
         log.warning(
-            "gemini chat stream failed: %s: %s",
-            type(exc).__name__,
-            exc,
-            exc_info=True,
+            "adk stream failed: %s: %s", type(exc).__name__, exc, exc_info=True
         )
         notice = _friendly_gemini_error(exc)
         if answer_parts:
-            yield f"data: {json.dumps({'type': 'delta', 'content': chr(10) + chr(10) + notice})}\n\n"
+            yield "data: " + json.dumps(
+                {"type": "delta", "content": "\n\n" + notice}
+            ) + "\n\n"
         else:
-            yield f"data: {json.dumps({'type': 'delta', 'content': notice})}\n\n"
-        yield f"data: {json.dumps({'type': 'meta', 'citations': []})}\n\n"
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            yield "data: " + json.dumps(
+                {"type": "delta", "content": notice}
+            ) + "\n\n"
+        yield "data: " + json.dumps({"type": "meta", "citations": []}) + "\n\n"
+        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
         return
 
     if handed_off:
-        # Hand-off path already returned its own done frame.
         return
 
-    # 4. Citations + inline `[N]` ref annotation + persist + done.
-    citations = await grounding_to_citations(grounded_chunk, project_id)
+    # 4. Read accumulated citations from session state, dedupe + renumber.
+    sess_service = app._tmpl_attrs["session_service"]
+    app_name = app._tmpl_attrs["app_name"]
+    final_session = await sess_service.get_session(
+        app_name=app_name, user_id=user_id, session_id=session.id
+    )
+    raw_citations = list((final_session.state or {}).get("citations", []))
+    final_citations, remap = dedupe_and_renumber(raw_citations)
     raw_answer = "".join(answer_parts)
-    annotated = annotate_answer_with_refs(grounded_chunk, raw_answer)
-    # Send the annotated text alongside citations so the frontend can replace
-    # the streamed content with the inline-cited version once meta arrives.
-    # `[N]` markers come from grounding_supports — Vertex's structural span-
-    # to-chunk linkage; the existing chat.tsx `[\\d+]` regex picks them up.
+    annotated = rewrite_refs(raw_answer, remap)
+
     yield "data: " + json.dumps(
-        {"type": "meta", "citations": citations, "content": annotated}
+        {"type": "meta", "citations": final_citations, "content": annotated}
     ) + "\n\n"
 
-    persisted_text = annotated.strip()
-    if persisted_text:
+    persisted = annotated.strip()
+    if persisted:
         msg = await asyncio.to_thread(
-            lambda: supabase()
-            .table("chat_messages")
-            .insert(
-                {
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "role": "assistant",
-                    "content": persisted_text,
-                    "citations": citations,
-                }
-            )
-            .execute()
-            .data[0]
+            _persist_assistant_message,
+            chat_id,
+            user_id,
+            persisted,
+            final_citations,
         )
-        yield f"data: {json.dumps({'type': 'done', 'message_id': msg['id']})}\n\n"
+        yield "data: " + json.dumps(
+            {"type": "done", "message_id": msg["id"]}
+        ) + "\n\n"
     else:
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
 
 
 @router.post("/{chat_id}/messages")
@@ -491,8 +449,7 @@ def _title_stream(*, first_message: str, chat_id: str, user_id: str):
     # LangSmith tracing intentionally disabled for auto-title: low-value, high
     # volume, and adds noise that drowns out the chat traces. Uses the
     # unwrapped Gemini client so the call doesn't get captured even when
-    # LANGSMITH_API_KEY is set. (Title still goes through the OpenAI-compat
-    # endpoint — Pattern A migration didn't touch this path.)
+    # LANGSMITH_API_KEY is set.
     instructions = (
         "Du erhältst die erste Nachricht eines Chats. Erzeuge daraus einen "
         "prägnanten Titel mit 3 bis 6 Wörtern. Kein Punkt am Ende, keine "
@@ -523,7 +480,6 @@ def _title_stream(*, first_message: str, chat_id: str, user_id: str):
                 parts.append(piece)
                 yield f"data: {json.dumps({'delta': piece})}\n\n"
     except Exception as exc:
-        # Title is best-effort: keep whatever we got, fall through to persist.
         log.warning("title stream interrupted: %s", exc)
     finally:
         try:

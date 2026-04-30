@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import { Icon } from "./icons";
 import type { Citation, Message as Msg } from "./fixtures";
 import { CitationChip } from "./citation-chip";
+import { AgentActivity } from "./agent-activity";
 import { createClient } from "@/lib/supabase/client";
 
 const MD_PROSE =
@@ -164,6 +165,9 @@ export function Message({
   }
   return (
     <div className="group flex flex-col items-stretch">
+      {msg.traces && msg.traces.length > 0 && (
+        <AgentActivity steps={msg.traces} streaming={streaming} />
+      )}
       {showLoadingDots && (
         <div
           className="flex items-center gap-1.5 py-1"
