@@ -17,12 +17,28 @@ import re
 _REF_RE = re.compile(r"\[(\d+)\]")
 
 
+def _dedupe_key(c: dict) -> tuple:
+    """Per-record dedupe key. Web vs file collapse independently:
+    - web: (kind, url)  — same URL cited twice = one chip
+    - file: (kind, uri, page_start, snippet[:80]) — same chunk = one chip
+    """
+    kind = c.get("kind") or "file"
+    if kind == "web":
+        return ("web", c.get("url") or c.get("uri"))
+    return (
+        "file",
+        c.get("uri"),
+        c.get("page_start"),
+        (c.get("snippet") or "")[:80],
+    )
+
+
 def dedupe_and_renumber(raw: list[dict]) -> tuple[list[dict], dict[int, int]]:
     seen: dict[tuple, int] = {}
     final: list[dict] = []
     remap: dict[int, int] = {}
     for c in raw:
-        key = (c.get("uri"), c.get("page_start"), (c.get("snippet") or "")[:80])
+        key = _dedupe_key(c)
         if key in seen:
             remap[c["idx"]] = seen[key]
             continue

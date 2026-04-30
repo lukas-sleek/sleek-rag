@@ -1,4 +1,5 @@
 import asyncio
+import datetime as _dt
 import shutil
 import tempfile
 import uuid
@@ -10,7 +11,7 @@ from pydantic import BaseModel
 
 from app.auth import current_user_id
 from app.db import supabase
-from app.gcs import gcs_uri, object_key, upload_pdf_bytes
+from app.gcs import gcs_uri, object_key, storage_client, upload_pdf_bytes
 from app.rag_corpus import ensure_corpus_for_project
 
 router = APIRouter(prefix="/api/projects/{project_id}/files", tags=["files"])
@@ -302,6 +303,56 @@ def get_file_detail(
         outline=outline,
         figures=figures,
     )
+
+
+class SignedUrlOut(BaseModel):
+    url: str
+    expires_in: int
+
+
+@router.get("/{file_id}/signed-url", response_model=SignedUrlOut)
+def get_signed_url(
+    project_id: str, file_id: str, user_id: str = Depends(current_user_id)
+):
+    """Return a short-lived signed URL for the original PDF in GCS so the
+    frontend's PDF viewer can iframe it. Auth: caller must own the project
+    that owns the file. PDFs live in GCS at the canonical layout
+    `gs://{bucket}/{user_id}/{project_id}/{file_id}/{sanitized}.pdf`
+    (see `app/gcs.py`); we resolve the row by (project, user, file) and
+    sign V4 against the recorded `gcs_blob_path`.
+    """
+    _load_project(project_id, user_id)
+    row_res = (
+        supabase()
+        .table("project_files")
+        .select("gcs_blob_path")
+        .eq("id", file_id)
+        .eq("project_id", project_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not row_res.data:
+        raise HTTPException(404, "file not found")
+    blob_path = (row_res.data[0] or {}).get("gcs_blob_path") or ""
+    if not blob_path.startswith("gs://"):
+        raise HTTPException(404, "file has no GCS object")
+    try:
+        bucket_name, key = blob_path[len("gs://"):].split("/", 1)
+    except ValueError as exc:
+        raise HTTPException(500, f"invalid gcs_blob_path: {blob_path!r}") from exc
+    expires_in = 600
+    try:
+        signed = storage_client().bucket(bucket_name).blob(key).generate_signed_url(
+            version="v4",
+            expiration=_dt.timedelta(seconds=expires_in),
+            method="GET",
+            response_disposition="inline",
+            response_type="application/pdf",
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"signing failed: {exc}") from exc
+    return SignedUrlOut(url=signed, expires_in=expires_in)
 
 
 @router.delete("/{file_id}")

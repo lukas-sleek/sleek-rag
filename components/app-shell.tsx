@@ -1338,7 +1338,15 @@ export function App() {
                     key={i}
                     msg={m}
                     streaming={streaming && i === messages.length - 1 && m.role === "assistant"}
-                    onCiteClick={setViewerCitation}
+                    onCiteClick={(c) => {
+                      // Web citations open in a new tab; PDFs open the
+                      // in-app GCS-backed viewer.
+                      if (c.kind === "web" && c.url) {
+                        window.open(c.url, "_blank", "noopener,noreferrer");
+                        return;
+                      }
+                      setViewerCitation(c);
+                    }}
                   />
                 ))}
               </div>

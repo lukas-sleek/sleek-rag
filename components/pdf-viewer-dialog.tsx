@@ -2,7 +2,7 @@
 import * as React from "react";
 import { Icon } from "./icons";
 import type { Citation } from "./fixtures";
-import { createClient } from "@/lib/supabase/client";
+import { api } from "@/lib/api";
 
 export function PdfViewerDialog({
   citation,
@@ -19,27 +19,34 @@ export function PdfViewerDialog({
     let cancelled = false;
     setUrl(null);
     setError(null);
-    const supabase = createClient();
+    // PDFs live in GCS now (plan 18.2). Backend mints a V4 signed URL via
+    // /api/projects/{project_id}/files/{file_id}/signed-url; the dialog
+    // iframes it with #page=N when a page anchor is available.
+    if (!citation.project_id || !citation.file_id) {
+      setError("Quelle nicht gefunden");
+      return;
+    }
     (async () => {
-      const { data: row, error: rowErr } = await supabase
-        .from("project_files")
-        .select("gcs_blob_path")
-        .eq("id", citation.file_id)
-        .single();
-      if (cancelled) return;
-      if (rowErr || !row?.gcs_blob_path) {
-        setError("Quelle nicht gefunden");
-        return;
+      try {
+        const res = await api(
+          `/api/projects/${citation.project_id}/files/${citation.file_id}/signed-url`,
+        );
+        if (cancelled) return;
+        if (!res.ok) {
+          setError(res.status === 404 ? "Quelle nicht gefunden" : "Datei kann nicht geladen werden");
+          return;
+        }
+        const body = (await res.json()) as { url?: string };
+        if (cancelled) return;
+        if (!body.url) {
+          setError("Datei kann nicht geladen werden");
+          return;
+        }
+        const anchor = citation.page_start ? `#page=${citation.page_start}` : "";
+        setUrl(`${body.url}${anchor}`);
+      } catch {
+        if (!cancelled) setError("Datei kann nicht geladen werden");
       }
-      const { data: sig, error: sigErr } = await supabase.storage
-        .from("project-files")
-        .createSignedUrl(row.gcs_blob_path, 600);
-      if (cancelled) return;
-      if (sigErr || !sig?.signedUrl) {
-        setError("Datei kann nicht geladen werden");
-        return;
-      }
-      setUrl(`${sig.signedUrl}#page=${citation.page_start}`);
     })();
     return () => {
       cancelled = true;

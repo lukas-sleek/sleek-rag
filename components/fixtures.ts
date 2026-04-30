@@ -33,23 +33,28 @@ export const PROJECTS_INITIAL: Project[] = [
   },
 ];
 
+// Citation discriminator. Plan 19.0 adds web citations alongside the
+// existing file (Vertex RAG) chunks. Older rows (pre-19.0) have kind
+// undefined — treat as "file" for back-compat.
 export type Citation = {
   chunk_id: string;
-  file_id: string | null;
+  // "file" or undefined (legacy) for project-document chunks; "web" for
+  // results parsed from web_researcher's mandated Quellen block.
+  kind?: "file" | "web";
+  // file fields
+  project_id?: string | null;
+  file_id?: string | null;
   filename: string;
-  // Pattern A (plan 18.3): page_start/page_end are regex-derived from
-  // [Seite N] markers in the grounded chunk text. If the LLM Parser
-  // dropped the marker, both come through as null — chip rendering must
-  // omit the page label in that case.
   page_start: number | null;
   page_end: number | null;
   snippet: string;
   figure_label: string | null;
   image_path: string | null;
-  // Vertex grounding doesn't expose a score in the same shape pgvector
-  // hybrid did, so this is null on the new path. Kept on the type so
-  // sample fixtures and the legacy retrieval path still typecheck.
   score: number | null;
+  // web fields (only present when kind === "web")
+  url?: string | null;
+  title?: string | null;
+  domain?: string | null;
 };
 
 // One step in the agent trace surfaced for debug accounts. The backend emits

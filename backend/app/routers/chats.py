@@ -28,6 +28,8 @@ from fastapi.responses import StreamingResponse
 from langsmith import traceable
 from pydantic import BaseModel
 
+import re
+
 from app.adk.app_factory import get_or_build_app
 from app.adk.citation_aggregator import dedupe_and_renumber, rewrite_refs
 from app.adk.event_translator import (
@@ -85,6 +87,83 @@ def _is_debug_user(user_id: str) -> bool:
 
 _TRACE_TEXT_PREVIEW_LIMIT = 600
 _TRACE_ARGS_PREVIEW_LIMIT = 400
+
+
+# Parses one row of web_researcher's mandated Quellen block:
+#   [N] https://example.com/foo — Title here
+# Em-dash, regular dash, or colon are all accepted as the title separator.
+_WEB_QUELLE_RE = re.compile(
+    r"^\s*\[(\d+)\]\s*(https?://\S+)\s*[—\-:|]\s*(.+?)\s*$",
+    re.MULTILINE,
+)
+
+
+def _extract_web_citations(text: str) -> list[dict]:
+    """Parse a web_researcher tool_response 'result' string into citation
+    records. Returns [] if no Quellen block is found (e.g. 'im Web nicht
+    belegt' answers).
+
+    Each record gets kind='web', local idx (matching the [N] markers the
+    orchestrator forwards verbatim into the final answer), url, title,
+    domain, and a synthesised chunk_id stable across turns so the
+    frontend's dedupe-by-chunk_id logic continues to work.
+    """
+    if not text:
+        return []
+    out: list[dict] = []
+    seen_idx: set[int] = set()
+    for m in _WEB_QUELLE_RE.finditer(text):
+        try:
+            idx = int(m.group(1))
+        except ValueError:
+            continue
+        if idx in seen_idx:
+            continue
+        seen_idx.add(idx)
+        url = m.group(2).rstrip(".,;)")
+        title = m.group(3).strip()
+        # Strip a trailing closing-bracket / period the LLM occasionally
+        # tacks on after the title.
+        title = re.sub(r"[\.\)\]]+$", "", title).strip()
+        domain = re.sub(r"^https?://", "", url).split("/", 1)[0]
+        out.append({
+            "idx": idx,
+            "kind": "web",
+            "url": url,
+            "title": title or domain,
+            "domain": domain,
+            "chunk_id": f"web:{url}",
+            "filename": title or domain,
+            "uri": url,
+            "file_id": None,
+            "page_start": None,
+            "page_end": None,
+            "figure_label": None,
+            "image_path": None,
+            "score": None,
+            "snippet": title[:200] if title else url[:200],
+        })
+    return out
+
+
+def _web_response_text(event: dict) -> str | None:
+    """If event is a tool_response from web_researcher, return its 'result'
+    text (or the stringified response body). None otherwise."""
+    if event_kind(event) != "tool_response":
+        return None
+    parts = (event.get("content") or {}).get("parts") or []
+    for p in parts:
+        fr = p.get("function_response") or {}
+        if fr.get("name") != "web_researcher":
+            continue
+        body = fr.get("response") or {}
+        if isinstance(body, dict):
+            val = body.get("result")
+            if isinstance(val, str):
+                return val
+            return json.dumps(body, ensure_ascii=False)
+        return str(body)
+    return None
 
 
 def _build_trace_frame(event: dict, *, event_id: int) -> dict | None:
@@ -339,6 +418,7 @@ async def _send_message_stream(
         return
 
     answer_parts: list[str] = []
+    web_response_texts: list[str] = []
     handed_off = False
     trace_id = 0
     try:
@@ -377,6 +457,16 @@ async def _send_message_stream(
                 ):
                     yield sse
                 return
+
+            # Capture web_researcher tool_response text so we can parse the
+            # mandated Quellen: block into citation records after the run.
+            # The orchestrator forwards web's local [N] markers verbatim, so
+            # we keep them as-is (offset only when rag also fired — see
+            # post-run merge below).
+            if kind == "tool_response":
+                web_text = _web_response_text(event)
+                if web_text:
+                    web_response_texts.append(web_text)
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "adk stream failed: %s: %s", type(exc).__name__, exc, exc_info=True
@@ -397,13 +487,34 @@ async def _send_message_stream(
     if handed_off:
         return
 
-    # 4. Read accumulated citations from session state, dedupe + renumber.
+    # 4. Read accumulated citations from session state, merge in web
+    # citations parsed from web_researcher tool_response texts, dedupe +
+    # renumber.
     sess_service = app._tmpl_attrs["session_service"]
     app_name = app._tmpl_attrs["app_name"]
     final_session = await sess_service.get_session(
         app_name=app_name, user_id=user_id, session_id=session.id
     )
     raw_citations = list((final_session.state or {}).get("citations", []))
+
+    # Web citations: web_researcher's local [N] are offset-free in pure-web
+    # turns (no rag → state empty → no collision). In a mixed turn (rag +
+    # web), web's [N] would collide with rag's idx; we offset by current
+    # state length, but the orchestrator's preserved web markers in the
+    # forwarded text won't auto-remap. Logged as a known limitation —
+    # rare in practice (web is normally a user-elected follow-up turn).
+    if web_response_texts:
+        offset = len(raw_citations)
+        if offset:
+            log.info(
+                "mixed rag+web turn: %d existing citations, offsetting web by %d",
+                offset, offset,
+            )
+        for txt in web_response_texts:
+            for rec in _extract_web_citations(txt):
+                rec["idx"] = rec["idx"] + offset
+                raw_citations.append(rec)
+
     final_citations, remap = dedupe_and_renumber(raw_citations)
     raw_answer = "".join(answer_parts)
     annotated = rewrite_refs(raw_answer, remap)

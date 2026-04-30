@@ -47,7 +47,25 @@ log = logging.getLogger(__name__)
 _PAGE_RE = re.compile(r"\[Seite\s+(\d+)\]")
 _FIGURE_RE = re.compile(r"\[Abb\.?\s*(\d+(?:\.\d+)*)\s*:\s*([^\]]+)\]")
 
+# GCS layout per gcs.py: gs://{bucket}/{user_id}/{project_id}/{file_id}/{name}.pdf
+# project_id is the 3rd slash-separated segment, file_id the 4th.
+_GCS_URI_RE = re.compile(
+    r"^gs://[^/]+/[^/]+/(?P<project_id>[0-9a-fA-F-]{36})/(?P<file_id>[0-9a-fA-F-]{36})/"
+)
+
 _DEFAULT_TOP_K = 10
+
+
+def _ids_from_uri(uri: str | None) -> tuple[str | None, str | None]:
+    """Return (project_id, file_id) parsed from the canonical GCS URI shape,
+    or (None, None) if the URI doesn't match (legacy rows / non-GCS paths).
+    """
+    if not uri:
+        return None, None
+    m = _GCS_URI_RE.match(uri)
+    if not m:
+        return None, None
+    return m.group("project_id"), m.group("file_id")
 
 
 @traceable(run_type="retriever", name="search_project_documents")
@@ -131,14 +149,25 @@ def make_search_project_documents_tool(
             pages = [int(m.group(1)) for m in _PAGE_RE.finditer(text)]
             fig = _FIGURE_RE.search(text)
 
+            uri = getattr(ctx, "source_uri", None)
+            project_id, file_id = _ids_from_uri(uri)
+            page_start = pages[0] if pages else None
             record = {
                 "idx": next_idx,
-                "uri": getattr(ctx, "source_uri", None),
+                "kind": "file",
+                "uri": uri,
+                "project_id": project_id,
+                "file_id": file_id,
+                # chunk_id is the frontend's dedup key; synthesise from
+                # file_id+page+score so identical chunks pulled by two
+                # rag_specialist calls collapse to one chip.
+                "chunk_id": f"{file_id or uri}:{page_start}:{next_idx}",
                 "filename": getattr(ctx, "source_display_name", None)
                 or getattr(ctx, "source_uri", None),
-                "page_start": pages[0] if pages else None,
+                "page_start": page_start,
                 "page_end": pages[-1] if pages else None,
                 "figure_label": f"Abb. {fig.group(1)}" if fig else None,
+                "image_path": None,
                 "score": getattr(ctx, "score", None),
                 "snippet": text.strip()[:200],
             }
