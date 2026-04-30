@@ -25,7 +25,7 @@ from langsmith import traceable
 from pydantic import BaseModel
 
 from app.auth import current_user_id
-from app.citations import grounding_to_citations
+from app.citations import annotate_answer_with_refs, grounding_to_citations
 from app.config import settings
 from app.db import supabase
 from app.gemini_client import gemini_client_untraced
@@ -436,12 +436,20 @@ async def _send_message_stream(
         # Hand-off path already returned its own done frame.
         return
 
-    # 4. Citations + persist + done.
+    # 4. Citations + inline `[N]` ref annotation + persist + done.
     citations = await grounding_to_citations(grounded_chunk, project_id)
-    yield f"data: {json.dumps({'type': 'meta', 'citations': citations})}\n\n"
+    raw_answer = "".join(answer_parts)
+    annotated = annotate_answer_with_refs(grounded_chunk, raw_answer)
+    # Send the annotated text alongside citations so the frontend can replace
+    # the streamed content with the inline-cited version once meta arrives.
+    # `[N]` markers come from grounding_supports — Vertex's structural span-
+    # to-chunk linkage; the existing chat.tsx `[\\d+]` regex picks them up.
+    yield "data: " + json.dumps(
+        {"type": "meta", "citations": citations, "content": annotated}
+    ) + "\n\n"
 
-    assistant_text = "".join(answer_parts).strip()
-    if assistant_text:
+    persisted_text = annotated.strip()
+    if persisted_text:
         msg = await asyncio.to_thread(
             lambda: supabase()
             .table("chat_messages")
@@ -450,7 +458,7 @@ async def _send_message_stream(
                     "chat_id": chat_id,
                     "user_id": user_id,
                     "role": "assistant",
-                    "content": assistant_text,
+                    "content": persisted_text,
                     "citations": citations,
                 }
             )

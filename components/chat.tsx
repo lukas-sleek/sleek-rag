@@ -134,7 +134,21 @@ export function Message({
       const newN = oldToNew.get(parseInt(n, 10));
       return newN != null ? `[${newN}]` : full;
     });
-    const linked = visible.length ? linkifyCitations(rewritten, visible) : rewritten;
+    // Pattern A (Vertex RAG grounding) typically returns inline parenthetical
+    // citations from the model — "(file.pdf, Seite 14)" — instead of [N]
+    // markers. When the prose has no [N] hits we still want chips visible,
+    // since the backend told us which chunks the model grounded on.
+    // Dedupe the fallback list by chunk_id so identical chunks pulled by
+    // multiple sub-queries don't render twice.
+    if (visible.length === 0 && citations.length > 0) {
+      const seenIds = new Set<string>();
+      for (const c of citations) {
+        if (seenIds.has(c.chunk_id)) continue;
+        seenIds.add(c.chunk_id);
+        visible.push(c);
+      }
+    }
+    const linked = oldToNew.size ? linkifyCitations(rewritten, visible) : rewritten;
     return { visibleCitations: visible, renderedContent: linked };
   }, [msg.content, citations]);
   // De-dup figure thumbs by image_path. Cap at 3 so a chunky retrieval

@@ -959,11 +959,21 @@ export function App() {
                   // eslint-disable-next-line no-console
                   console.debug("citations", payload.citations);
                 }
+                // Backend sends an annotated `content` string alongside
+                // citations — the streamed deltas don't carry the [N] ref
+                // markers (those come from grounding_supports, which are
+                // only available after the stream completes). Swap the
+                // streamed content for the annotated version when present
+                // so chat.tsx's [N] linkifier can match.
                 setThreads((prev) => {
                   const arr = [...(prev[chatId] || [])];
                   const last = arr[arr.length - 1];
                   if (last?.role === "assistant") {
-                    arr[arr.length - 1] = { ...last, citations: payload.citations ?? [] };
+                    arr[arr.length - 1] = {
+                      ...last,
+                      content: payload.content ?? last.content,
+                      citations: payload.citations ?? [],
+                    };
                   }
                   return { ...prev, [chatId]: arr };
                 });

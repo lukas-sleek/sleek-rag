@@ -108,3 +108,79 @@ async def grounding_to_citations(response: Any, project_id: str) -> list[dict]:
     return await asyncio.to_thread(
         grounding_to_citations_sync, response, project_id
     )
+
+
+def _supports_to_char_offsets(
+    response: Any, answer_text: str
+) -> list[tuple[int, list[int]]]:
+    """Returns [(end_char, chunk_indices), ...] sorted by end_char asc.
+
+    Vertex emits `grounding_metadata.grounding_supports`: each entry pins a
+    span of the answer (UTF-8 byte offsets into the response text) to the
+    indices of the supporting chunks in `grounding_chunks`. We convert those
+    byte offsets to Python char offsets so the splicer below can work on a
+    plain `str` without re-encoding.
+    """
+    if response is None:
+        return []
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return []
+    meta = getattr(candidates[0], "grounding_metadata", None)
+    if meta is None:
+        return []
+    supports = getattr(meta, "grounding_supports", None) or []
+    if not supports:
+        return []
+
+    answer_bytes = answer_text.encode("utf-8")
+    out: list[tuple[int, list[int]]] = []
+    for sup in supports:
+        seg = getattr(sup, "segment", None)
+        if seg is None:
+            continue
+        # Vertex puts indices on UTF-8 bytes. Skip non-zero part_index — for
+        # plain-text answers it's always 0; if Vertex ever splits into
+        # multiple parts we'd need part-aware offset bookkeeping.
+        if (getattr(seg, "part_index", 0) or 0) != 0:
+            continue
+        start_b = getattr(seg, "start_index", None)
+        end_b = getattr(seg, "end_index", None)
+        if start_b is None or end_b is None:
+            continue
+        if start_b < 0 or end_b > len(answer_bytes) or start_b >= end_b:
+            continue
+        try:
+            end_char = len(answer_bytes[:end_b].decode("utf-8"))
+        except UnicodeDecodeError:
+            # Vertex *should* respect UTF-8 boundaries; if not, we'd corrupt
+            # the answer by splicing mid-codepoint, so skip.
+            continue
+        chunk_indices = list(getattr(sup, "grounding_chunk_indices", None) or [])
+        if not chunk_indices:
+            continue
+        out.append((end_char, chunk_indices))
+    out.sort(key=lambda s: s[0])
+    return out
+
+
+def annotate_answer_with_refs(
+    response: Any, answer_text: str
+) -> str:
+    """Splice `[N]` ref markers into `answer_text` at the end of each
+    grounded span. `N = chunk_index + 1` (the existing chat.tsx
+    `linkifyCitations` regex matches `\\[\\d+\\]` and re-numbers per
+    first-appearance + chunk_id dedupe, so emitting ref-by-chunk-index
+    is enough — the frontend picks the renumbering).
+
+    Returns `answer_text` unchanged when no grounding_supports are present.
+    """
+    supports = _supports_to_char_offsets(response, answer_text)
+    if not supports:
+        return answer_text
+    # Splice from end → start so earlier offsets remain valid.
+    out = answer_text
+    for end_char, chunk_indices in sorted(supports, key=lambda s: s[0], reverse=True):
+        markers = "".join(f"[{i + 1}]" for i in chunk_indices)
+        out = out[:end_char] + markers + out[end_char:]
+    return out
