@@ -148,9 +148,20 @@ const MD_TRACE =
   "[&_code]:border [&_code]:border-border [&_code]:px-1 [&_code]:py-px [&_code]:rounded-[3px]";
 
 function ChunkRow({ idx, chunk }: { idx: number; chunk: TraceChunk | null }) {
+  // Vertex RAG `score` with COSINE_DISTANCE is a *distance*, not similarity:
+  // [0, 2], lower = more relevant. Showing it as "Score: 0.38" misled the
+  // reader (looked like a low confidence score). Display it as Distanz
+  // alongside an approximate cosine similarity (1 - distance) so both
+  // semantics are visible at a glance.
+  const distance = chunk?.score;
+  const similarity =
+    typeof distance === "number" ? Math.max(0, 1 - distance) : null;
+  // Prefer the full chunk text; fall back to the 200-char snippet for
+  // citations created before the `text` field landed.
+  const body = chunk?.text || chunk?.snippet || "";
   return (
     <div className="border border-border rounded-md bg-bg-base p-2.5">
-      <div className="flex items-center gap-2 text-[11.5px] mb-1.5">
+      <div className="flex items-center gap-2 text-[11.5px] mb-1.5 flex-wrap">
         <Badge variant="secondary" className="font-mono text-[10px] py-0 px-1.5">
           [{idx}]
         </Badge>
@@ -166,15 +177,23 @@ function ChunkRow({ idx, chunk }: { idx: number; chunk: TraceChunk | null }) {
               : ""}
           </span>
         )}
-        {chunk?.score != null && (
-          <span className="ml-auto font-mono text-[10.5px] text-text-tertiary">
-            {chunk.score.toFixed(3)}
+        {typeof distance === "number" && (
+          <span
+            className="ml-auto font-mono text-[10.5px] text-text-tertiary"
+            title="Cosine-Distanz zur Anfrage (kleiner = relevanter, Bereich 0–2). Aehnlichkeit ~= 1 - Distanz."
+          >
+            Distanz {distance.toFixed(3)}
+            {similarity != null && (
+              <span className="text-text-tertiary/70">
+                {" "}· Aehnlichkeit ~{similarity.toFixed(2)}
+              </span>
+            )}
           </span>
         )}
       </div>
-      {chunk?.snippet && (
-        <div className="text-[12px] leading-[1.55] text-text-secondary whitespace-pre-wrap">
-          {chunk.snippet}
+      {body && (
+        <div className="text-[12px] leading-[1.55] text-text-secondary whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
+          {body}
         </div>
       )}
       {!chunk && (

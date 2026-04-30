@@ -82,7 +82,11 @@ export type TraceChunk = {
   filename?: string | null;
   page_start?: number | null;
   page_end?: number | null;
-  snippet?: string | null;
+  snippet?: string | null;     // 200-char preview, kept for back-compat
+  text?: string | null;        // full chunk text — preferred in the trace panel
+  // Vertex RAG returns this as a vector *distance* with the default
+  // COSINE_DISTANCE metric, NOT a similarity. Range [0, 2], lower = more
+  // relevant. Render with that semantics in the activity panel.
   score?: number | null;
   figure_label?: string | null;
 };

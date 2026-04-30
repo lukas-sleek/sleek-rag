@@ -170,6 +170,12 @@ def make_search_project_documents_tool(
                 "image_path": None,
                 "score": getattr(ctx, "score", None),
                 "snippet": text.strip()[:200],
+                # Full chunk text — used by the debug activity panel to show
+                # what was actually retrieved. snippet stays at 200 chars
+                # because chip previews / file modal lists rely on it being
+                # short. Not surfaced in production responses (the trace
+                # panel is gated server-side by user email).
+                "text": text,
             }
             citations.append(record)
             out_chunks.append(
