@@ -80,10 +80,24 @@ def _retrieve_sync(
     rejects the resulting schema. By doing the langsmith wrap on this
     inner helper, ADK only sees the clean outer signature.
     """
+    # Vector-only retrieval picks the smallest-cosine-distance chunk among
+    # many that may all match the query's keyword shape. For SIA tenders that
+    # repeat phrases like "Phasen 21 und 31" across multiple sections, the
+    # raw vector winner is often a Phase-31 detail page rather than the
+    # authoritative procurement scope statement. Adding the Vertex Ranking
+    # API rerank floats the right chunk to the top — matches what Agent
+    # Builder shows by default ("Konfidenz" relevance scores).
     return rag.retrieval_query(
         text=query,
         rag_resources=[rag.RagResource(rag_corpus=corpus_name)],
-        rag_retrieval_config=rag.RagRetrievalConfig(top_k=top_k),
+        rag_retrieval_config=rag.RagRetrievalConfig(
+            top_k=top_k,
+            ranking=rag.Ranking(
+                rank_service=rag.RankService(
+                    model_name="semantic-ranker-default-004"
+                )
+            ),
+        ),
     )
 
 

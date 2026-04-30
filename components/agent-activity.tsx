@@ -148,11 +148,10 @@ const MD_TRACE =
   "[&_code]:border [&_code]:border-border [&_code]:px-1 [&_code]:py-px [&_code]:rounded-[3px]";
 
 function ChunkRow({ idx, chunk }: { idx: number; chunk: TraceChunk | null }) {
-  // Vertex RAG `score` with COSINE_DISTANCE is a *distance*, not similarity:
-  // [0, 2], lower = more relevant. Showing it as "Score: 0.38" misled the
-  // reader (looked like a low confidence score). Display it as Distanz
-  // alongside an approximate cosine similarity (1 - distance) so both
-  // semantics are visible at a glance.
+  // Vertex RAG `score` with COSINE_DISTANCE is a *distance*, [0, 2], lower
+  // = more relevant. UI shows only the derived similarity (1 - distance)
+  // so the reader gets one number with the intuitive "higher = better"
+  // direction, matching how Agent Builder presents Konfidenz.
   const distance = chunk?.score;
   const similarity =
     typeof distance === "number" ? Math.max(0, 1 - distance) : null;
@@ -177,17 +176,12 @@ function ChunkRow({ idx, chunk }: { idx: number; chunk: TraceChunk | null }) {
               : ""}
           </span>
         )}
-        {typeof distance === "number" && (
+        {similarity != null && (
           <span
             className="ml-auto font-mono text-[10.5px] text-text-tertiary"
-            title="Cosine-Distanz zur Anfrage (kleiner = relevanter, Bereich 0–2). Aehnlichkeit ~= 1 - Distanz."
+            title="Aehnlichkeit zur Anfrage (1 - Cosine-Distanz). 1.0 = identisch, 0 = unverwandt."
           >
-            Distanz {distance.toFixed(3)}
-            {similarity != null && (
-              <span className="text-text-tertiary/70">
-                {" "}· Aehnlichkeit ~{similarity.toFixed(2)}
-              </span>
-            )}
+            Aehnlichkeit {similarity.toFixed(3)}
           </span>
         )}
       </div>
