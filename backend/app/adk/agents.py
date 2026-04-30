@@ -66,11 +66,41 @@ _RETRY_CONFIG = genai_types.GenerateContentConfig(
 # ---------------------------------------------------------------------------
 
 
+def make_document_retriever(corpus_name: str) -> LlmAgent:
+    """Per-project document retriever. Bound to a specific RAG corpus.
+
+    [TEMPORARILY RE-ADDED for A/B testing — see commit 3cc6f47 which removed
+    this layer. We're keeping it briefly to compare turn behaviour with vs
+    without the passthrough agent.]
+    """
+    return LlmAgent(
+        name="document_retriever",
+        model="gemini-2.5-flash",
+        description=(
+            "Ruft relevante Textstellen aus dem RAG-Korpus des aktuellen "
+            "Projekts ab. Gibt rohe Chunks mit Quellangabe (Datei, Seite, "
+            "Score) zurueck — ohne Interpretation. Wird ausschliesslich "
+            "vom rag_specialist als Werkzeug aufgerufen, nie direkt vom "
+            "Chat-Agenten."
+        ),
+        instruction=(
+            "Du rufst das Tool search_project_documents mit der vom "
+            "rag_specialist uebergebenen Suchanfrage auf. Gib die Treffer "
+            "wortwoertlich und vollstaendig zurueck — keine Zusammen-"
+            "fassung, keine Auswahl, keine Reformulierung. Wenn das Tool "
+            "{'status': 'no_results'} meldet, gib das explizit als "
+            "'Keine Treffer' zurueck."
+        ),
+        tools=[make_search_project_documents_tool(corpus_name)],
+        generate_content_config=_RETRY_CONFIG,
+    )
+
+
 def make_rag_specialist(corpus_name: str) -> LlmAgent:
     """Per-question RAG worker. Owns SIA domain rules + [N] citation contract.
 
-    Holds the corpus-bound search_project_documents FunctionTool directly
-    (no intermediate document_retriever LlmAgent — see module docstring).
+    [TEMPORARILY routes through document_retriever again — A/B test, see
+    make_document_retriever above.]
     """
     return LlmAgent(
         name="rag_specialist",
@@ -84,7 +114,7 @@ def make_rag_specialist(corpus_name: str) -> LlmAgent:
             "Vom Chat-Agenten pro Einzelfrage delegiert."
         ),
         instruction=RAG_SPECIALIST_INSTRUCTION,
-        tools=[make_search_project_documents_tool(corpus_name)],
+        tools=[agent_tool.AgentTool(agent=make_document_retriever(corpus_name))],
         generate_content_config=_RETRY_CONFIG,
     )
 

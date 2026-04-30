@@ -22,6 +22,7 @@ import type { TraceStep } from "./fixtures";
 const AGENT_LABEL: Record<string, string> = {
   chat_orchestrator: "Orchestrator",
   rag_specialist: "RAG-Spezialist",
+  document_retriever: "Dokumentensuche",
   web_researcher: "Web-Recherche",
   web_google_search: "Google-Suche",
   web_url_fetcher: "URL-Abruf",

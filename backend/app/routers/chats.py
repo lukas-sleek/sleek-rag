@@ -166,10 +166,16 @@ def _web_response_text(event: dict) -> str | None:
     return None
 
 
-def _build_trace_frame(event: dict, *, event_id: int) -> dict | None:
-    """Reduce one ADK event dict into a compact trace frame for the UI.
+def _build_trace_frames(event: dict, *, next_id: int) -> list[dict]:
+    """Reduce one ADK event dict into one OR MORE trace frames for the UI.
 
-    Shape:
+    A single ADK event can carry MULTIPLE function_calls or function_responses
+    in its `parts` array — that's how parallel tool fan-out is encoded
+    (e.g. orchestrator dispatches 11 rag_specialist calls in one model
+    response). Earlier we collapsed to the first part; that hid 10/11
+    parallel calls in the activity panel.
+
+    Shape per frame:
       {type: "trace", id, author, kind,
        name?,        # tool name for tool_call / tool_response
        args?,        # truncated tool_call arguments (str)
@@ -178,36 +184,46 @@ def _build_trace_frame(event: dict, *, event_id: int) -> dict | None:
     """
     kind = event_kind(event)
     if kind == "other":
-        return None
+        return []
     author = event_author(event) or "unknown"
-    frame: dict = {
-        "type": "trace",
-        "id": f"evt-{event_id}",
-        "author": author,
-        "kind": kind,
-    }
     parts = (event.get("content") or {}).get("parts") or []
+    out: list[dict] = []
+
+    def _new_frame() -> dict:
+        return {
+            "type": "trace",
+            "id": f"evt-{next_id + len(out)}",
+            "author": author,
+            "kind": kind,
+        }
+
     if kind == "tool_call":
         for p in parts:
             fc = p.get("function_call")
-            if fc:
-                frame["name"] = fc.get("name")
-                frame["args"] = json.dumps(fc.get("args") or {}, ensure_ascii=False)[
-                    :_TRACE_ARGS_PREVIEW_LIMIT
-                ]
-                break
+            if not fc:
+                continue
+            f = _new_frame()
+            f["name"] = fc.get("name")
+            f["args"] = json.dumps(fc.get("args") or {}, ensure_ascii=False)[
+                :_TRACE_ARGS_PREVIEW_LIMIT
+            ]
+            out.append(f)
     elif kind == "tool_response":
         for p in parts:
             fr = p.get("function_response")
-            if fr:
-                frame["name"] = fr.get("name")
-                frame["response"] = json.dumps(
-                    fr.get("response") or {}, ensure_ascii=False
-                )[:_TRACE_ARGS_PREVIEW_LIMIT]
-                break
+            if not fr:
+                continue
+            f = _new_frame()
+            f["name"] = fr.get("name")
+            f["response"] = json.dumps(
+                fr.get("response") or {}, ensure_ascii=False
+            )[:_TRACE_ARGS_PREVIEW_LIMIT]
+            out.append(f)
     elif kind == "model_text":
-        frame["text"] = event_text(event)[:_TRACE_TEXT_PREVIEW_LIMIT]
-    return frame
+        f = _new_frame()
+        f["text"] = event_text(event)[:_TRACE_TEXT_PREVIEW_LIMIT]
+        out.append(f)
+    return out
 
 
 class ChatIn(BaseModel):
@@ -430,15 +446,17 @@ async def _send_message_stream(
             kind = event_kind(event)
             author = event_author(event)
 
-            # Debug-only: emit a trace frame for every event before any
-            # SSE-shape filtering. Frontend gates display behind the same
-            # debug flag, but we keep the bytes off the wire for prod
-            # accounts to avoid leaking agent internals.
+            # Debug-only: emit one trace frame per function_call /
+            # function_response part (parallel fan-out is encoded as N parts
+            # within a single ADK event), plus one per model_text event.
+            # Frontend gates display behind the same debug flag, but we
+            # keep the bytes off the wire for prod accounts to avoid
+            # leaking agent internals.
             if debug_trace:
-                trace_id += 1
-                frame = _build_trace_frame(event, event_id=trace_id)
-                if frame is not None:
-                    yield "data: " + json.dumps(frame) + "\n\n"
+                frames = _build_trace_frames(event, next_id=trace_id + 1)
+                for f in frames:
+                    trace_id += 1
+                    yield "data: " + json.dumps(f) + "\n\n"
 
             # Forward only orchestrator model-text events; sub-agent
             # intermediate output stays inside the agent tree.

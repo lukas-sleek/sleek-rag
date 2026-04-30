@@ -34,12 +34,25 @@ class Settings(BaseSettings):
     vertex_rag_embedding_model: str = "text-embedding-005"
     vertex_rag_embedding_dim: int = 768
     vertex_rag_generation_model: str = "gemini-2.5-pro"
-    vertex_rag_parsing_model: str = "gemini-2.5-pro"
-    # Gemini 2.5 Pro is not published in europe-west3; the LLM Parser
-    # references the publisher model in `global` (or any region where it
-    # exists). The corpus + embeddings still live in gcp_location.
-    vertex_rag_parsing_model_location: str = "global"
-    vertex_rag_parsing_max_requests_per_min: int = 10
+    # Parsing model: Flash, not Pro. Pro is ~3-4x slower per page; for our
+    # SIA layout-extraction prompt the quality difference is negligible
+    # while ingestion latency was the user-facing pain point. Override via
+    # VERTEX_RAG_PARSING_MODEL=gemini-2.5-pro if a corpus needs the deeper
+    # reasoning Pro brings.
+    vertex_rag_parsing_model: str = "gemini-2.5-flash"
+    # Pin parsing to the project's home region (same as gcp_location). Flash
+    # is published in europe-west3, and the regional DSQ pool gives better
+    # burst headroom than `global` (see backend/scripts/dsq_diagnose.py).
+    # If you ever switch parsing back to Pro (not published in eu-west3),
+    # override to `global` via env.
+    vertex_rag_parsing_model_location: str = "europe-west3"
+    # Client-side rate limiter on the LLM Parser fan-out during ingestion.
+    # Google's own LLM-parser example uses 100; Layout-Parser example uses
+    # 120. Both well within Tier 1 Flash baseline (2M TPM = ~1300 RPM at
+    # ~1500 tokens/page). 10 was conservative for Pro; 100 unblocks
+    # meaningful parallelism without provoking DSQ throttles, since
+    # ingestion rarely overlaps with active chat traffic.
+    vertex_rag_parsing_max_requests_per_min: int = 100
 
     # --- Gemini (OpenAI-compatible endpoint) ---
     gemini_api_key: str = ""

@@ -187,7 +187,12 @@ export function Message({
               const m = href?.match(/^#cite-(\d+)$/);
               if (m) {
                 const idx = parseInt(m[1], 10);
-                const c = citations[idx];
+                // `linkifyCitations` writes #cite-{newRef-1} where newRef
+                // indexes into the deduped+renumbered visibleCitations
+                // array. Earlier this dereferenced `citations` (the raw
+                // backend list), which mismatched whenever dedupe collapsed
+                // earlier markers — chip [9] would open the wrong file.
+                const c = visibleCitations[idx];
                 if (c) {
                   return (
                     <button
