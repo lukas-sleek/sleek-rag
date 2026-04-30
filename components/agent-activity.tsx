@@ -148,13 +148,24 @@ const MD_TRACE =
   "[&_code]:border [&_code]:border-border [&_code]:px-1 [&_code]:py-px [&_code]:rounded-[3px]";
 
 function ChunkRow({ idx, chunk }: { idx: number; chunk: TraceChunk | null }) {
-  // Vertex RAG `score` with COSINE_DISTANCE is a *distance*, [0, 2], lower
-  // = more relevant. UI shows only the derived similarity (1 - distance)
-  // so the reader gets one number with the intuitive "higher = better"
-  // direction, matching how Agent Builder presents Konfidenz.
-  const distance = chunk?.score;
-  const similarity =
-    typeof distance === "number" ? Math.max(0, 1 - distance) : null;
+  // Prefer Konfidenz from grounding_supports.confidence_scores (managed
+  // retrieval). Legacy rows from raw vector retrieval expose `score` as a
+  // cosine distance — convert to similarity for back-compat. Both render
+  // higher = better so the reader gets one consistent direction.
+  let scoreLabel: string | null = null;
+  let scoreValue: number | null = null;
+  let scoreTitle = "";
+  if (typeof chunk?.confidence === "number") {
+    scoreLabel = "Konfidenz";
+    scoreValue = chunk.confidence;
+    scoreTitle =
+      "Grounding-Konfidenz aus Vertex RAG. 1.0 = sehr starke Bestaetigung, 0 = keine Belegung.";
+  } else if (typeof chunk?.score === "number") {
+    scoreLabel = "Aehnlichkeit";
+    scoreValue = Math.max(0, 1 - chunk.score);
+    scoreTitle =
+      "Aehnlichkeit zur Anfrage (1 - Cosine-Distanz, Legacy-Pfad). 1.0 = identisch, 0 = unverwandt.";
+  }
   // Prefer the full chunk text; fall back to the 200-char snippet for
   // citations created before the `text` field landed.
   const body = chunk?.text || chunk?.snippet || "";
@@ -176,12 +187,12 @@ function ChunkRow({ idx, chunk }: { idx: number; chunk: TraceChunk | null }) {
               : ""}
           </span>
         )}
-        {similarity != null && (
+        {scoreValue != null && (
           <span
             className="ml-auto font-mono text-[10.5px] text-text-tertiary"
-            title="Aehnlichkeit zur Anfrage (1 - Cosine-Distanz). 1.0 = identisch, 0 = unverwandt."
+            title={scoreTitle}
           >
-            Aehnlichkeit {similarity.toFixed(3)}
+            {scoreLabel} {scoreValue.toFixed(3)}
           </span>
         )}
       </div>

@@ -1,26 +1,19 @@
-"""ADK agent factories + module-level constants (plan 19.0 T3-T7).
+"""ADK agent factories + module-level constants.
 
-Tree shape (post-collapse, see comment below):
+Tree shape:
 
     chat_orchestrator (gemini-2.5-flash)
       tool: rag_specialist (AgentTool)
-        tool: search_project_documents (FunctionTool, corpus-bound)
+        tool: document_retriever (AgentTool)
+          tool: VertexAiRagRetrieval (managed — server-side Tool(retrieval=...))
       tool: web_researcher (AgentTool)
         tool: web_google_search (AgentTool)
         tool: web_url_fetcher (AgentTool)
       tool: run_projektanalyse_v2 (FunctionTool)
 
-Per-corpus state lives in the closure of make_search_project_documents_tool;
-each cached AdkApp owns its own orchestrator subtree.
-
-History note: an intermediate `document_retriever` LlmAgent layer used to
-sit between rag_specialist and search_project_documents. Its instruction
-was a 100% verbatim passthrough ("call the tool with the query and return
-the chunks unchanged") — pure indirection inherited from an earlier
-plan that envisioned a managed VertexAiRagRetrieval tool. We collapsed it
-to cut the agent tree's per-sub-question Flash call count from 6 to 4
-(-33%), which directly reduces DSQ shared-pool burst pressure during
-N-question chat turns.
+The document_retriever's `after_model_callback` translates Gemini's
+`grounding_metadata` into the citation records `state["citations"]` that
+the rest of the pipeline already consumes. See `retrieval_tool.py`.
 """
 from __future__ import annotations
 
@@ -32,7 +25,7 @@ from google.genai import types as genai_types
 from app.projektanalyse_v2_tool import run_projektanalyse_v2_tool
 
 from .instructions import CHAT_ORCHESTRATOR_INSTRUCTION, RAG_SPECIALIST_INSTRUCTION
-from .retrieval_tool import make_search_project_documents_tool
+from .retrieval_tool import capture_grounding_callback, make_rag_tool
 
 
 # ---------------------------------------------------------------------------
@@ -67,31 +60,38 @@ _RETRY_CONFIG = genai_types.GenerateContentConfig(
 
 
 def make_document_retriever(corpus_name: str) -> LlmAgent:
-    """Per-project document retriever. Bound to a specific RAG corpus.
+    """Per-project document retriever using server-side managed retrieval.
 
-    [TEMPORARILY RE-ADDED for A/B testing — see commit 3cc6f47 which removed
-    this layer. We're keeping it briefly to compare turn behaviour with vs
-    without the passthrough agent.]
+    The `VertexAiRagRetrieval` tool registers a server-side
+    `Tool(retrieval=Retrieval(vertex_rag_store=...))` on this agent's LLM
+    request — the model itself rewrites the query, retrieves chunks, and
+    grounds its answer. `capture_grounding_callback` then translates the
+    response's `grounding_metadata` into the citation records the rest of
+    the pipeline (rag_specialist, citation_aggregator) already expects.
     """
     return LlmAgent(
         name="document_retriever",
         model="gemini-2.5-flash",
         description=(
             "Ruft relevante Textstellen aus dem RAG-Korpus des aktuellen "
-            "Projekts ab. Gibt rohe Chunks mit Quellangabe (Datei, Seite, "
-            "Score) zurueck — ohne Interpretation. Wird ausschliesslich "
-            "vom rag_specialist als Werkzeug aufgerufen, nie direkt vom "
+            "Projekts ab und liefert eine fundierte Antwort mit "
+            "Inline-Zitationen [N]. Wird ausschliesslich vom "
+            "rag_specialist als Werkzeug aufgerufen, nie direkt vom "
             "Chat-Agenten."
         ),
         instruction=(
-            "Du rufst das Tool search_project_documents mit der vom "
-            "rag_specialist uebergebenen Suchanfrage auf. Gib die Treffer "
-            "wortwoertlich und vollstaendig zurueck — keine Zusammen-"
-            "fassung, keine Auswahl, keine Reformulierung. Wenn das Tool "
-            "{'status': 'no_results'} meldet, gib das explizit als "
-            "'Keine Treffer' zurueck."
+            "Beantworte die vom rag_specialist uebergebene Suchanfrage "
+            "ausschliesslich mit Inhalten aus dem Projektkorpus. Nutze "
+            "das verfuegbare Retrieval-Tool, um relevante Stellen zu "
+            "finden, und antworte knapp + faktentreu in Hochdeutsch. "
+            "Erfinde keine Werte. Wenn der Korpus keine belastbare "
+            "Antwort liefert, sage 'Keine Treffer'. Inline-Zitationen "
+            "[N] werden vom System aus den Grounding-Daten ergaenzt — "
+            "schreibe sie nicht selbst, formuliere die Antwort so, dass "
+            "die Zitationen am Satzende sinnvoll platziert werden."
         ),
-        tools=[make_search_project_documents_tool(corpus_name)],
+        tools=[make_rag_tool(corpus_name)],
+        after_model_callback=capture_grounding_callback,
         generate_content_config=_RETRY_CONFIG,
     )
 

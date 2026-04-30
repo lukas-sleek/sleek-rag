@@ -84,9 +84,12 @@ export type TraceChunk = {
   page_end?: number | null;
   snippet?: string | null;     // 200-char preview, kept for back-compat
   text?: string | null;        // full chunk text — preferred in the trace panel
-  // Vertex RAG returns this as a vector *distance* with the default
-  // COSINE_DISTANCE metric, NOT a similarity. Range [0, 2], lower = more
-  // relevant. Render with that semantics in the activity panel.
+  // Grounding confidence from Vertex RAG's managed retrieval —
+  // grounding_supports[].confidence_scores. Range [0, 1], higher = more
+  // relevant. Replaces the legacy `score` (cosine distance).
+  confidence?: number | null;
+  // Legacy: cosine distance from raw vector retrieval. Kept for older
+  // citation rows; new managed-retrieval rows leave this null.
   score?: number | null;
   figure_label?: string | null;
 };
