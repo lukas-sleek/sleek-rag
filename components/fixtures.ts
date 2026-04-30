@@ -69,6 +69,22 @@ export type TraceStep = {
   args?: string | null;       // truncated JSON of tool_call args
   response?: string | null;   // truncated JSON of tool_response body
   text?: string | null;       // truncated model text
+  // Pre-dedupe idxs cited by [N] markers in this rag_specialist response.
+  // Resolved against Message.traceChunks for the "Abgerufene Chunks" panel.
+  cited_idxs?: number[] | null;
+};
+
+// Backend-shaped raw chunk record (pre-dedupe). Same shape as Citation but
+// keyed in traceChunks by its pre-dedupe idx so cited_idxs can resolve to
+// the underlying retrieval result, not the renumbered final citation.
+export type TraceChunk = {
+  idx: number;
+  filename?: string | null;
+  page_start?: number | null;
+  page_end?: number | null;
+  snippet?: string | null;
+  score?: number | null;
+  figure_label?: string | null;
 };
 
 export type Message = {
@@ -77,6 +93,9 @@ export type Message = {
   id?: string;
   citations?: Citation[] | null;
   traces?: TraceStep[] | null;
+  // Pre-dedupe idx -> raw chunk record. Populated by the `trace_chunks` SSE
+  // frame near the end of a debug stream.
+  traceChunks?: Record<number, TraceChunk> | null;
 };
 
 export const SAMPLE_THREAD: Record<string, Message[]> = {

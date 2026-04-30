@@ -933,7 +933,7 @@ export function App() {
           if (data === "[DONE]") break outer;
           try {
             const payload = JSON.parse(data) as {
-              type?: "meta" | "delta" | "done" | "trace";
+              type?: "meta" | "delta" | "done" | "trace" | "trace_chunks";
               content?: string;
               citations?: import("./fixtures").Citation[];
               message_id?: string;
@@ -947,6 +947,9 @@ export function App() {
               args?: string;
               response?: string;
               text?: string;
+              cited_idxs?: number[];
+              // trace_chunks: pre-dedupe idx -> raw chunk record
+              chunks?: Record<string, import("./fixtures").TraceChunk>;
             };
             if (payload.progress) {
               const { done, total, question } = payload.progress;
@@ -976,6 +979,7 @@ export function App() {
                   args: payload.args ?? null,
                   response: payload.response ?? null,
                   text: payload.text ?? null,
+                  cited_idxs: payload.cited_idxs ?? null,
                 };
                 setThreads((prev) => {
                   const arr = [...(prev[chatId] || [])];
@@ -986,6 +990,25 @@ export function App() {
                     ...last,
                     traces: [...existing, step],
                   };
+                  return { ...prev, [chatId]: arr };
+                });
+                break;
+              }
+              case "trace_chunks": {
+                // Debug-only: pre-dedupe idx -> raw chunk record. Used by the
+                // activity panel to resolve `cited_idxs` on rag_specialist
+                // tool_response steps to actual chunk content.
+                if (!payload.chunks) break;
+                const chunks: Record<number, import("./fixtures").TraceChunk> = {};
+                for (const [k, v] of Object.entries(payload.chunks)) {
+                  const n = parseInt(k, 10);
+                  if (Number.isFinite(n)) chunks[n] = v;
+                }
+                setThreads((prev) => {
+                  const arr = [...(prev[chatId] || [])];
+                  const last = arr[arr.length - 1];
+                  if (last?.role !== "assistant") return prev;
+                  arr[arr.length - 1] = { ...last, traceChunks: chunks };
                   return { ...prev, [chatId]: arr };
                 });
                 break;

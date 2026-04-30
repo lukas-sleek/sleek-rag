@@ -87,6 +87,15 @@ def _is_debug_user(user_id: str) -> bool:
 
 _TRACE_TEXT_PREVIEW_LIMIT = 600
 _TRACE_ARGS_PREVIEW_LIMIT = 400
+# rag_specialist responses are user-facing in the debug panel — full text needs
+# to be readable, not truncated mid-sentence. Bumped beyond _TRACE_ARGS limit
+# so the sub-collapsible shows the complete sub-answer with [N] markers.
+_TRACE_RESPONSE_PREVIEW_LIMIT = 4000
+
+# Matches `[N]` citation markers in rag_specialist responses. Used to parse
+# which raw chunks were cited so the activity panel can show them under each
+# sub-call.
+_CITE_MARKER_RE = re.compile(r"\[(\d+)\]")
 
 
 # Parses one row of web_researcher's mandated Quellen block:
@@ -214,10 +223,31 @@ def _build_trace_frames(event: dict, *, next_id: int) -> list[dict]:
             if not fr:
                 continue
             f = _new_frame()
-            f["name"] = fr.get("name")
-            f["response"] = json.dumps(
-                fr.get("response") or {}, ensure_ascii=False
-            )[:_TRACE_ARGS_PREVIEW_LIMIT]
+            tool_name = fr.get("name")
+            f["name"] = tool_name
+            body = fr.get("response") or {}
+            f["response"] = json.dumps(body, ensure_ascii=False)[
+                :_TRACE_RESPONSE_PREVIEW_LIMIT
+            ]
+            # rag_specialist's result text contains [N] markers referencing
+            # pre-dedupe positions in state["citations"]. Parse them so the
+            # activity panel can render the underlying chunks as a sub-list.
+            if tool_name == "rag_specialist" and isinstance(body, dict):
+                result_text = body.get("result")
+                if isinstance(result_text, str):
+                    seen: set[int] = set()
+                    cited: list[int] = []
+                    for m in _CITE_MARKER_RE.finditer(result_text):
+                        try:
+                            n = int(m.group(1))
+                        except ValueError:
+                            continue
+                        if n in seen:
+                            continue
+                        seen.add(n)
+                        cited.append(n)
+                    if cited:
+                        f["cited_idxs"] = cited
             out.append(f)
     elif kind == "model_text":
         f = _new_frame()
@@ -536,6 +566,22 @@ async def _send_message_stream(
     final_citations, remap = dedupe_and_renumber(raw_citations)
     raw_answer = "".join(answer_parts)
     annotated = rewrite_refs(raw_answer, remap)
+
+    # Debug-only: emit one frame mapping pre-dedupe idx -> citation record
+    # so the activity panel can resolve `cited_idxs` (set on rag_specialist
+    # tool_response trace frames) to actual chunk metadata. Sent before
+    # `meta` so the frontend has the lookup ready when it renders the panel.
+    if debug_trace and raw_citations:
+        chunks_by_idx: dict[int, dict] = {}
+        for rec in raw_citations:
+            try:
+                k = int(rec.get("idx"))
+            except (TypeError, ValueError):
+                continue
+            chunks_by_idx[k] = rec
+        yield "data: " + json.dumps(
+            {"type": "trace_chunks", "chunks": chunks_by_idx}
+        ) + "\n\n"
 
     yield "data: " + json.dumps(
         {"type": "meta", "citations": final_citations, "content": annotated}

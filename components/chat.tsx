@@ -166,7 +166,11 @@ export function Message({
   return (
     <div className="group flex flex-col items-stretch">
       {msg.traces && msg.traces.length > 0 && (
-        <AgentActivity steps={msg.traces} streaming={streaming} />
+        <AgentActivity
+          steps={msg.traces}
+          chunksByIdx={msg.traceChunks ?? null}
+          streaming={streaming}
+        />
       )}
       {showLoadingDots && (
         <div
