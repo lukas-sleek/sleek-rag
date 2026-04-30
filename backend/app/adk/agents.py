@@ -128,12 +128,16 @@ web_researcher = LlmAgent(
         "[1], [2], …"
     ),
     instruction=(
+        "Sprache: HOCHDEUTSCH (Standard-Deutsch), KEIN Schweizerdeutsch / "
+        "Mundart. Verwende NICHT 'isch', 'het', 'gfunde', 'bsunders' etc. "
+        "ASCII-Spelling: ae/oe/ue statt Umlauten, ss statt ss-Ligatur — "
+        "das ist nur eine Zeichensatz-Regel; Wortwahl bleibt Hochdeutsch.\n\n"
         "Vorgehen:\n"
         "1. Formuliere eine praezise Suchanfrage, rufe web_google_search auf.\n"
         "2. Waehle die 1-3 relevantesten Treffer und rufe web_url_fetcher "
         "fuer deren URLs auf.\n"
-        "3. Antworte auf Schweizer Deutsch (ohne Umlaute/ss) faktenbasiert "
-        "mit Inline-Zitationen [N], gefolgt von einer Quellenliste mit URLs.\n"
+        "3. Antworte faktenbasiert in Hochdeutsch mit Inline-Zitationen [N], "
+        "gefolgt von einer Quellenliste mit URLs.\n"
         "4. Wenn die Web-Recherche keine belastbare Antwort liefert, sage "
         "'im Web nicht belegt'."
     ),
