@@ -49,14 +49,18 @@ def _init_vertex() -> None:
         # the Vertex AI endpoint (instead of the Generative Language API,
         # which doesn't accept service-account creds).
         #
-        # Location override: gemini-2.5-pro (used by chat_orchestrator) is
-        # NOT published in europe-west3. We pin the genai client to `global`
-        # so both Pro and Flash are reachable. RAG retrieval still uses
-        # europe-west3 because `vertexai.preview.rag` reads its location
-        # from `vertexai.init()` (call below), not from these env vars.
+        # Region: route the genai client to the project's home region
+        # (settings.gcp_location, default europe-west3). The `global`
+        # endpoint we used briefly was forced by the original plan calling
+        # for gemini-2.5-pro on chat_orchestrator (Pro is not published in
+        # europe-west3). We've since switched the orchestrator to Flash,
+        # which IS published regionally, and live diagnostics
+        # (backend/scripts/dsq_diagnose.py) showed the regional pool has
+        # materially better DSQ headroom than `global` for our profile —
+        # 0/30 vs 8/30 429s in identical bursts.
         os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
         os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings.gcp_project_id)
-        os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "global")
+        os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.gcp_location)
     vertexai.init(
         project=settings.gcp_project_id,
         location=settings.gcp_location,

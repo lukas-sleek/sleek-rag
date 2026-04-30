@@ -1,11 +1,10 @@
 """ADK agent factories + module-level constants (plan 19.0 T3-T7).
 
-Tree shape:
+Tree shape (post-collapse, see comment below):
 
-    chat_orchestrator (gemini-2.5-pro)
+    chat_orchestrator (gemini-2.5-flash)
       tool: rag_specialist (AgentTool)
-        tool: document_retriever (AgentTool)
-          tool: search_project_documents (FunctionTool, corpus-bound)
+        tool: search_project_documents (FunctionTool, corpus-bound)
       tool: web_researcher (AgentTool)
         tool: web_google_search (AgentTool)
         tool: web_url_fetcher (AgentTool)
@@ -13,12 +12,22 @@ Tree shape:
 
 Per-corpus state lives in the closure of make_search_project_documents_tool;
 each cached AdkApp owns its own orchestrator subtree.
+
+History note: an intermediate `document_retriever` LlmAgent layer used to
+sit between rag_specialist and search_project_documents. Its instruction
+was a 100% verbatim passthrough ("call the tool with the query and return
+the chunks unchanged") — pure indirection inherited from an earlier
+plan that envisioned a managed VertexAiRagRetrieval tool. We collapsed it
+to cut the agent tree's per-sub-question Flash call count from 6 to 4
+(-33%), which directly reduces DSQ shared-pool burst pressure during
+N-question chat turns.
 """
 from __future__ import annotations
 
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.tools import agent_tool, url_context
 from google.adk.tools.google_search_tool import GoogleSearchTool
+from google.genai import types as genai_types
 
 from app.projektanalyse_v2_tool import run_projektanalyse_v2_tool
 
@@ -27,40 +36,42 @@ from .retrieval_tool import make_search_project_documents_tool
 
 
 # ---------------------------------------------------------------------------
+# Shared retry config — applied to every LlmAgent in the tree.
+#
+# DSQ shared-pool throttles surface as bare 429 RESOURCE_EXHAUSTED with no
+# QuotaFailure detail (see backend/scripts/dsq_diagnose.py for the proof).
+# Without retry the whole chat turn fails; with backoff, the second/third
+# try clears because DSQ pool capacity recovers in seconds.
+#
+# attempts=4 + exp_base=2 + initial_delay=1 -> waits ~1s, 2s, 4s, then gives up
+# (capped by max_delay=20). Burst-friendly without piling up if a real
+# outage occurs.
+# ---------------------------------------------------------------------------
+
+_RETRY_CONFIG = genai_types.GenerateContentConfig(
+    http_options=genai_types.HttpOptions(
+        retry_options=genai_types.HttpRetryOptions(
+            attempts=4,
+            initial_delay=1.0,
+            max_delay=20.0,
+            exp_base=2.0,
+            http_status_codes=[429, 500, 502, 503, 504],
+        )
+    )
+)
+
+
+# ---------------------------------------------------------------------------
 # Per-project (corpus-bound) sub-tree
 # ---------------------------------------------------------------------------
 
 
-def make_document_retriever(corpus_name: str) -> LlmAgent:
-    """Per-project document retriever. Bound to a specific RAG corpus.
-
-    Constructed inside the per-corpus AdkApp factory; one instance per
-    cached AdkApp.
-    """
-    return LlmAgent(
-        name="document_retriever",
-        model="gemini-2.5-flash",
-        description=(
-            "Ruft relevante Textstellen aus dem RAG-Korpus des aktuellen "
-            "Projekts ab. Gibt rohe Chunks mit Quellangabe (Datei, Seite, "
-            "Score) zurueck — ohne Interpretation. Wird ausschliesslich "
-            "vom rag_specialist als Werkzeug aufgerufen, nie direkt vom "
-            "Chat-Agenten."
-        ),
-        instruction=(
-            "Du rufst das Tool search_project_documents mit der vom "
-            "rag_specialist uebergebenen Suchanfrage auf. Gib die Treffer "
-            "wortwoertlich und vollstaendig zurueck — keine Zusammen-"
-            "fassung, keine Auswahl, keine Reformulierung. Wenn das Tool "
-            "{'status': 'no_results'} meldet, gib das explizit als "
-            "'Keine Treffer' zurueck."
-        ),
-        tools=[make_search_project_documents_tool(corpus_name)],
-    )
-
-
 def make_rag_specialist(corpus_name: str) -> LlmAgent:
-    """Per-question RAG worker. Owns SIA domain rules + [N] citation contract."""
+    """Per-question RAG worker. Owns SIA domain rules + [N] citation contract.
+
+    Holds the corpus-bound search_project_documents FunctionTool directly
+    (no intermediate document_retriever LlmAgent — see module docstring).
+    """
     return LlmAgent(
         name="rag_specialist",
         model="gemini-2.5-flash",
@@ -73,7 +84,8 @@ def make_rag_specialist(corpus_name: str) -> LlmAgent:
             "Vom Chat-Agenten pro Einzelfrage delegiert."
         ),
         instruction=RAG_SPECIALIST_INSTRUCTION,
-        tools=[agent_tool.AgentTool(agent=make_document_retriever(corpus_name))],
+        tools=[make_search_project_documents_tool(corpus_name)],
+        generate_content_config=_RETRY_CONFIG,
     )
 
 
@@ -97,6 +109,7 @@ web_google_search = LlmAgent(
         "Bewertung, keine Auswahl."
     ),
     tools=[GoogleSearchTool()],
+    generate_content_config=_RETRY_CONFIG,
 )
 
 
@@ -113,6 +126,7 @@ web_url_fetcher = LlmAgent(
         "Inhalt pro URL klar getrennt zurueck — keine Zusammenfassung."
     ),
     tools=[url_context],
+    generate_content_config=_RETRY_CONFIG,
 )
 
 
@@ -158,6 +172,7 @@ web_researcher = LlmAgent(
         agent_tool.AgentTool(agent=web_google_search),
         agent_tool.AgentTool(agent=web_url_fetcher),
     ],
+    generate_content_config=_RETRY_CONFIG,
 )
 
 
@@ -193,4 +208,5 @@ def make_chat_orchestrator(corpus_name: str) -> LlmAgent:
             agent_tool.AgentTool(agent=web_researcher),
             run_projektanalyse_v2_tool,
         ],
+        generate_content_config=_RETRY_CONFIG,
     )
