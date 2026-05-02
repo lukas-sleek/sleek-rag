@@ -102,6 +102,50 @@ _WEB_QUELLE_RE = re.compile(
 )
 
 
+_PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
+
+
+def _normalize_for_dedupe(s: str) -> str:
+    """Strip [N] markers + whitespace + punctuation noise so two paragraphs
+    that differ only in citation indices compare equal. Used by
+    `_dedupe_repeated_paragraphs` — we keep the original text and only use
+    this for comparison."""
+    s = re.sub(r"\[\d+\]", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip().casefold()
+
+
+def _dedupe_repeated_paragraphs(text: str) -> str:
+    """Drop near-identical paragraphs that the orchestrator occasionally
+    emits twice in one turn — once with rag_specialist's local `[N]`
+    markers, once re-stated with global ones. Compare paragraphs after
+    stripping [N] markers / whitespace; on a match, keep the FIRST
+    occurrence (which has the correct streamed-text alignment) and drop
+    the duplicate. Single-paragraph text is returned unchanged.
+
+    Threshold is full-string equality after normalisation — we don't
+    want fuzzy matching to suppress legitimate restated points."""
+    if not text or "\n\n" not in text:
+        return text
+    paragraphs = _PARAGRAPH_SPLIT_RE.split(text)
+    if len(paragraphs) < 2:
+        return text
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in paragraphs:
+        key = _normalize_for_dedupe(p)
+        # Skip the empty/whitespace-only or trivial keys (e.g. just a
+        # punctuation mark) — those legitimately repeat as separators.
+        if len(key) < 12:
+            out.append(p)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return "\n\n".join(out)
+
+
 def _filename_from_uri(uri: str) -> str:
     """Best-effort filename from a gs:// or https://... URI: just the basename
     after the last '/', without extension stripping."""
@@ -924,6 +968,11 @@ async def _send_message_stream(
     final_citations, remap = dedupe_and_renumber(raw_citations)
     raw_answer = "".join(answer_parts)
     annotated = rewrite_refs(raw_answer, remap)
+    # Drop near-identical paragraphs the orchestrator sometimes emits twice
+    # (once with rag_specialist's local [N] markers, once re-stated with
+    # globals). Empirically observed on Q9/Q11 of the 2026-05-02 11-question
+    # judge run.
+    annotated = _dedupe_repeated_paragraphs(annotated)
 
     yield "data: " + json.dumps(
         {"type": "meta", "citations": final_citations, "content": annotated}

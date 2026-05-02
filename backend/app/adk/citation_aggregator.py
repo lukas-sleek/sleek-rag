@@ -48,7 +48,31 @@ def dedupe_and_renumber(raw: list[dict]) -> tuple[list[dict], dict[int, int]]:
     return final, remap
 
 
+_REF_RUN_RE = re.compile(r"(?:\[\d+\]){2,}")
+
+
+def _dedupe_marker_run(run: str) -> str:
+    """Collapse a run of adjacent [N] markers, keeping each idx once and in
+    order of first appearance. `[2][2]` -> `[2]`, `[1][2][1]` -> `[1][2]`."""
+    seen: list[str] = []
+    for m in _REF_RE.finditer(run):
+        if m.group(1) not in seen:
+            seen.append(m.group(1))
+    return "".join(f"[{n}]" for n in seen)
+
+
 def rewrite_refs(text: str, remap: dict[int, int]) -> str:
-    return _REF_RE.sub(
+    """Apply the dedupe-and-renumber remap to all `[N]` markers in `text`,
+    then collapse adjacent duplicate markers (e.g. `[2][2]` -> `[2]`).
+
+    Adjacent duplicates arise on two paths: (1) the same source dedupes to
+    the same global idx after renumbering (e.g. two rag_specialist sub-calls
+    cite chunks that collapse to one canonical entry), and (2) the
+    orchestrator concatenates adjacent claims that happen to share a
+    source. Either way the duplicate marker is pure noise — the underlying
+    chip is the same — so we drop it before persisting / streaming the
+    annotated answer."""
+    renumbered = _REF_RE.sub(
         lambda m: f"[{remap.get(int(m.group(1)), m.group(1))}]", text
     )
+    return _REF_RUN_RE.sub(lambda m: _dedupe_marker_run(m.group(0)), renumbered)
