@@ -1,0 +1,92 @@
+"""Translate AdkApp.async_stream_query event dicts into our internal
+discriminators (plan 19.0 T9b).
+
+Events are JSON-serialised dicts (T0 probe 1).
+
+Event shapes seen in probe 1:
+  - Model text response:
+      {"author": <agent>, "content": {"role": "model",
+                                       "parts": [{"text": "..."}]},
+       "finish_reason": "STOP", ...}
+  - Tool call (model -> tool):
+      {"author": <agent>, "content": {"role": "model",
+                                       "parts": [{"function_call":
+                                         {"id": "...", "name": "<tool>",
+                                          "args": {...}}}]},
+       "finish_reason": "STOP", ...}
+  - Tool response (tool -> model):
+      {"author": <agent>, "content": {"role": "user",
+                                       "parts": [{"function_response":
+                                         {"id": "...", "name": "<tool>",
+                                          "response": {...}}}]}, ...}
+
+`author` is at the top level. `actions.state_delta` holds tool_context
+state writes (e.g. our citations). No explicit "final" event signal —
+the stream ends when the runner finishes; downstream code accumulates
+text deltas as it goes.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+
+def _parts(event: dict) -> list[dict]:
+    return ((event.get("content") or {}).get("parts") or [])
+
+
+def event_role(event: dict) -> str | None:
+    return (event.get("content") or {}).get("role")
+
+
+def event_kind(event: dict) -> str:
+    """Discriminator for SSE forwarding. Returns one of:
+    "model_text" | "tool_call" | "tool_response" | "other".
+    """
+    role = event_role(event)
+    parts = _parts(event)
+    if role == "model":
+        if any("function_call" in p for p in parts):
+            return "tool_call"
+        if any("text" in p and p.get("text") for p in parts):
+            return "model_text"
+    elif role == "user":
+        if any("function_response" in p for p in parts):
+            return "tool_response"
+    return "other"
+
+
+def event_author(event: dict) -> str | None:
+    return event.get("author")
+
+
+def event_text(event: dict) -> str:
+    """Concatenate non-thought text parts only.
+
+    With `ThinkingConfig.include_thoughts=True`, model events can carry a
+    mix of `{"text": "...", "thought": True}` (chain-of-thought) and plain
+    `{"text": "..."}` (answer) parts. The user-facing streamed reply must
+    contain ONLY the answer parts — thoughts are surfaced separately in
+    the activity panel via `event_thought_text`.
+    """
+    return "".join(
+        p.get("text") or ""
+        for p in _parts(event)
+        if not p.get("thought")
+    )
+
+
+def event_thought_text(event: dict) -> str:
+    """Concatenate the chain-of-thought (thought=True) text parts only."""
+    return "".join(
+        p.get("text") or ""
+        for p in _parts(event)
+        if p.get("thought") and p.get("text")
+    )
+
+
+def event_has_thought(event: dict) -> bool:
+    return any(p.get("thought") and p.get("text") for p in _parts(event))
+
+
+def event_state_delta(event: dict) -> dict[str, Any]:
+    return ((event.get("actions") or {}).get("state_delta") or {})

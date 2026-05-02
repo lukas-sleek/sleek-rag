@@ -6,7 +6,12 @@ RAG app with chat (default) and document ingestion interfaces. Config via env va
 - Frontend: NextJS + Tailwind + shadcn/ui + shadcn.io
 - Backend: Python + FastAPI
 - Database: Supabase (Postgres, pgvector, Auth, Storage, Realtime)
-- LLM: OpenAI (Module 1), OpenRouter (Module 2+)
+- LLM: Gemini 2.5 Flash via OpenAI-compatible endpoint (provider is swappable
+  by changing `GEMINI_BASE_URL` + `GEMINI_API_KEY` — any OpenAI-compatible
+  endpoint works, including Ollama, vLLM, OpenRouter)
+- Document parsing: Google Document AI Layout Parser (eu region)
+- Office→PDF conversion: headless LibreOffice on the backend host
+- Embeddings: gemini-embedding-001 (768d)
 - Observability: LangSmith
 
 ## Rules

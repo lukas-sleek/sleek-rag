@@ -6,8 +6,11 @@ import {
   filterAllowedFiles,
   inferFileType,
   mockAnalysis,
+  type FileDetail,
   type FileItem,
 } from "./fixtures";
+import { api } from "@/lib/api";
+import { createClient } from "@/lib/supabase/client";
 
 const FILE_TYPE: Record<
   FileItem["type"],
@@ -44,6 +47,7 @@ function entityChipColor(type: string) {
 
 export function ProjectFilesModal({
   projectName,
+  projectId,
   onClose,
   files: externalFiles,
   setFiles: externalSetFiles,
@@ -51,8 +55,10 @@ export function ProjectFilesModal({
   onAnalysisComplete,
   notify,
   onUpload,
+  onPreview,
 }: {
   projectName: string;
+  projectId?: string;
   onClose: () => void;
   files?: FileItem[];
   setFiles?: (updater: FileItem[] | ((prev: FileItem[]) => FileItem[])) => void;
@@ -60,6 +66,7 @@ export function ProjectFilesModal({
   onAnalysisComplete?: () => void;
   notify?: (msg: string, kind?: string) => void;
   onUpload?: (files: File[]) => Promise<void> | void;
+  onPreview?: (file: FileItem) => void;
 }) {
   const [internalFiles, setInternalFiles] = React.useState<FileItem[]>(
     externalFiles || []
@@ -92,6 +99,78 @@ export function ProjectFilesModal({
 
   const selected = files.find((f) => f.id === selectedId);
   const analysis = selected?.analysis;
+
+  // Real-file details fetched on selection (fixtures use `analysis` instead).
+  const [detailsById, setDetailsById] = React.useState<Record<string, FileDetail>>({});
+  const [detailError, setDetailError] = React.useState<string | null>(null);
+  const detail = selected ? detailsById[selected.id] : undefined;
+  const fetchedRef = React.useRef<Set<string>>(new Set());
+
+  React.useEffect(() => {
+    if (!projectId || !selected) return;
+    if (selected.status !== "complete") return;
+    if (selected.analysis) return; // fixture data — skip backend
+    if (selected.id.startsWith("uploading-")) return;
+    if (fetchedRef.current.has(selected.id)) return;
+    fetchedRef.current.add(selected.id);
+    let cancelled = false;
+    setDetailError(null);
+    (async () => {
+      try {
+        const res = await api(`/api/projects/${projectId}/files/${selected.id}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = (await res.json()) as FileDetail;
+        if (cancelled) return;
+        setDetailsById((prev) => ({ ...prev, [body.id]: body }));
+      } catch (err) {
+        if (cancelled) return;
+        fetchedRef.current.delete(selected.id);
+        setDetailError(err instanceof Error ? err.message : "Fehler");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, selected?.id, selected?.status, selected?.analysis]);
+
+  const [deleting, setDeleting] = React.useState(false);
+  const handleDelete = async () => {
+    if (!projectId || !selected) return;
+    if (deleting) return;
+    const target = selected;
+    const ok =
+      typeof window === "undefined"
+        ? true
+        : window.confirm(`„${target.name}“ wirklich löschen?`);
+    if (!ok) return;
+    setDeleting(true);
+    try {
+      // Optimistic: drop from list immediately, pick a neighbor as new selection.
+      const idx = files.findIndex((f) => f.id === target.id);
+      const next = files[idx + 1] || files[idx - 1] || null;
+      setSelectedId(next ? next.id : null);
+      setFiles((prev) => prev.filter((f) => f.id !== target.id));
+
+      const res = await api(
+        `/api/projects/${projectId}/files/${target.id}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setDetailsById((prev) => {
+        const { [target.id]: _drop, ...rest } = prev;
+        return rest;
+      });
+      if (notify) notify(`„${target.name}“ gelöscht.`, "success");
+    } catch (err) {
+      // Rollback by re-inserting original entry.
+      setFiles((prev) => (prev.some((f) => f.id === target.id) ? prev : [target, ...prev]));
+      setSelectedId(target.id);
+      const reason = err instanceof Error && err.message ? `: ${err.message}` : "";
+      if (notify) notify(`Löschen fehlgeschlagen${reason}`, "warn");
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const addFiles = (fileList: FileList | null) => {
     const { accepted, rejected } = filterAllowedFiles(fileList);
@@ -241,7 +320,22 @@ export function ProjectFilesModal({
                         {file.name}
                       </span>
                       <span className="text-[11px] text-text-tertiary">
-                        {file.size} · {file.pages} {file.pages === 1 ? "Seite" : "Seiten"}
+                        {(() => {
+                          if (file.status === "failed") return "Fehlgeschlagen";
+                          if (file.status === "complete") {
+                            return `${file.size} · ${file.pages} ${file.pages === 1 ? "Seite" : "Seiten"}`;
+                          }
+                          switch (file.ingestStatus) {
+                            case "uploading":
+                              return "Hochladen…";
+                            case "parsing":
+                              return "Layout wird analysiert…";
+                            case "embedding":
+                              return "Chunks werden eingebettet…";
+                            default:
+                              return `${file.size} · ${file.pages} ${file.pages === 1 ? "Seite" : "Seiten"}`;
+                          }
+                        })()}
                       </span>
                     </span>
                     {file.status === "complete" && (
@@ -251,6 +345,14 @@ export function ProjectFilesModal({
                     )}
                     {file.status === "analyzing" && (
                       <span className="pf-item-badge dot" />
+                    )}
+                    {file.status === "failed" && (
+                      <span
+                        className="flex-shrink-0 flex items-center justify-center text-[#ef4444]"
+                        title={file.ingestError || "Ingestion fehlgeschlagen"}
+                      >
+                        <Icon.XBig />
+                      </span>
                     )}
                   </button>
                 );
@@ -269,7 +371,7 @@ export function ProjectFilesModal({
           </div>
 
           <div className="overflow-y-auto flex flex-col">
-            {selected && analysis ? (
+            {selected && (analysis || detail) ? (
               <div className="flex flex-col">
                 <div className="flex items-center gap-3 px-5 py-3.5 border-b border-border">
                   <div className="flex-1 min-w-0">
@@ -279,53 +381,82 @@ export function ProjectFilesModal({
                       {selected.pages === 1 ? "Seite" : "Seiten"}
                     </div>
                   </div>
+                  {onPreview && selected.type === "pdf" && (
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-bg-input border border-border text-text-secondary text-[11.5px] font-medium cursor-pointer transition-[background-color,color,border-color] duration-150 hover:bg-bg-hover hover:text-text hover:border-border-strong [&_svg]:w-3 [&_svg]:h-3"
+                      onClick={() => onPreview(selected)}
+                      title="PDF öffnen"
+                    >
+                      <Icon.FileText />
+                      Vorschau
+                    </button>
+                  )}
+                  {projectId && !analysis && (
+                    <button
+                      type="button"
+                      disabled={deleting}
+                      className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-transparent border border-border text-text-secondary text-[11.5px] font-medium cursor-pointer transition-[background-color,color,border-color] duration-150 hover:bg-[rgba(239,68,68,.08)] hover:text-[#fca5a5] hover:border-[rgba(239,68,68,.4)] disabled:opacity-50 disabled:cursor-not-allowed [&_svg]:w-3 [&_svg]:h-3"
+                      onClick={handleDelete}
+                      title="Datei löschen"
+                    >
+                      <Icon.Trash />
+                      {deleting ? "Lösche…" : "Löschen"}
+                    </button>
+                  )}
                   <span className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-[rgba(16,185,129,.12)] text-[#6ee7b7] text-[11px] font-medium flex-shrink-0">
                     <span className="w-1.5 h-1.5 rounded-full bg-[#10b981]" />
                     Analysiert
                   </span>
                 </div>
 
-                <div className="px-5 py-3.5 border-b border-border">
-                  <div className="text-[11px] font-medium text-text-tertiary mb-2">Zusammenfassung</div>
-                  <p className="m-0 text-[13.5px] leading-[1.6] text-text">{analysis.summary}</p>
-                </div>
-
-                <div className="grid grid-cols-3 border-b border-border">
-                  {analysis.keyStats.map((s) => (
-                    <div
-                      key={s.label}
-                      className="px-4 py-2.5 border-r border-b border-border [&:nth-child(3n)]:border-r-0 [&:nth-child(n+4)]:border-b-0"
-                    >
-                      <div className="text-[10px] text-text-tertiary tracking-[0.04em]">{s.label}</div>
-                      <div className="text-sm font-semibold text-text tabular-nums mt-0.5">{s.value}</div>
+                {analysis && (
+                  <>
+                    <div className="px-5 py-3.5 border-b border-border">
+                      <div className="text-[11px] font-medium text-text-tertiary mb-2">Zusammenfassung</div>
+                      <p className="m-0 text-[13.5px] leading-[1.6] text-text">{analysis.summary}</p>
                     </div>
-                  ))}
-                </div>
 
-                <div className="px-5 py-3.5 border-b border-border">
-                  <div className="text-[11px] font-medium text-text-tertiary mb-2">
-                    Erkannte Entitäten ({analysis.entities.length})
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {analysis.entities.map((e, i) => {
-                      const c = entityChipColor(e.type);
-                      return (
-                        <span
-                          key={i}
-                          className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11.5px] font-medium"
-                          style={{ background: c.bg, color: c.fg }}
+                    <div className="grid grid-cols-3 border-b border-border">
+                      {analysis.keyStats.map((s) => (
+                        <div
+                          key={s.label}
+                          className="px-4 py-2.5 border-r border-b border-border [&:nth-child(3n)]:border-r-0 [&:nth-child(n+4)]:border-b-0"
                         >
-                          {e.text}
-                          <span className="font-mono text-[10px] opacity-60">
-                            {Math.round(e.confidence * 100)}%
-                          </span>
-                        </span>
-                      );
-                    })}
-                  </div>
-                </div>
+                          <div className="text-[10px] text-text-tertiary tracking-[0.04em]">{s.label}</div>
+                          <div className="text-sm font-semibold text-text tabular-nums mt-0.5">{s.value}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="px-5 py-3.5 border-b border-border">
+                      <div className="text-[11px] font-medium text-text-tertiary mb-2">
+                        Erkannte Entitäten ({analysis.entities.length})
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {analysis.entities.map((e, i) => {
+                          const c = entityChipColor(e.type);
+                          return (
+                            <span
+                              key={i}
+                              className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11.5px] font-medium"
+                              style={{ background: c.bg, color: c.fg }}
+                            >
+                              {e.text}
+                              <span className="font-mono text-[10px] opacity-60">
+                                {Math.round(e.confidence * 100)}%
+                              </span>
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {!analysis && detail && <FileDetailView detail={detail} />}
               </div>
-            ) : selected && selected.status === "analyzing" ? (
+            ) : selected && (selected.status === "analyzing" || (selected.status === "complete" && !detailError)) ? (
               <div className="pf-skeleton">
                 <div className="pf-skel-head">
                   <div className="pf-skel-text">
@@ -359,6 +490,43 @@ export function ProjectFilesModal({
                   </div>
                 </div>
               </div>
+            ) : selected && selected.status === "failed" ? (
+              <div className="flex flex-col">
+                <div className="flex items-center gap-3 px-5 py-3.5 border-b border-border">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-text whitespace-nowrap overflow-hidden text-ellipsis">{selected.name}</div>
+                    <div className="text-xs text-text-tertiary mt-0.5">
+                      {FILE_TYPE[selected.type].label} · {selected.size}
+                    </div>
+                  </div>
+                  {projectId && (
+                    <button
+                      type="button"
+                      disabled={deleting}
+                      className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-transparent border border-border text-text-secondary text-[11.5px] font-medium cursor-pointer transition-[background-color,color,border-color] duration-150 hover:bg-[rgba(239,68,68,.08)] hover:text-[#fca5a5] hover:border-[rgba(239,68,68,.4)] disabled:opacity-50 disabled:cursor-not-allowed [&_svg]:w-3 [&_svg]:h-3"
+                      onClick={handleDelete}
+                      title="Datei löschen"
+                    >
+                      <Icon.Trash />
+                      {deleting ? "Lösche…" : "Löschen"}
+                    </button>
+                  )}
+                  <span className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-[rgba(239,68,68,.12)] text-[#fca5a5] text-[11px] font-medium flex-shrink-0">
+                    Fehlgeschlagen
+                  </span>
+                </div>
+                <div className="px-5 py-3.5">
+                  <div className="text-[11px] font-medium text-text-tertiary mb-2">Fehlermeldung</div>
+                  <p className="m-0 text-[12.5px] leading-[1.6] text-[#fca5a5] whitespace-pre-wrap break-words">
+                    {selected.ingestError || "Die Verarbeitung ist fehlgeschlagen."}
+                  </p>
+                </div>
+              </div>
+            ) : selected && detailError ? (
+              <div className="flex-1 flex flex-col items-center justify-center gap-2.5 p-10 text-text-tertiary">
+                <Icon.FileText />
+                <div className="text-xs">Details konnten nicht geladen werden ({detailError}).</div>
+              </div>
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center gap-2.5 p-10 text-text-tertiary">
                 <Icon.FileText />
@@ -378,5 +546,54 @@ export function ProjectFilesModal({
         </div>
       )}
     </div>
+  );
+}
+
+function formatBytes(bytes: number | null | undefined) {
+  if (bytes == null) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatDate(iso: string | null | undefined) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("de-DE", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function FileDetailView({ detail }: { detail: FileDetail }) {
+  const stats: { label: string; value: string }[] = [
+    { label: "Seiten", value: detail.page_count != null ? String(detail.page_count) : "—" },
+    { label: "Größe", value: formatBytes(detail.size_bytes) },
+    { label: "Hochgeladen", value: formatDate(detail.created_at) },
+  ];
+
+  return (
+    <>
+      <div className="grid grid-cols-3 border-b border-border">
+        {stats.map((s) => (
+          <div
+            key={s.label}
+            className="px-4 py-2.5 border-r border-border last:border-r-0"
+          >
+            <div className="text-[10px] text-text-tertiary tracking-[0.04em]">{s.label}</div>
+            <div className="text-sm font-semibold text-text tabular-nums mt-0.5">{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {detail.mime_type && (
+        <div className="px-5 py-3 border-b border-border flex items-center justify-between">
+          <span className="text-[11px] text-text-tertiary">MIME-Typ</span>
+          <span className="text-[11.5px] text-text-secondary font-mono">{detail.mime_type}</span>
+        </div>
+      )}
+    </>
   );
 }

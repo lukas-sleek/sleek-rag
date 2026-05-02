@@ -346,6 +346,7 @@ export function Sidebar({
   emptyChatIds,
   user,
   onOpenTemplate,
+  onLogout,
 }: {
   collapsed: boolean;
   onToggle: () => void;
@@ -364,9 +365,17 @@ export function Sidebar({
   emptyChatIds: Set<string>;
   user: LoginUser;
   onOpenTemplate: () => void;
+  onLogout: () => void;
 }) {
   const [search, setSearch] = React.useState("");
   const [projDragOver, setProjDragOver] = React.useState<ProjDragOver>(null);
+  const [userMenuOpen, setUserMenuOpen] = React.useState(false);
+  React.useEffect(() => {
+    if (!userMenuOpen) return;
+    const close = () => setUserMenuOpen(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [userMenuOpen]);
   // Source of an active project drag. Set after the browser has captured the
   // drag image (via rAF) so flipping the .dragging-source class doesn't
   // cancel the drag. Cleared on dragend / drop / non-drop release.
@@ -557,15 +566,51 @@ export function Sidebar({
 
       <div
         className={
-          "border-t border-border mt-auto flex-shrink-0 flex items-center gap-2.5 " +
-          (collapsed ? "justify-center py-2.5 px-0" : "py-2.5 px-3")
+          "relative border-t border-border mt-auto flex-shrink-0 " +
+          (collapsed ? "py-2.5 px-0" : "py-2.5 px-3")
         }
       >
-        <div className="avatar">{(user.email[0] || "A").toUpperCase()}</div>
-        {!collapsed && (
-          <div className="flex flex-col flex-1 min-w-0">
-            <div className="text-[13px] font-medium text-text">{user.email.split("@")[0]}</div>
-            <div className="text-[11px] text-text-tertiary whitespace-nowrap overflow-hidden text-ellipsis">{user.email}</div>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setUserMenuOpen((v) => !v);
+          }}
+          title={collapsed ? user.email : "Konto"}
+          className={
+            "w-full flex items-center gap-2.5 rounded-md transition-[background-color] duration-150 hover:bg-bg-hover " +
+            (collapsed ? "justify-center py-1.5" : "px-2 py-1.5 text-left")
+          }
+        >
+          <div className="avatar">{(user.email[0] || "A").toUpperCase()}</div>
+          {!collapsed && (
+            <div className="flex flex-col flex-1 min-w-0">
+              <div className="text-[13px] font-medium text-text">{user.email.split("@")[0]}</div>
+              <div className="text-[11px] text-text-tertiary whitespace-nowrap overflow-hidden text-ellipsis">{user.email}</div>
+            </div>
+          )}
+          {!collapsed && (
+            <span className="text-text-tertiary flex-shrink-0">
+              <Icon.ChevronDownSm />
+            </span>
+          )}
+        </button>
+        {userMenuOpen && (
+          <div
+            className="absolute bottom-[calc(100%-4px)] left-3 right-3 z-30 bg-bg-elevated border border-border rounded-[8px] shadow-[0_12px_28px_rgba(0,0,0,.45),0_2px_6px_rgba(0,0,0,.3)] py-1"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="w-full flex items-center gap-2 px-3 py-2 text-[13px] text-text hover:bg-bg-hover transition-[background-color] duration-150 text-left"
+              onClick={() => {
+                setUserMenuOpen(false);
+                onLogout();
+              }}
+            >
+              <Icon.LogOut />
+              <span>Abmelden</span>
+            </button>
           </div>
         )}
       </div>

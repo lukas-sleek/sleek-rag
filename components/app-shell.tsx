@@ -9,17 +9,20 @@ import { Composer, EmptyState, Message } from "./chat";
 
 const LAST_CHAT_KEY = "sleek-rag.last-chat-id";
 import { ProjectFilesModal } from "./project-files-modal";
-import { TemplateAnalysisModal, loadTemplate, parseTemplate } from "./template-modal";
+import { PdfViewerDialog } from "./pdf-viewer-dialog";
+import { TemplateAnalysisModal } from "./template-modal";
 import {
   ACCEPT_ATTR,
   filterAllowedFiles,
   inferFileType,
   mockAnalysis,
+  type Citation,
   type FileItem,
   type Message as Msg,
   type Project,
 } from "./fixtures";
 import { createClient } from "@/lib/supabase/client";
+import { subscribeToFileStatus } from "@/lib/supabase/realtime";
 import { api } from "@/lib/api";
 
 type Toast = { id: string; message: string; kind: string };
@@ -72,8 +75,16 @@ export function App() {
   const [projectFiles, setProjectFiles] = React.useState<Record<string, FileItem[]>>({});
 
   const [threads, setThreads] = React.useState<Record<string, Msg[]>>({});
-  const [streaming, setStreaming] = React.useState(false);
-  const streamRef = React.useRef<{ controller: AbortController | null }>({ controller: null });
+  // Per-chat streaming state. The Composer / Stop button reads only the
+  // active chat's flag, so opening a new chat while another is generating
+  // shows the normal Send button — the background stream keeps running and
+  // its own chat thread keeps updating.
+  const [streamingChats, setStreamingChats] = React.useState<Set<string>>(
+    () => new Set(),
+  );
+  const streamControllersRef = React.useRef<Map<string, AbortController>>(
+    new Map(),
+  );
   const loadedThreadsRef = React.useRef<Set<string>>(new Set());
   // Initial-load gate. Tracks chats whose messages fetch has resolved (success
   // or failure), whether the URL→state effect has picked an active chat, and
@@ -99,6 +110,7 @@ export function App() {
   }>(null);
   const [showFiles, setShowFiles] = React.useState({ open: false, autoPicker: false });
   const [showTemplate, setShowTemplate] = React.useState(false);
+  const [viewerCitation, setViewerCitation] = React.useState<Citation | null>(null);
   const [chatDragOver, setChatDragOver] = React.useState(false);
   const [toasts, setToasts] = React.useState<Toast[]>([]);
   // chatId of the chat that's currently in "post-send" mode (extra bottom
@@ -395,6 +407,9 @@ export function App() {
         filename: string;
         size_bytes?: number | null;
         status: string;
+        chunk_count?: number | null;
+        page_count?: number | null;
+        ingest_error?: string | null;
       }>;
       if (cancelled) return;
       // Preserve any in-flight upload placeholders so a GET that resolves
@@ -415,6 +430,32 @@ export function App() {
       cancelled = true;
     };
   }, [session, showFiles.open, activeProjectId]);
+
+  React.useEffect(() => {
+    if (!session) return;
+    if (!activeProjectId) return;
+    const projectId = activeProjectId;
+    const unsub = subscribeToFileStatus(projectId, (row) => {
+      setProjectFiles((prev) => {
+        const list = prev[projectId];
+        if (!list) return prev;
+        const idx = list.findIndex((f) => f.id === row.id);
+        if (idx === -1) return prev;
+        const ready = row.status === "ready" || row.status === "indexed";
+        const failed = row.status === "failed";
+        const updated: FileItem = {
+          ...list[idx],
+          status: ready ? "complete" : failed ? "failed" : "analyzing",
+          ingestStatus: row.status,
+          ingestError: row.ingest_error ?? null,
+        };
+        const next = [...list];
+        next[idx] = updated;
+        return { ...prev, [projectId]: next };
+      });
+    });
+    return unsub;
+  }, [session, activeProjectId]);
 
   const activeChat = React.useMemo(() => {
     for (const p of projects) {
@@ -442,15 +483,24 @@ export function App() {
     filename: string;
     size_bytes?: number | null;
     status: string;
-  }): FileItem => ({
-    id: row.id,
-    name: row.filename,
-    size: formatBytes(row.size_bytes ?? null),
-    type: inferFileType(row.filename),
-    pages: 1,
-    status: row.status === "indexed" ? "complete" : "analyzing",
-    analysis: null,
-  });
+    chunk_count?: number | null;
+    page_count?: number | null;
+    ingest_error?: string | null;
+  }): FileItem => {
+    const ready = row.status === "ready" || row.status === "indexed";
+    const failed = row.status === "failed";
+    return {
+      id: row.id,
+      name: row.filename,
+      size: formatBytes(row.size_bytes ?? null),
+      type: inferFileType(row.filename),
+      pages: row.page_count ?? 1,
+      status: ready ? "complete" : failed ? "failed" : "analyzing",
+      ingestStatus: row.status,
+      ingestError: row.ingest_error ?? null,
+      analysis: null,
+    };
+  };
 
   const uploadProjectFiles = async (projectId: string, accepted: File[]) => {
     if (!accepted.length) return;
@@ -495,6 +545,9 @@ export function App() {
             filename: string;
             size_bytes?: number | null;
             status: string;
+            chunk_count?: number | null;
+            page_count?: number | null;
+            ingest_error?: string | null;
           };
           anySucceeded = true;
           setProjectFiles((prev) => ({
@@ -503,7 +556,7 @@ export function App() {
               existing.id === placeholderId ? rowToFileItem(row) : existing,
             ),
           }));
-          if (row.status !== "indexed") {
+          if (row.status !== "indexed" && row.status !== "parsing" && row.status !== "queued" && row.status !== "ready") {
             pushToast(`„${row.filename}“: Status ${row.status}.`, "warn");
           }
         } catch (err) {
@@ -551,6 +604,7 @@ export function App() {
   const messages = threads[activeChatId] || [];
   const isEmpty = activeChatId === "__empty__" || messages.length === 0;
   const noProjects = projectsLoaded && projects.length === 0;
+  const activeChatStreaming = streamingChats.has(activeChatId);
 
   // Chats considered "empty / unused": a freshly created chat the user
   // hasn't sent the first message in. Used to gate the "+ Neuer Chat"
@@ -833,9 +887,43 @@ export function App() {
       [chatId]: [...(prev[chatId] || []), { role: "user", content: text }],
     }));
 
-    setStreaming(true);
+    // First user message in a fresh chat: paint the title with the first
+    // ~40 chars of the prompt right away so the sidebar reflects something
+    // meaningful before the AI title (2-3 words, can take seconds) lands.
+    const currentChat = projects
+      .find((p) => p.chats.some((c) => c.id === chatId))
+      ?.chats.find((c) => c.id === chatId);
+    const isFirstTurn =
+      !!currentChat &&
+      (currentChat.title === "Neuer Chat" || currentChat.title === "New chat");
+    if (isFirstTurn) {
+      const trimmed = text.trim();
+      const placeholder =
+        trimmed.length <= 40 ? trimmed : trimmed.slice(0, 40).trimEnd() + "…";
+      setProjects((prev) =>
+        prev.map((p) => ({
+          ...p,
+          chats: p.chats.map((c) => (c.id === chatId ? { ...c, title: placeholder } : c)),
+        })),
+      );
+      api(`/api/chats/${chatId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: placeholder }),
+      }).catch(() => {});
+      // Kick off the AI title (2-3 words) in parallel with the chat stream.
+      // The title call is independent — no need to wait for the message
+      // generation to finish before we know what to call this chat.
+      void generateChatTitle(chatId, text);
+    }
+
     const controller = new AbortController();
-    streamRef.current.controller = controller;
+    streamControllersRef.current.set(chatId, controller);
+    setStreamingChats((prev) => {
+      const next = new Set(prev);
+      next.add(chatId);
+      return next;
+    });
 
     setThreads((prev) => ({
       ...prev,
@@ -861,10 +949,7 @@ export function App() {
       const res = await api(`/api/chats/${chatId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text,
-          projektanalyse_template: parseTemplate(loadTemplate()),
-        }),
+        body: JSON.stringify({ text }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
@@ -886,8 +971,22 @@ export function App() {
           if (data === "[DONE]") break outer;
           try {
             const payload = JSON.parse(data) as {
+              type?: "meta" | "delta" | "done" | "trace";
+              content?: string;
+              citations?: import("./fixtures").Citation[];
+              message_id?: string;
               delta?: string;
               progress?: { done: number; total: number; question?: string };
+              // trace fields (debug accounts only)
+              id?: string;
+              author?: string;
+              kind?: import("./fixtures").TraceStep["kind"];
+              name?: string;
+              args?: string;
+              response?: string;
+              text?: string;
+              chunks?: import("./fixtures").RetrievalChunk[];
+              status?: string;
             };
             if (payload.progress) {
               const { done, total, question } = payload.progress;
@@ -900,17 +999,130 @@ export function App() {
                 };
                 return { ...prev, [chatId]: arr };
               });
-            } else if (payload.delta !== undefined) {
-              setThreads((prev) => {
-                const arr = [...(prev[chatId] || [])];
-                const last = arr[arr.length - 1];
-                const isProgressPlaceholder = last?.content?.startsWith("_Projektanalyse läuft");
-                arr[arr.length - 1] = {
-                  role: "assistant",
-                  content: isProgressPlaceholder ? payload.delta! : (last?.content ?? "") + payload.delta!,
+              continue;
+            }
+            switch (payload.type) {
+              case "trace": {
+                // Debug-only frame: backend gates emission to allowlisted
+                // user emails. Append the step to the in-progress assistant
+                // turn's traces array and let the chat.tsx Message render
+                // the activity panel.
+                if (!payload.id || !payload.author || !payload.kind) break;
+                const step: import("./fixtures").TraceStep = {
+                  id: payload.id,
+                  author: payload.author,
+                  kind: payload.kind,
+                  name: payload.name ?? null,
+                  args: payload.args ?? null,
+                  response: payload.response ?? null,
+                  text: payload.text ?? null,
+                  chunks: payload.chunks ?? null,
+                  status: payload.status ?? null,
                 };
-                return { ...prev, [chatId]: arr };
-              });
+                setThreads((prev) => {
+                  const arr = [...(prev[chatId] || [])];
+                  const last = arr[arr.length - 1];
+                  if (last?.role !== "assistant") return prev;
+                  const existing = last.traces ?? [];
+                  // Upsert by id: per-batched-question dispatch frames
+                  // emit the SAME id (e.g. `dispatch-3`) for the start
+                  // (`laeuft`) and done (`fertig`) phases — we replace
+                  // the existing row in place so the activity panel
+                  // shows one row per question that flips status
+                  // rather than two separate rows.
+                  const existingIdx = existing.findIndex(
+                    (t) => t.id === step.id
+                  );
+                  const nextTraces =
+                    existingIdx >= 0
+                      ? existing.map((t, i) =>
+                          i === existingIdx ? step : t
+                        )
+                      : [...existing, step];
+                  arr[arr.length - 1] = {
+                    ...last,
+                    traces: nextTraces,
+                  };
+                  return { ...prev, [chatId]: arr };
+                });
+                break;
+              }
+              case "meta": {
+                if (process.env.NODE_ENV !== "production") {
+                  // eslint-disable-next-line no-console
+                  console.debug("citations", payload.citations);
+                }
+                // Backend sends an annotated `content` string alongside
+                // citations — the streamed deltas don't carry the [N] ref
+                // markers (those come from grounding_supports, which are
+                // only available after the stream completes). Swap the
+                // streamed content for the annotated version when present
+                // so chat.tsx's [N] linkifier can match.
+                setThreads((prev) => {
+                  const arr = [...(prev[chatId] || [])];
+                  const last = arr[arr.length - 1];
+                  if (last?.role === "assistant") {
+                    arr[arr.length - 1] = {
+                      ...last,
+                      content: payload.content ?? last.content,
+                      citations: payload.citations ?? [],
+                    };
+                  }
+                  return { ...prev, [chatId]: arr };
+                });
+                break;
+              }
+              case "delta": {
+                const piece = payload.content ?? "";
+                if (!piece) break;
+                setThreads((prev) => {
+                  const arr = [...(prev[chatId] || [])];
+                  const last = arr[arr.length - 1];
+                  const isProgressPlaceholder = last?.content?.startsWith(
+                    "_Projektanalyse läuft",
+                  );
+                  arr[arr.length - 1] = {
+                    ...last,
+                    role: "assistant",
+                    content: isProgressPlaceholder ? piece : (last?.content ?? "") + piece,
+                  };
+                  return { ...prev, [chatId]: arr };
+                });
+                break;
+              }
+              case "done": {
+                if (payload.message_id) {
+                  setThreads((prev) => {
+                    const arr = [...(prev[chatId] || [])];
+                    const last = arr[arr.length - 1];
+                    if (last?.role === "assistant") {
+                      arr[arr.length - 1] = { ...last, id: payload.message_id };
+                    }
+                    return { ...prev, [chatId]: arr };
+                  });
+                }
+                break;
+              }
+              default: {
+                // Backward-compat: legacy frames that just carry {delta: "..."}.
+                if (payload.delta !== undefined) {
+                  setThreads((prev) => {
+                    const arr = [...(prev[chatId] || [])];
+                    const last = arr[arr.length - 1];
+                    const isProgressPlaceholder = last?.content?.startsWith(
+                      "_Projektanalyse läuft",
+                    );
+                    arr[arr.length - 1] = {
+                      ...last,
+                      role: "assistant",
+                      content: isProgressPlaceholder
+                        ? payload.delta!
+                        : (last?.content ?? "") + payload.delta!,
+                    };
+                    return { ...prev, [chatId]: arr };
+                  });
+                }
+              }
             }
           } catch {
             /* ignore malformed line */
@@ -922,69 +1134,73 @@ export function App() {
         pushToast("Streaming abgebrochen.", "warn");
       }
     } finally {
-      setStreaming(false);
-      streamRef.current.controller = null;
+      streamControllersRef.current.delete(chatId);
+      setStreamingChats((prev) => {
+        if (!prev.has(chatId)) return prev;
+        const next = new Set(prev);
+        next.delete(chatId);
+        return next;
+      });
     }
 
-    const proj = projects.find((p) => p.chats.some((c) => c.id === chatId));
-    const chat = proj?.chats.find((c) => c.id === chatId);
-    if (chat && (chat.title === "Neuer Chat" || chat.title === "New chat")) {
-      // Clear the title so the streamed tokens are the only thing shown.
-      setProjects((prev) =>
-        prev.map((p) => ({
-          ...p,
-          chats: p.chats.map((c) => (c.id === chatId ? { ...c, title: "" } : c)),
-        })),
-      );
-      try {
-        const res = await api(`/api/chats/${chatId}/title`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ first_message: text }),
-        });
-        if (res.ok && res.body) {
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          let acc = "";
-          outer: while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() ?? "";
-            for (const line of lines) {
-              if (!line.startsWith("data: ")) continue;
-              const data = line.slice(6);
-              if (data === "[DONE]") break outer;
-              try {
-                const { delta } = JSON.parse(data) as { delta?: string };
-                if (!delta) continue;
-                acc += delta;
-                setProjects((prev) =>
-                  prev.map((p) => ({
-                    ...p,
-                    chats: p.chats.map((c) =>
-                      c.id === chatId ? { ...c, title: acc } : c,
-                    ),
-                  })),
-                );
-              } catch {
-                /* ignore malformed line */
-              }
-            }
+  };
+
+  // Background AI title generation. Runs in parallel with the chat stream so
+  // the sidebar swaps from the prompt-slice placeholder to a 2-3-word title
+  // as soon as the title model is done — independent of how long the answer
+  // takes. Errors swallowed: placeholder stays as the worst case.
+  const generateChatTitle = async (chatId: string, firstMessage: string) => {
+    try {
+      const res = await api(`/api/chats/${chatId}/title`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ first_message: firstMessage }),
+      });
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let acc = "";
+      outer: while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6);
+          if (data === "[DONE]") break outer;
+          try {
+            const { delta } = JSON.parse(data) as { delta?: string };
+            if (delta) acc += delta;
+          } catch {
+            /* ignore malformed line */
           }
         }
-      } catch {
-        /* best-effort title generation; leave whatever's accumulated */
       }
+      const finalTitle = acc.trim().replace(/^["']+|["']+$/g, "").trim();
+      if (finalTitle) {
+        setProjects((prev) =>
+          prev.map((p) => ({
+            ...p,
+            chats: p.chats.map((c) =>
+              c.id === chatId ? { ...c, title: finalTitle } : c,
+            ),
+          })),
+        );
+      }
+    } catch {
+      /* best-effort title generation; leave the placeholder in place */
     }
   };
 
   const onStop = () => {
-    streamRef.current.controller?.abort();
-    streamRef.current.controller = null;
-    setStreaming(false);
+    if (!activeChatId) return;
+    const ctrl = streamControllersRef.current.get(activeChatId);
+    if (ctrl) ctrl.abort();
+    // The sendMessage finally-block clears the controller + streamingChats
+    // entry once the abort propagates; no manual cleanup needed here.
   };
 
   const splash = (
@@ -1078,6 +1294,19 @@ export function App() {
         emptyChatIds={emptyChatIds}
         user={{ email: session.user.email ?? "" }}
         onOpenTemplate={() => setShowTemplate(true)}
+        onLogout={() => {
+          setConfirmDialog({
+            title: "Abmelden?",
+            body: <>Du wirst von <strong>{session.user.email}</strong> abgemeldet.</>,
+            confirmLabel: "Abmelden",
+            onConfirm: async () => {
+              const { error } = await supabase.auth.signOut();
+              if (error) {
+                pushToast("Abmelden fehlgeschlagen.", "warn");
+              }
+            },
+          });
+        }}
       />
 
       <main
@@ -1118,7 +1347,7 @@ export function App() {
           </div>
           <div className="inline-flex items-center gap-1.5 bg-bg-input border border-border px-2.5 py-[5px] rounded-full text-xs text-text-secondary">
             <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-            EAG LLM · gpt-4o
+            EAG LLM
           </div>
           {activeChat?.projectHasFiles && (
             <button
@@ -1146,7 +1375,7 @@ export function App() {
                 if (hiddenFileInputRef.current) hiddenFileInputRef.current.click();
               }}
             />
-            <Composer onSend={sendMessage} streaming={streaming} onStop={onStop} />
+            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} />
           </>
         ) : (
           <>
@@ -1169,12 +1398,21 @@ export function App() {
                   <Message
                     key={i}
                     msg={m}
-                    streaming={streaming && i === messages.length - 1 && m.role === "assistant"}
+                    streaming={activeChatStreaming && i === messages.length - 1 && m.role === "assistant"}
+                    onCiteClick={(c) => {
+                      // Web citations open in a new tab; PDFs open the
+                      // in-app GCS-backed viewer.
+                      if (c.kind === "web" && c.url) {
+                        window.open(c.url, "_blank", "noopener,noreferrer");
+                        return;
+                      }
+                      setViewerCitation(c);
+                    }}
                   />
                 ))}
               </div>
             </div>
-            <Composer onSend={sendMessage} streaming={streaming} onStop={onStop} />
+            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} />
           </>
         )}
       </main>
@@ -1222,6 +1460,7 @@ export function App() {
       {showFiles.open && (
         <ProjectFilesModal
           projectName={activeChat?.projectName || "Projekt"}
+          projectId={activeChat?.projectId}
           onClose={() => setShowFiles({ open: false, autoPicker: false })}
           autoOpenPicker={showFiles.autoPicker}
           files={activeChat?.projectId ? (projectFiles[activeChat.projectId] || []) : undefined}
@@ -1251,6 +1490,15 @@ export function App() {
               ? (files) => uploadProjectFiles(activeChat.projectId, files)
               : undefined
           }
+          onPreview={(file) =>
+            setViewerCitation({
+              chunk_id: `preview-${file.id}`,
+              file_id: file.id,
+              filename: file.name,
+              snippet: "",
+              score: 0,
+            })
+          }
         />
       )}
 
@@ -1258,6 +1506,11 @@ export function App() {
         open={showTemplate}
         onClose={() => setShowTemplate(false)}
         onSaved={() => pushToast("Vorlage gespeichert.", "success")}
+      />
+
+      <PdfViewerDialog
+        citation={viewerCitation}
+        onClose={() => setViewerCitation(null)}
       />
 
       {chatDragOver && (

@@ -33,7 +33,64 @@ export const PROJECTS_INITIAL: Project[] = [
   },
 ];
 
-export type Message = { role: "user" | "assistant"; content: string };
+// Citation discriminator. Plan 19.0 adds web citations alongside the
+// existing file (Vertex RAG) chunks. Older rows (pre-19.0) have kind
+// undefined — treat as "file" for back-compat.
+export type Citation = {
+  chunk_id: string;
+  // "file" or undefined (legacy) for project-document chunks; "web" for
+  // results parsed from web_researcher's mandated Quellen block.
+  kind?: "file" | "web";
+  // file fields
+  project_id?: string | null;
+  file_id?: string | null;
+  filename: string;
+  snippet: string;
+  score: number | null;
+  // web fields (only present when kind === "web")
+  url?: string | null;
+  title?: string | null;
+  domain?: string | null;
+};
+
+// One step in the agent trace surfaced for debug accounts. The backend emits
+// these alongside `delta` / `meta` / `done` SSE frames; the activity panel
+// in `Message` renders them as a collapsible reasoning view. Production
+// users never see traces — frames are gated server-side by user email.
+export type RetrievalChunk = {
+  idx: number;
+  filename: string;
+  // Vertex retrieval relevance in [0, 1]. Null when backend didn't supply.
+  score: number | null;
+  // Backend truncates to ~240 chars so the activity panel stays readable.
+  snippet: string;
+};
+
+export type TraceStep = {
+  id: string;
+  author: string;             // agent name, e.g. "chat_orchestrator"
+  // `model_thought` carries chain-of-thought emitted with
+  // ThinkingConfig.include_thoughts=True; rendered separately from
+  // `model_text` (the agent's user-facing reply).
+  kind: "tool_call" | "tool_response" | "model_text" | "model_thought";
+  name?: string | null;       // tool name on tool_call / tool_response
+  args?: string | null;       // truncated JSON of tool_call args
+  response?: string | null;   // truncated JSON of tool_response body
+  text?: string | null;       // truncated model text or thought
+  // Populated for `search_project_documents` tool_responses. When set, the
+  // activity panel renders a chunks-with-confidence list instead of the
+  // generic JSON-blob preview.
+  chunks?: RetrievalChunk[] | null;
+  status?: string | null;     // "ok" | "no_results" — paired with chunks
+};
+
+export type Message = {
+  role: "user" | "assistant";
+  content: string;
+  id?: string;
+  citations?: Citation[] | null;
+  traces?: TraceStep[] | null;
+};
 
 export const SAMPLE_THREAD: Record<string, Message[]> = {
   "c-b1": [
@@ -64,13 +121,29 @@ export type FileAnalysis = {
   recommendations?: string[];
 };
 
+export type FileDetail = {
+  id: string;
+  filename: string;
+  size_bytes: number | null;
+  mime_type: string | null;
+  page_count: number | null;
+  status: string;
+  ingest_error: string | null;
+  created_at: string | null;
+};
+
 export type FileItem = {
   id: string;
   name: string;
   size: string;
   type: "pdf" | "docx" | "csv" | "image";
   pages: number;
-  status: "complete" | "analyzing";
+  status: "complete" | "analyzing" | "failed";
+  // Raw backend status — drives the granular label in the file modal.
+  // 'queued' | 'parsing' | 'ready' | 'failed' for new files;
+  // 'pending' | 'indexed' for legacy rows.
+  ingestStatus?: string;
+  ingestError?: string | null;
   analysis: FileAnalysis | null;
 };
 

@@ -1,47 +1,57 @@
 "use client";
 import * as React from "react";
 import { Icon } from "./icons";
+import { api } from "@/lib/api";
 
-const DEFAULT_TEMPLATE_QUESTIONS = [
+const FALLBACK_QUESTIONS = [
   "In welcher Phase werden Ingenieurdienstleitungen angefragt?",
   "Welche Bauherren sind beteiligt?",
   "Wie heisst der Projektleiter?",
-  "Welche Termine sind vorgesehen? Gibt es zwingende Meilensteine für z.B. Zwischentermine, Gleisschlagwochenenden oder ähnliche?",
+  "Welche Termine sind vorgesehen? Gibt es zwingende Meilensteine fuer z.B. Zwischentermine, Gleisschlagwochenenden oder aehnliche?",
   "Was ist die Bausumme?",
   "Welche Drittprojekte tangieren den Perimeter?",
-  "Welche Rahmenbedingungen betreffen das Projekt hinsichtlich Termine, Bauzeit oder ähnlichem?",
-  "Welche Elemente sind vom Bauprojekt zu überarbeiten? Wie viel Stunden sind dafür in der Ausschreibung vorgesehen?",
-  "Welche Elemente sind im Ausführungsprojekt zu überabreiten oder zu ändern?",
+  "Welche Rahmenbedingungen betreffen das Projekt hinsichtlich Termine, Bauzeit oder aehnlichem?",
+  "Welche Elemente sind vom Bauprojekt zu ueberarbeiten? Wie viel Stunden sind dafuer in der Ausschreibung vorgesehen?",
+  "Welche Elemente sind im Ausfuehrungsprojekt zu ueberarbeiten oder zu aendern?",
   "Ist die Vermessung Bestandteil unseres Auftrags oder ist diese nur zu koordinieren?",
-  "Steht in den Plänen irgendwo der Kommentar „Ist in einer späteren Phase zu Detaillieren.“ oder etwas ähnliches?",
+  'Steht in den Plaenen irgendwo der Kommentar "Ist in einer spaeteren Phase zu Detaillieren." oder etwas aehnliches?',
 ];
 
-const DEFAULT_TEMPLATE_TEXT = DEFAULT_TEMPLATE_QUESTIONS
-  .map((q, i) => i + 1 + ". " + q)
-  .join("\n");
+const FALLBACK_TEXT = FALLBACK_QUESTIONS.map((q, i) => i + 1 + ". " + q).join("\n");
 
-const TEMPLATE_STORAGE_KEY = "eag-llm.projektanalyse-template";
-
-export function loadTemplate(): string {
-  if (typeof window === "undefined") return DEFAULT_TEMPLATE_TEXT;
-  try {
-    const v = localStorage.getItem(TEMPLATE_STORAGE_KEY);
-    if (v && v.trim()) return v;
-  } catch {}
-  return DEFAULT_TEMPLATE_TEXT;
-}
-
-export function parseTemplate(text: string): string[] {
+function parseTemplateText(text: string): string[] {
   return text
     .split("\n")
     .map((l) => l.replace(/^\s*\d+[.)]\s*/, "").trim())
     .filter(Boolean);
 }
 
-function saveTemplate(text: string) {
+function questionsToText(questions: string[]): string {
+  return questions.map((q, i) => i + 1 + ". " + q).join("\n");
+}
+
+async function fetchTemplate(): Promise<string[]> {
   try {
-    localStorage.setItem(TEMPLATE_STORAGE_KEY, text);
-  } catch {}
+    const res = await api("/api/templates/projektanalyse");
+    if (!res.ok) return FALLBACK_QUESTIONS;
+    const data = (await res.json()) as { questions?: string[] };
+    return data.questions && data.questions.length ? data.questions : FALLBACK_QUESTIONS;
+  } catch {
+    return FALLBACK_QUESTIONS;
+  }
+}
+
+async function saveTemplate(questions: string[]): Promise<boolean> {
+  try {
+    const res = await api("/api/templates/projektanalyse", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ questions }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 const TPL_BTN_BASE =
@@ -55,25 +65,48 @@ export function TemplateAnalysisModal({
 }: {
   open: boolean;
   onClose: () => void;
-  onSaved?: (text: string) => void;
+  onSaved?: () => void;
 }) {
-  const [text, setText] = React.useState<string>(DEFAULT_TEMPLATE_TEXT);
+  const [text, setText] = React.useState<string>(FALLBACK_TEXT);
+  const [loading, setLoading] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
   const [dirty, setDirty] = React.useState(false);
   const taRef = React.useRef<HTMLTextAreaElement>(null);
 
   React.useEffect(() => {
-    if (open) {
-      setText(loadTemplate());
+    if (!open) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetchTemplate().then((qs) => {
+      if (cancelled) return;
+      setText(questionsToText(qs));
       setDirty(false);
-      const t = setTimeout(() => taRef.current && taRef.current.focus(), 80);
-      return () => clearTimeout(t);
-    }
+      setLoading(false);
+      setTimeout(() => taRef.current && taRef.current.focus(), 80);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [open]);
 
-  const handleSave = React.useCallback(() => {
-    saveTemplate(text);
+  const handleSave = React.useCallback(async () => {
+    const qs = parseTemplateText(text);
+    if (qs.length === 0) {
+      setError("Mindestens eine Frage erforderlich.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    const ok = await saveTemplate(qs);
+    setSaving(false);
+    if (!ok) {
+      setError("Speichern fehlgeschlagen.");
+      return;
+    }
     setDirty(false);
-    if (onSaved) onSaved(text);
+    if (onSaved) onSaved();
     onClose();
   }, [text, onSaved, onClose]);
 
@@ -88,13 +121,13 @@ export function TemplateAnalysisModal({
   }, [open, onClose, handleSave]);
 
   const handleReset = () => {
-    setText(DEFAULT_TEMPLATE_TEXT);
+    setText(FALLBACK_TEXT);
     setDirty(true);
   };
 
   const handleClose = () => {
     if (dirty) {
-      const ok = window.confirm("Ungespeicherte Änderungen verwerfen?");
+      const ok = window.confirm("Ungespeicherte Aenderungen verwerfen?");
       if (!ok) return;
     }
     onClose();
@@ -134,7 +167,7 @@ export function TemplateAnalysisModal({
           <button
             className="bg-transparent border-none text-text-tertiary w-7 h-7 rounded-md inline-flex items-center justify-center flex-shrink-0 transition-[background-color,color] duration-150 hover:bg-bg-hover hover:text-text"
             onClick={handleClose}
-            aria-label="Schließen"
+            aria-label="Schliessen"
           >
             <Icon.XBig />
           </button>
@@ -142,39 +175,45 @@ export function TemplateAnalysisModal({
 
         <div className="flex-1 flex flex-col gap-2.5 px-[22px] pt-4 pb-1.5 overflow-hidden min-h-0">
           <div className="text-[12.5px] text-text-tertiary leading-[1.5]">
-            Eine Frage pro Zeile. Nummerierungen werden beibehalten. Du kannst Fragen ergänzen, umformulieren oder entfernen.
+            Eine Frage pro Zeile. Nummerierungen werden beibehalten. Du kannst Fragen ergaenzen, umformulieren oder entfernen.
           </div>
           <textarea
             ref={taRef}
-            className="flex-1 min-h-[280px] w-full resize-y bg-bg text-text border border-border rounded-[10px] px-3.5 py-3.5 font-mono text-[13px] leading-[1.65] [outline:none] transition-[border-color,background-color] duration-150 focus:border-border-strong focus:bg-bg-elevated"
+            className="flex-1 min-h-[280px] w-full resize-y bg-bg text-text border border-border rounded-[10px] px-3.5 py-3.5 font-mono text-[13px] leading-[1.65] [outline:none] transition-[border-color,background-color] duration-150 focus:border-border-strong focus:bg-bg-elevated disabled:opacity-50"
             value={text}
             spellCheck={false}
+            disabled={loading || saving}
             onChange={(e) => { setText(e.target.value); setDirty(true); }}
-            placeholder={"1. Erste Frage…\n2. Zweite Frage…"}
+            placeholder={loading ? "Vorlage wird geladen…" : "1. Erste Frage…\n2. Zweite Frage…"}
           />
+          {error && (
+            <div className="text-[12.5px] text-red-400">{error}</div>
+          )}
         </div>
 
         <div className="flex items-center gap-2 px-[22px] pt-3.5 pb-[18px] border-t border-border">
           <button
-            className={TPL_BTN_BASE + " bg-transparent text-text-tertiary hover:text-text hover:bg-bg-hover"}
+            className={TPL_BTN_BASE + " bg-transparent text-text-tertiary hover:text-text hover:bg-bg-hover disabled:opacity-50"}
             onClick={handleReset}
+            disabled={loading || saving}
           >
-            Auf Standard zurücksetzen
+            Auf Standard zuruecksetzen
           </button>
           <div className="ml-auto flex gap-2">
             <button
               className={TPL_BTN_BASE + " bg-transparent text-text-secondary border-border hover:bg-bg-hover hover:border-border-strong hover:text-text"}
               onClick={handleClose}
+              disabled={saving}
             >
               Abbrechen
             </button>
             <button
               className={TPL_BTN_BASE + " bg-accent text-white border-accent hover:bg-accent-hover hover:border-accent-hover disabled:opacity-45 disabled:cursor-not-allowed"}
               onClick={handleSave}
-              disabled={!dirty}
-              title={dirty ? "Speichern (⌘↵)" : "Keine Änderungen"}
+              disabled={!dirty || loading || saving}
+              title={dirty ? "Speichern (⌘↵)" : "Keine Aenderungen"}
             >
-              Speichern
+              {saving ? "Speichern…" : "Speichern"}
             </button>
           </div>
         </div>

@@ -1,18 +1,65 @@
+import asyncio
+import datetime as _dt
+import shutil
+import tempfile
+import uuid
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from langsmith import traceable
 from pydantic import BaseModel
 
 from app.auth import current_user_id
 from app.db import supabase
-from app.openai_client import (
-    files_create,
-    files_delete,
-    vs_create,
-    vs_delete_file,
-    vs_ingest_file,
-)
+from app.gcs import gcs_uri, object_key, storage_client, upload_pdf_bytes
+from app.rag_corpus import ensure_corpus_for_project
 
 router = APIRouter(prefix="/api/projects/{project_id}/files", tags=["files"])
+
+# Office formats Document AI's Layout Parser doesn't accept directly.
+# Converted to PDF via headless LibreOffice on upload.
+_OFFICE_EXTS = {
+    "doc", "docx", "docm", "dot", "dotx", "dotm", "rtf", "odt",
+    "xls", "xlsx", "xlsm", "xlsb", "xlt", "xltx", "xltm", "ods",
+    "ppt", "pptx", "pptm", "pps", "ppsx", "ppsm", "pot", "potx", "potm", "odp",
+}
+
+
+async def _convert_office_to_pdf(data: bytes, ext: str) -> bytes:
+    """Run `soffice --headless --convert-to pdf` in a temp dir, return PDF bytes.
+
+    Raises HTTPException(502) on conversion failure so the upload returns a
+    clean error and the project_files row gets marked failed by the caller.
+    """
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        raise HTTPException(502, "libreoffice not installed on backend host")
+    with tempfile.TemporaryDirectory(prefix="sleek-conv-") as tmp:
+        in_path = Path(tmp) / f"input.{ext}"
+        in_path.write_bytes(data)
+        proc = await asyncio.create_subprocess_exec(
+            soffice,
+            "--headless",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            tmp,
+            str(in_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise HTTPException(504, "office→pdf conversion timed out")
+        if proc.returncode != 0:
+            msg = (stderr or stdout or b"").decode("utf-8", "replace")[:300]
+            raise HTTPException(502, f"office→pdf conversion failed: {msg}")
+        out_path = Path(tmp) / "input.pdf"
+        if not out_path.exists():
+            raise HTTPException(502, "office→pdf conversion produced no output")
+        return out_path.read_bytes()
 
 
 class FileOut(BaseModel):
@@ -20,15 +67,25 @@ class FileOut(BaseModel):
     filename: str
     size_bytes: int | None = None
     status: str
-    openai_file_id: str | None = None
+    page_count: int | None = None
 
 
-@traceable(run_type="tool", name="db.load_project")
+class FileDetail(BaseModel):
+    id: str
+    filename: str
+    size_bytes: int | None = None
+    mime_type: str | None = None
+    page_count: int | None = None
+    status: str
+    ingest_error: str | None = None
+    created_at: str | None = None
+
+
 def _load_project(project_id: str, user_id: str) -> dict:
     res = (
         supabase()
         .table("projects")
-        .select("id,name,openai_vector_store_id")
+        .select("id,name")
         .eq("id", project_id)
         .eq("user_id", user_id)
         .limit(1)
@@ -39,27 +96,15 @@ def _load_project(project_id: str, user_id: str) -> dict:
     return res.data[0]
 
 
-def _ensure_vector_store(project: dict) -> str:
-    """Lazy-create a per-project OpenAI vector store on first upload (legacy
-    path; new projects already have a vs_id provisioned at creation time)."""
-    if project.get("openai_vector_store_id"):
-        return project["openai_vector_store_id"]
-    vs_id = vs_create(name=project["name"])
-    supabase().table("projects").update(
-        {"openai_vector_store_id": vs_id}
-    ).eq("id", project["id"]).execute()
-    project["openai_vector_store_id"] = vs_id
-    return vs_id
-
-
 @router.get("", response_model=list[FileOut])
-@traceable(run_type="chain", name="files.list")
 def list_files(project_id: str, user_id: str = Depends(current_user_id)):
     _load_project(project_id, user_id)
     res = (
         supabase()
         .table("project_files")
-        .select("id,filename,size_bytes,status,openai_file_id")
+        .select(
+            "id,filename,size_bytes,status,page_count"
+        )
         .eq("project_id", project_id)
         .eq("user_id", user_id)
         .order("created_at", desc=True)
@@ -75,60 +120,178 @@ async def upload_file(
     file: UploadFile = File(...),
     user_id: str = Depends(current_user_id),
 ):
-    project = _load_project(project_id, user_id)
+    """Upload a PDF (or office doc) into the project's Vertex RAG corpus.
 
+    The PDF lands in GCS at the canonical layout and the row is inserted
+    with status='queued'. The LRO poller batches all queued rows for a
+    project into a single rag.import_files_async call (Vertex serialises
+    operations per corpus, so single-file imports collide with each other
+    when uploads arrive concurrently).
+    """
+    _load_project(project_id, user_id)
     contents = await file.read()
+    src_ext = (file.filename.rsplit(".", 1)[-1] if "." in (file.filename or "") else "").lower()
+
+    if src_ext in _OFFICE_EXTS:
+        contents = await _convert_office_to_pdf(contents, src_ext)
+    elif src_ext != "pdf":
+        raise HTTPException(415, f"unsupported file type: .{src_ext}")
+    mime = "application/pdf"
     size_bytes = len(contents)
 
+    # PyMuPDF page-count read; it's the only signal we still own under the
+    # Vertex pipeline (RAG Engine doesn't expose page count anywhere).
+    page_count: int | None = None
     try:
-        vector_store_id = _ensure_vector_store(project)
-    except Exception as exc:
-        raise HTTPException(502, f"vector store create failed: {exc}") from exc
+        import fitz
+        with fitz.open(stream=contents, filetype="pdf") as doc:
+            page_count = doc.page_count
+    except Exception:
+        page_count = None
 
+    file_id = str(uuid.uuid4())
     try:
-        openai_file = files_create(filename=file.filename, contents=contents)
-    except Exception as exc:
-        raise HTTPException(502, f"openai file upload failed: {exc}") from exc
-
-    try:
-        ingest = vs_ingest_file(
-            vector_store_id=vector_store_id, file_id=openai_file["id"]
+        gs_uri = await asyncio.to_thread(
+            upload_pdf_bytes, user_id, project_id, file_id, contents, file.filename
         )
     except Exception as exc:
-        raise HTTPException(502, f"vector store ingest failed: {exc}") from exc
+        raise HTTPException(502, f"GCS upload failed: {exc}") from exc
 
-    status = (
-        "indexed" if ingest["status"] == "completed" else (ingest["status"] or "failed")
-    )
+    # Make sure the corpus exists so the dispatcher can reference it. Race-safe.
+    try:
+        await asyncio.to_thread(ensure_corpus_for_project, project_id)
+    except Exception as exc:
+        raise HTTPException(502, f"corpus init failed: {exc}") from exc
 
     insert = (
         supabase()
         .table("project_files")
         .insert(
             {
+                "id": file_id,
                 "project_id": project_id,
                 "user_id": user_id,
                 "filename": file.filename,
                 "size_bytes": size_bytes,
-                "openai_file_id": openai_file["id"],
-                "status": status,
+                "mime_type": mime,
+                "gcs_blob_path": gs_uri,
+                "page_count": page_count,
+                "status": "queued",
             }
         )
         .execute()
     )
-    return insert.data[0]
+    row = insert.data[0]
+
+    return FileOut(
+        id=row["id"],
+        filename=file.filename,
+        size_bytes=size_bytes,
+        status="queued",
+        page_count=page_count,
+    )
 
 
-@router.delete("/{file_id}")
-@traceable(run_type="chain", name="files.delete")
-def delete_file(
+@router.get("/{file_id}", response_model=FileDetail)
+def get_file_detail(
     project_id: str, file_id: str, user_id: str = Depends(current_user_id)
 ):
-    project = _load_project(project_id, user_id)
+    """Basic detail for a single file: ingestion status + size/page metadata.
+
+    Plan 20.0: Vertex serverless does its own chunking inside the corpus,
+    so we no longer surface block_breakdown / outline / figure thumbnails
+    here. Those came from `document_chunks` under the legacy DocAI
+    pipeline and are gone for new projects.
+    """
+    _load_project(project_id, user_id)
+    f_res = (
+        supabase()
+        .table("project_files")
+        .select(
+            "id,filename,size_bytes,mime_type,page_count,status,"
+            "ingest_error,created_at"
+        )
+        .eq("id", file_id)
+        .eq("project_id", project_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not f_res.data:
+        raise HTTPException(404, "file not found")
+    f = f_res.data[0]
+
+    return FileDetail(
+        id=f["id"],
+        filename=f["filename"],
+        size_bytes=f.get("size_bytes"),
+        mime_type=f.get("mime_type"),
+        page_count=f.get("page_count"),
+        status=f["status"],
+        ingest_error=f.get("ingest_error"),
+        created_at=f.get("created_at"),
+    )
+
+
+class SignedUrlOut(BaseModel):
+    url: str
+    expires_in: int
+
+
+@router.get("/{file_id}/signed-url", response_model=SignedUrlOut)
+def get_signed_url(
+    project_id: str, file_id: str, user_id: str = Depends(current_user_id)
+):
+    """Return a short-lived signed URL for the original PDF in GCS so the
+    frontend's PDF viewer can iframe it. Auth: caller must own the project
+    that owns the file. PDFs live in GCS at the canonical layout
+    `gs://{bucket}/{user_id}/{project_id}/{file_id}/{sanitized}.pdf`
+    (see `app/gcs.py`); we resolve the row by (project, user, file) and
+    sign V4 against the recorded `gcs_blob_path`.
+    """
+    _load_project(project_id, user_id)
     row_res = (
         supabase()
         .table("project_files")
-        .select("openai_file_id")
+        .select("gcs_blob_path")
+        .eq("id", file_id)
+        .eq("project_id", project_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not row_res.data:
+        raise HTTPException(404, "file not found")
+    blob_path = (row_res.data[0] or {}).get("gcs_blob_path") or ""
+    if not blob_path.startswith("gs://"):
+        raise HTTPException(404, "file has no GCS object")
+    try:
+        bucket_name, key = blob_path[len("gs://"):].split("/", 1)
+    except ValueError as exc:
+        raise HTTPException(500, f"invalid gcs_blob_path: {blob_path!r}") from exc
+    expires_in = 600
+    try:
+        signed = storage_client().bucket(bucket_name).blob(key).generate_signed_url(
+            version="v4",
+            expiration=_dt.timedelta(seconds=expires_in),
+            method="GET",
+            response_disposition="inline",
+            response_type="application/pdf",
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"signing failed: {exc}") from exc
+    return SignedUrlOut(url=signed, expires_in=expires_in)
+
+
+@router.delete("/{file_id}")
+def delete_file(
+    project_id: str, file_id: str, user_id: str = Depends(current_user_id)
+):
+    _load_project(project_id, user_id)
+    row_res = (
+        supabase()
+        .table("project_files")
+        .select("gcs_blob_path")
         .eq("id", file_id)
         .eq("user_id", user_id)
         .limit(1)
@@ -136,16 +299,38 @@ def delete_file(
     )
     if not row_res.data:
         raise HTTPException(404, "file not found")
-    openai_file_id = row_res.data[0]["openai_file_id"]
-    vector_store_id = project.get("openai_vector_store_id")
+    row = row_res.data[0]
+    blob_path = row.get("gcs_blob_path")
 
-    if openai_file_id and vector_store_id:
+    if blob_path:
+        if blob_path.startswith("gs://"):
+            from app.gcs import storage_client
+            try:
+                bucket_name, key = blob_path[len("gs://"):].split("/", 1)
+                storage_client().bucket(bucket_name).blob(key).delete()
+            except Exception:
+                pass
+        else:
+            try:
+                supabase().storage.from_("project-files").remove([blob_path])
+            except Exception:
+                pass
+
+    # Chunk images live in a separate bucket and aren't covered by the
+    # project_files cascade. Collect their paths before the DB delete drops
+    # the chunk_images rows via document_chunks → chunk_images cascade.
+    chunk_imgs = (
+        supabase()
+        .table("chunk_images")
+        .select("storage_path,document_chunks!inner(file_id)")
+        .eq("user_id", user_id)
+        .eq("document_chunks.file_id", file_id)
+        .execute()
+    )
+    img_paths = [r["storage_path"] for r in (chunk_imgs.data or []) if r.get("storage_path")]
+    if img_paths:
         try:
-            vs_delete_file(vector_store_id=vector_store_id, file_id=openai_file_id)
-        except Exception:
-            pass
-        try:
-            files_delete(openai_file_id)
+            supabase().storage.from_("chunk-images").remove(img_paths)
         except Exception:
             pass
 

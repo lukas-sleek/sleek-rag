@@ -1,47 +1,10 @@
-import logging
-
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from langsmith import traceable
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.auth import current_user_id
 from app.db import supabase
-from app.openai_client import vs_create, vs_delete
-
-logger = logging.getLogger(__name__)
-
-
-def _provision_vector_store(project_id: str, name: str) -> None:
-    """Background: create the OpenAI vector store and attach it to the project
-    row. Conditional on the column still being null so we don't clobber a
-    vs_id that the lazy upload path may have written in the meantime; if we
-    lose that race, delete the orphan we just created."""
-    try:
-        vs_id = vs_create(name=name)
-    except Exception:
-        logger.exception("vector store create failed for project %s", project_id)
-        return
-    try:
-        res = (
-            supabase()
-            .table("projects")
-            .update({"openai_vector_store_id": vs_id})
-            .eq("id", project_id)
-            .is_("openai_vector_store_id", None)
-            .execute()
-        )
-    except Exception:
-        logger.exception("vector store row update failed for project %s", project_id)
-        try:
-            vs_delete(vs_id)
-        except Exception:
-            pass
-        return
-    if not res.data:
-        try:
-            vs_delete(vs_id)
-        except Exception:
-            pass
+from app.gcs import delete_prefix
+from app.rag_corpus import delete_corpus
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -69,7 +32,6 @@ class ProjectOut(BaseModel):
 
 
 @router.get("", response_model=list[ProjectOut])
-@traceable(run_type="chain", name="projects.list")
 def list_projects(user_id: str = Depends(current_user_id)):
     # sort_order asc (nulls last) is the persisted drag-drop order; new
     # projects get min(sort_order)-1 in create_project so they land on top
@@ -120,10 +82,8 @@ def list_projects(user_id: str = Depends(current_user_id)):
 
 
 @router.post("", response_model=ProjectOut)
-@traceable(run_type="chain", name="projects.create")
 def create_project(
     body: ProjectIn,
-    background_tasks: BackgroundTasks,
     user_id: str = Depends(current_user_id),
 ):
     # New projects land at min(sort_order)-1 so they appear at the top of
@@ -154,7 +114,6 @@ def create_project(
 
     res = supabase().table("projects").insert(payload).execute()
     row = res.data[0]
-    background_tasks.add_task(_provision_vector_store, row["id"], body.name)
     return ProjectOut(
         id=row["id"],
         name=row["name"],
@@ -169,7 +128,6 @@ class ProjectOrderIn(BaseModel):
 
 
 @router.put("/order")
-@traceable(run_type="chain", name="projects.reorder")
 def reorder_projects(
     body: ProjectOrderIn, user_id: str = Depends(current_user_id)
 ):
@@ -197,7 +155,6 @@ def reorder_projects(
 
 
 @router.patch("/{project_id}", response_model=ProjectOut)
-@traceable(run_type="chain", name="projects.update")
 def update_project(
     project_id: str, body: ProjectPatch, user_id: str = Depends(current_user_id)
 ):
@@ -229,20 +186,34 @@ def update_project(
 
 
 @router.delete("/{project_id}")
-@traceable(run_type="chain", name="projects.delete")
 def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
-    existing = (
+    """Delete the project + its Vertex RAG corpus + its GCS prefix.
+
+    Cascade order:
+      1. Vertex RAG corpus (force=True; NotFound treated as success).
+      2. GCS prefix gs://{bucket}/{user}/{project}/.
+      3. Postgres row (cascades to project_files / chats / chat_messages).
+    Real failures bubble up as 500 — better than orphaning a corpus or
+    leaving the LRO poller spinning on a stale row.
+    """
+    row_res = (
         supabase()
         .table("projects")
-        .select("id,openai_vector_store_id")
+        .select("rag_corpus_name")
         .eq("id", project_id)
         .eq("user_id", user_id)
         .limit(1)
         .execute()
     )
-    if not existing.data:
+    if not row_res.data:
         raise HTTPException(404, "not found")
-    vs_id = existing.data[0].get("openai_vector_store_id")
+    corpus_name = (row_res.data[0] or {}).get("rag_corpus_name")
+
+    if corpus_name:
+        delete_corpus(corpus_name)
+
+    delete_prefix(f"{user_id}/{project_id}/")
+
     res = (
         supabase()
         .table("projects")
@@ -253,9 +224,4 @@ def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
     )
     if not res.data:
         raise HTTPException(404, "not found")
-    if vs_id:
-        try:
-            vs_delete(vs_id)
-        except Exception:
-            pass
     return {"deleted": project_id}

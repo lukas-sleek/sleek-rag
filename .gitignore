@@ -12,3 +12,6 @@ tsconfig.tsbuildinfo
 backend/venv/
 backend/__pycache__/
 backend/**/__pycache__/
+scripts/benchmark/venv/
+scripts/benchmark/output/
+scripts/benchmark/**/__pycache__/

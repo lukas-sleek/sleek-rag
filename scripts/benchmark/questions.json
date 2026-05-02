@@ -1,0 +1,58 @@
+[
+  {
+    "id": "phase-ingenieurleistungen",
+    "question": "In welcher Phase werden Ingenieurdienstleistungen angefragt?",
+    "expected_keywords": ["SIA-Phase 21", "Machbarkeitsstudie", "SIA-Phase 31", "Vorprojekt plus"]
+  },
+  {
+    "id": "bauherren",
+    "question": "Welche Bauherren sind beteiligt?",
+    "expected_keywords": ["Gemeinde Hochdorf", "SBB", "Manor", "KMU-Center"]
+  },
+  {
+    "id": "projektleiter",
+    "question": "Wie heisst der Projektleiter?",
+    "expected_keywords": ["Thomas Kieliger", "Pascal Ryser"]
+  },
+  {
+    "id": "termine-meilensteine",
+    "question": "Welche Termine sind vorgesehen? Gibt es zwingende Meilensteine für z.B. Zwischentermine, Gleisschlagwochenenden oder ähnliche?",
+    "expected_keywords": ["22. Dezember 2025", "19. Januar 2026", "Ende Januar 2026", "Ende Februar 2026", "2027"]
+  },
+  {
+    "id": "bausumme",
+    "question": "Was ist die Bausumme?",
+    "expected_keywords": ["39'114'000", "Etappen 1 bis 5"]
+  },
+  {
+    "id": "drittprojekte",
+    "question": "Welche Drittprojekte tangieren den Perimeter?",
+    "expected_keywords": ["Bushof Ost", "Renaturierung", "Zwischennutzung"]
+  },
+  {
+    "id": "drittprojekte-details",
+    "question": "kannst du mir dazu mehr details geben?",
+    "expected_keywords": ["Bushof Ost", "Wasserbau", "Luca Nosetti"],
+    "is_followup": true
+  },
+  {
+    "id": "bauprojekt-elemente-stunden",
+    "question": "Welche Elemente sind vom Bauprojekt zu überarbeiten? Wie viel Stunden sind dafür in der Ausschreibung vorgesehen?",
+    "expected_keywords": ["Linienführung", "5'450 Stunden"]
+  },
+  {
+    "id": "ausfuehrungsprojekt",
+    "question": "Welche Elemente sind im Ausführungsprojekt zu überabreiten oder zu ändern?",
+    "expected_keywords": ["nicht", "Machbarkeitsstudie", "Vorprojekt plus"]
+  },
+  {
+    "id": "vermessung",
+    "question": "Ist die Vermessung Bestandteil unseres Auftrags oder ist diese nur zu koordinieren?",
+    "expected_keywords": ["nicht", "koordinieren", "separate"]
+  },
+  {
+    "id": "spaetere-phase-detaillieren",
+    "question": "Steht in den Plänen irgendwo der Kommentar \"Ist in einer späteren Phase zu Detaillieren.\" oder etwas ähnliches?",
+    "expected_keywords": ["Etappe 1", "abschliessend zu definieren"]
+  }
+]
