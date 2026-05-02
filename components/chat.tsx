@@ -6,6 +6,7 @@ import { Icon } from "./icons";
 import type { Citation, Message as Msg } from "./fixtures";
 import { CitationChip } from "./citation-chip";
 import { AgentActivity } from "./agent-activity";
+import { api } from "@/lib/api";
 
 const MD_PROSE =
   "text-[14.5px] leading-[1.65] text-text break-words " +
@@ -392,7 +393,107 @@ export function Composer({
   const [temp, setTemp] = React.useState(0.7);
   const [showSettings, setShowSettings] = React.useState(false);
   const [attachments, setAttachments] = React.useState<Attachment[]>([]);
+  const [listening, setListening] = React.useState(false);
+  const [transcribing, setTranscribing] = React.useState(false);
+  const [micDevices, setMicDevices] = React.useState<MediaDeviceInfo[]>([]);
+  const [micDeviceId, setMicDeviceId] = React.useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    return window.localStorage.getItem("micDeviceId") || "";
+  });
   const ref = React.useRef<HTMLTextAreaElement>(null);
+  const recorderRef = React.useRef<MediaRecorder | null>(null);
+  const chunksRef = React.useRef<Blob[]>([]);
+  const streamRef = React.useRef<MediaStream | null>(null);
+
+  const refreshMicDevices = React.useCallback(async () => {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      setMicDevices(all.filter((d) => d.kind === "audioinput"));
+    } catch {}
+  }, []);
+
+  React.useEffect(() => {
+    refreshMicDevices();
+    if (typeof navigator === "undefined" || !navigator.mediaDevices) return;
+    const onChange = () => refreshMicDevices();
+    navigator.mediaDevices.addEventListener?.("devicechange", onChange);
+    return () => navigator.mediaDevices.removeEventListener?.("devicechange", onChange);
+  }, [refreshMicDevices]);
+
+  const selectMic = (id: string) => {
+    setMicDeviceId(id);
+    if (typeof window !== "undefined") window.localStorage.setItem("micDeviceId", id);
+  };
+
+  const stopMic = () => {
+    try { recorderRef.current?.stop(); } catch {}
+  };
+
+  const toggleMic = async () => {
+    if (listening) { stopMic(); return; }
+    if (transcribing) return;
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      alert("Mikrofon wird in diesem Browser nicht unterstützt.");
+      return;
+    }
+    let stream: MediaStream;
+    try {
+      const audio: MediaTrackConstraints | boolean = micDeviceId
+        ? { deviceId: { exact: micDeviceId } }
+        : true;
+      stream = await navigator.mediaDevices.getUserMedia({ audio });
+    } catch {
+      alert("Mikrofon-Zugriff wurde abgelehnt.");
+      return;
+    }
+    // After the first permission grant, enumerateDevices() will populate
+    // device labels. Refresh now so the dropdown shows real names.
+    refreshMicDevices();
+    streamRef.current = stream;
+    chunksRef.current = [];
+    const mime =
+      ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"].find(
+        (t) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(t)
+      ) || "";
+    const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    rec.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+    rec.onstop = async () => {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      setListening(false);
+      const blob = new Blob(chunksRef.current, { type: rec.mimeType || "audio/webm" });
+      chunksRef.current = [];
+      if (blob.size === 0) return;
+      setTranscribing(true);
+      try {
+        const fd = new FormData();
+        fd.append("audio", blob, `voice.${(rec.mimeType.split("/")[1] || "webm").split(";")[0]}`);
+        const res = await api("/api/transcribe", { method: "POST", body: fd });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const { text } = (await res.json()) as { text: string };
+        if (text) {
+          setValue((prev) => (prev ? prev.trimEnd() + " " : "") + text);
+        }
+      } catch (err) {
+        alert("Transkription fehlgeschlagen.");
+      } finally {
+        setTranscribing(false);
+      }
+    };
+    recorderRef.current = rec;
+    setListening(true);
+    rec.start();
+    // 60s hard cap — STT v2 sync recognize tops out around there.
+    setTimeout(() => { if (rec.state === "recording") stopMic(); }, 58_000);
+  };
+
+  React.useEffect(() => {
+    return () => {
+      try { recorderRef.current?.stop(); } catch {}
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
 
   React.useEffect(() => {
     if (!ref.current) return;
@@ -515,9 +616,86 @@ export function Composer({
                 {attachments.length} {attachments.length === 1 ? "Datei" : "Dateien"}
               </span>
             )}
-            <button type="button" className={ICON_BTN} title="Spracheingabe">
-              <Icon.Mic />
-            </button>
+            <div className="inline-flex items-center">
+              <button
+                type="button"
+                onClick={toggleMic}
+                disabled={transcribing}
+                className={
+                  ICON_BTN +
+                  " !w-7 !pr-1" +
+                  (listening ? " text-accent bg-bg-hover animate-pulse" : "") +
+                  (transcribing ? " opacity-50 cursor-wait animate-pulse" : "")
+                }
+                title={
+                  transcribing
+                    ? "Transkribiere…"
+                    : listening
+                    ? "Spracheingabe stoppen"
+                    : "Spracheingabe starten"
+                }
+                aria-pressed={listening}
+              >
+                <Icon.Mic />
+              </button>
+              <Dropdown
+                align="end"
+                trigger={
+                  <button
+                    type="button"
+                    onClick={() => { if (micDevices.length === 0) refreshMicDevices(); }}
+                    disabled={listening || transcribing}
+                    className="h-7 w-4 inline-flex items-center justify-center bg-transparent border-none rounded-md text-text-tertiary transition-[background-color,color] duration-150 hover:bg-bg-hover hover:text-text disabled:opacity-50"
+                    title="Mikrofon wählen"
+                  >
+                    <Icon.ChevronDownSm />
+                  </button>
+                }
+              >
+                {({ close }) => (
+                  <>
+                    <div className="px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-wide text-text-tertiary">
+                      Mikrofon
+                    </div>
+                    {micDevices.length === 0 ? (
+                      <div className="px-2.5 py-2 text-[12px] text-text-tertiary min-w-[240px]">
+                        Keine Eingabegeräte gefunden. Mikrofon-Zugriff einmal erlauben, dann erneut öffnen.
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className={
+                            MENU_ITEM +
+                            " min-w-[260px]" +
+                            (micDeviceId === "" ? " bg-bg-hover" : "")
+                          }
+                          onClick={() => { selectMic(""); close(); }}
+                        >
+                          <span className="text-[13px]">System-Standard</span>
+                        </button>
+                        {micDevices.map((d, i) => (
+                          <button
+                            key={d.deviceId || `dev-${i}`}
+                            type="button"
+                            className={
+                              MENU_ITEM +
+                              " min-w-[260px]" +
+                              (d.deviceId === micDeviceId ? " bg-bg-hover" : "")
+                            }
+                            onClick={() => { selectMic(d.deviceId); close(); }}
+                          >
+                            <span className="text-[13px] truncate max-w-[280px]">
+                              {d.label || `Mikrofon ${i + 1}`}
+                            </span>
+                          </button>
+                        ))}
+                      </>
+                    )}
+                  </>
+                )}
+              </Dropdown>
+            </div>
             {/* Always render the send button so the toolbar slot is the
                 same DOM element regardless of state — no mount/unmount, no
                 layout shift. Visibility + the pop-in are driven by Tailwind

@@ -11,6 +11,7 @@ openai==1.109.1  # SDK only — used by gemini_client.py to call Gemini's OpenAI
 langsmith==0.7.37
 google-cloud-documentai>=3.5.0
 google-cloud-storage>=3.0.0
+google-cloud-speech>=2.27.0
 # Plan 18.x — Vertex AI RAG Engine migration
 google-cloud-aiplatform[rag]>=1.108.0
 google-genai>=1.0.0

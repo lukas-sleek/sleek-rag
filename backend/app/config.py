@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     # Document AI Layout Parser processor at `documentai_us_location`.
     gcp_location: str = "us-central1"
     gcs_files_bucket: str = "sleek-rag-files-us-dev"
+    # Speech-to-Text v2 region. Chirp 2 is NOT available in multi-region
+    # "eu"/"us"/"global" — only in specific regions. europe-west4 keeps
+    # voice data in EU and supports chirp_2.
+    gcp_stt_location: str = "europe-west4"
+    gcp_stt_model: str = "chirp_2"
+    gcp_stt_language: str = "de-DE"
     documentai_us_location: str = "us"
     documentai_us_processor_id: str = "452479dfc534f517"
     vertex_rag_embedding_model: str = "text-multilingual-embedding-002"
