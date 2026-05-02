@@ -32,6 +32,7 @@ import re
 
 from app.adk.app_factory import get_or_build_app
 from app.adk.citation_aggregator import dedupe_and_renumber, rewrite_refs
+from app.adk.dispatch_rag_questions_tool import DISPATCH_PROGRESS_CHAN
 from app.adk.event_translator import (
     event_author,
     event_has_thought,
@@ -99,6 +100,62 @@ _WEB_QUELLE_RE = re.compile(
     r"^\s*\[(\d+)\]\s*(https?://\S+)\s*[—\-:|]\s*(.+?)\s*$",
     re.MULTILINE,
 )
+
+
+def _filename_from_uri(uri: str) -> str:
+    """Best-effort filename from a gs:// or https://... URI: just the basename
+    after the last '/', without extension stripping."""
+    if not uri:
+        return ""
+    # Drop trailing slash, drop query/fragment.
+    cleaned = uri.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    if "/" not in cleaned:
+        return cleaned
+    return cleaned.rsplit("/", 1)[-1]
+
+
+def _citations_from_grounding(chunks: list[dict]) -> list[dict]:
+    """Translate `state["agent_grounding_chunks"]` entries (written by
+    StreamingAgentTool from Vertex `GroundingMetadata.grounding_chunks`)
+    into the citation-record shape the rest of the chat pipeline expects.
+
+    Citation record shape (matches the previous custom-tool version):
+        {idx, kind="file", filename, snippet, file_id, chunk_id, score,
+         uri, title}
+
+    `idx` is 1-based in retrieval order — the rag_specialist's instruction
+    tells the model to emit [N] markers in the same order. `chunk_id` is
+    stable per (uri, snippet[:120]) so two retrievals of the same chunk
+    across a multi-question fan-out collapse to one citation, while two
+    different passages from the same file stay distinct (no chunk_id is
+    surfaced by the Vertex GroundingChunk schema, so we synthesise one
+    that matches dedupe_and_renumber's `(file_id, chunk_id)` key).
+    """
+    import hashlib
+
+    out: list[dict] = []
+    for i, c in enumerate(chunks, start=1):
+        if not isinstance(c, dict):
+            continue
+        uri = c.get("uri") or ""
+        title = c.get("title") or ""
+        text = c.get("rag_chunk_text") or c.get("text") or ""
+        filename = title or _filename_from_uri(uri) or "Dokument"
+        text_key = (text or "")[:120]
+        h = hashlib.sha1(text_key.encode("utf-8")).hexdigest()[:12]
+        chunk_id = f"rag:{uri}:{h}" if (uri or text_key) else f"rag:chunk:{i}"
+        out.append({
+            "idx": i,
+            "kind": "file",
+            "filename": filename,
+            "snippet": text,
+            "file_id": uri or None,
+            "chunk_id": chunk_id,
+            "score": None,  # native retrieval doesn't surface a per-chunk score
+            "uri": uri,
+            "title": title,
+        })
+    return out
 
 
 def _extract_web_citations(text: str) -> list[dict]:
@@ -519,6 +576,8 @@ async def _send_message_stream(
     template: list[str] | None,
 ):
     """ADK-driven streaming chat turn (plan 19.0)."""
+    import time as _time
+    t_chain_start = _time.time()
     project_id = chat["project_id"]
     debug_trace = await asyncio.to_thread(_is_debug_user, user_id)
 
@@ -527,6 +586,7 @@ async def _send_message_stream(
 
     # 2. Resolve corpus.
     corpus_name = await asyncio.to_thread(_load_corpus_name, project_id)
+    log.info("chat[%s]: corpus=%s (resolve %.2fs)", chat_id, corpus_name, _time.time() - t_chain_start)
     if not corpus_name:
         yield "data: " + json.dumps(
             {"type": "delta", "content": "_Bitte zuerst Dokumente hochladen._"}
@@ -537,8 +597,12 @@ async def _send_message_stream(
 
     # 3. Get-or-build the per-corpus AdkApp; seed a fresh session with replayed history.
     try:
+        t_app = _time.time()
         app = await get_or_build_app(corpus_name)
+        log.info("chat[%s]: app ready (%.2fs)", chat_id, _time.time() - t_app)
+        t_seed = _time.time()
         session = await seed_session(app=app, user_id=user_id, chat_id=chat_id)
+        log.info("chat[%s]: session seeded (%.2fs); starting stream", chat_id, _time.time() - t_seed)
     except Exception as exc:  # noqa: BLE001
         log.exception("adk session build failed: %s", exc)
         yield "data: " + json.dumps(
@@ -558,14 +622,148 @@ async def _send_message_stream(
     # state_delta, so we track which seq ids we've already rendered to
     # avoid duplicates.
     seen_trace_seqs: set[int] = set()
+    t_stream = _time.time()
+    first_event = True
+    # Cap LLM calls per turn. Default RunConfig.max_llm_calls=500 leaves
+    # room for the orchestrator to enter dispatch loops (e.g. re-firing
+    # dispatch_rag_questions on the same 11-question batch multiple times,
+    # observed 2026-05-02 as 3x identical fan-out clusters in audit logs).
+    # 8 budgets: 1 orchestrator routing turn + 1 dispatch_rag_questions
+    # call (which internally fans out N rag_specialist runs, each counted
+    # separately by the runner) + 1 final summarization, with slack for a
+    # legitimate single follow-up tool call. If a turn legitimately needs
+    # more, it surfaces as a clean RunConfig limit error instead of a
+    # silent multi-minute loop.
+    _run_config = {"max_llm_calls": 8}
+
+    # Per-question dispatch progress: `dispatch_rag_questions` tool pushes
+    # {"phase":"start"|"done"|"error", "idx", "question", ...} dicts onto
+    # this queue as each sub-rag_specialist call moves through its lifecycle.
+    # We set it on a ContextVar before launching the ADK pump task so that
+    # all downstream tasks (adk runner -> tool invocation -> asyncio.gather
+    # children) inherit the channel via Python's standard contextvar-copy-
+    # on-Task-create semantics. Without live progress, an 11-question
+    # fan-out renders as a single opaque tool_call in the UI for ~30s+.
+    dispatch_q: asyncio.Queue = asyncio.Queue()
+    _chan_token = DISPATCH_PROGRESS_CHAN.set(dispatch_q)
+
+    # Merge ADK's event stream and the dispatch_q into one queue so the
+    # consumer below sees them in arrival order. Two pump tasks feed the
+    # merged queue; the consumer drains it until it sees an `end` or
+    # `error` envelope.
+    merged_q: asyncio.Queue = asyncio.Queue()
+
+    async def _pump_adk_events():
+        try:
+            async for ev in app.async_stream_query(
+                message=text,
+                session_id=session.id,
+                user_id=user_id,
+                run_config=_run_config,
+            ):
+                await merged_q.put({"_type": "adk", "event": ev})
+        except Exception as exc:  # noqa: BLE001
+            await merged_q.put({"_type": "error", "exc": exc})
+        finally:
+            await merged_q.put({"_type": "end"})
+
+    async def _pump_dispatch_progress():
+        while True:
+            msg = await dispatch_q.get()
+            await merged_q.put({"_type": "dispatch", **msg})
+
+    adk_task = asyncio.create_task(_pump_adk_events())
+    disp_task = asyncio.create_task(_pump_dispatch_progress())
+
     try:
-        async for event in app.async_stream_query(
-            message=text,
-            session_id=session.id,
-            user_id=user_id,
-        ):
+        while True:
+            envelope = await merged_q.get()
+            etype = envelope["_type"]
+            if etype == "end":
+                break
+            if etype == "error":
+                raise envelope["exc"]
+            if etype == "dispatch":
+                # Per-question progress -> trace frame in the existing SSE
+                # schema. We emit ONE id per question (`dispatch-<idx>`) and
+                # let later frames overwrite earlier ones in the frontend
+                # via id-based upsert — so a question stays as a single row
+                # that flips from `laeuft` -> `fertig` in place. Backend
+                # always sends the question text in `args` so the start
+                # frame's question survives even after the done frame's
+                # `response` overwrites the row.
+                phase = envelope.get("phase")
+                idx = envelope.get("idx", 0)
+                question = envelope.get("question") or ""
+                step_label = f"Frage {idx + 1}"
+                trace_id += 1
+                row_id = f"dispatch-{idx}"
+                args_blob = json.dumps({"question": question}, ensure_ascii=False)
+                if phase == "start":
+                    yield "data: " + json.dumps({
+                        "type": "trace",
+                        "id": row_id,
+                        "author": "rag_specialist",
+                        "kind": "tool_call",
+                        "name": step_label,
+                        "args": args_blob,
+                    }) + "\n\n"
+                elif phase == "done":
+                    answer = envelope.get("answer") or ""
+                    yield "data: " + json.dumps({
+                        "type": "trace",
+                        "id": row_id,
+                        "author": "rag_specialist",
+                        "kind": "tool_response",
+                        "name": step_label,
+                        "args": args_blob,
+                        "response": json.dumps(
+                            {"question": question, "answer": answer},
+                            ensure_ascii=False,
+                        ),
+                        "status": "ok",
+                    }) + "\n\n"
+                elif phase == "error":
+                    yield "data: " + json.dumps({
+                        "type": "trace",
+                        "id": row_id,
+                        "author": "rag_specialist",
+                        "kind": "tool_response",
+                        "name": step_label,
+                        "args": args_blob,
+                        "response": json.dumps(
+                            {"question": question, "error": envelope.get("error")},
+                            ensure_ascii=False,
+                        ),
+                        "status": "error",
+                    }) + "\n\n"
+                continue
+
+            # `etype == "adk"` from here on.
+            event = envelope["event"]
+            if first_event:
+                log.info("chat[%s]: first ADK event after %.2fs", chat_id, _time.time() - t_stream)
+                first_event = False
             kind = event_kind(event)
             author = event_author(event)
+            log.info("chat[%s]: event kind=%s author=%s (t+%.1fs)", chat_id, kind, author, _time.time() - t_stream)
+
+            # Diagnostic: surface empty-content events from the orchestrator
+            # post-tool LLM call (suspected adk-python #3525 — Gemini 2.5
+            # Flash sometimes returns Content(parts=None) after a function
+            # response, which collapses the turn into a silent stream end).
+            _ev_content = getattr(event, "content", None)
+            if _ev_content is not None:
+                _parts = getattr(_ev_content, "parts", None)
+                _role = getattr(_ev_content, "role", None)
+                _finish = getattr(event, "finish_reason", None)
+                _block = getattr(event, "block_reason", None)
+                log.info(
+                    "chat[%s]: event content author=%s role=%s parts_len=%s finish=%s block=%s",
+                    chat_id, author, _role,
+                    len(_parts) if _parts else 0,
+                    _finish, _block,
+                )
 
             # Debug-only: emit one trace frame per function_call /
             # function_response part (parallel fan-out is encoded as N parts
@@ -607,6 +805,13 @@ async def _send_message_stream(
 
             elif kind == "tool_response" and is_v2_handoff(event):
                 handed_off = True
+                # v2 hand-off bypasses the rest of this function — cancel
+                # the dispatch pump and reset the contextvar before we
+                # surrender control to stream_projektanalyse_v2.
+                for _t in (adk_task, disp_task):
+                    if not _t.done():
+                        _t.cancel()
+                DISPATCH_PROGRESS_CHAN.reset(_chan_token)
                 async for sse in stream_projektanalyse_v2(
                     template=template, chat_id=chat_id, user_id=user_id
                 ):
@@ -623,6 +828,14 @@ async def _send_message_stream(
                 if web_text:
                     web_response_texts.append(web_text)
     except Exception as exc:  # noqa: BLE001
+        # Cancel the dispatch pump so it doesn't leak into the next turn;
+        # the ADK pump is already finished if we got here via the `error`
+        # envelope, but cancel it defensively in case the exception came
+        # from inside the consumer loop instead.
+        for _t in (adk_task, disp_task):
+            if not _t.done():
+                _t.cancel()
+        DISPATCH_PROGRESS_CHAN.reset(_chan_token)
         log.warning(
             "adk stream failed: %s: %s", type(exc).__name__, exc, exc_info=True
         )
@@ -638,19 +851,35 @@ async def _send_message_stream(
         yield "data: " + json.dumps({"type": "meta", "citations": []}) + "\n\n"
         yield "data: " + json.dumps({"type": "done"}) + "\n\n"
         return
+    else:
+        # Success path: cancel the dispatch pump and reset the contextvar.
+        # adk_task is already done (it pushed the `end` envelope that broke
+        # us out of the consumer loop); disp_task is still parked on
+        # dispatch_q.get().
+        for _t in (adk_task, disp_task):
+            if not _t.done():
+                _t.cancel()
+        DISPATCH_PROGRESS_CHAN.reset(_chan_token)
 
     if handed_off:
         return
 
-    # 4. Read accumulated citations from session state, merge in web
-    # citations parsed from web_researcher tool_response texts, dedupe +
-    # renumber.
+    # 4. Build citation records from grounding metadata. With native vertex_
+    # rag_store retrieval, the rag_specialist's tool_context.state no longer
+    # holds citation rows directly — instead StreamingAgentTool propagates
+    # `agent_grounding_chunks` (a flat list of {text, title, uri, ...}
+    # entries, in retrieval order, accumulated across multi-question fan-
+    # outs). We turn each chunk into a [N] citation record the existing
+    # aggregator + frontend already know how to render.
     sess_service = app._tmpl_attrs["session_service"]
     app_name = app._tmpl_attrs["app_name"]
     final_session = await sess_service.get_session(
         app_name=app_name, user_id=user_id, session_id=session.id
     )
-    raw_citations = list((final_session.state or {}).get("citations", []))
+    state = final_session.state or {}
+    raw_citations = _citations_from_grounding(
+        state.get("agent_grounding_chunks") or []
+    )
 
     # Web citations: web_researcher's local [N] are offset-free in pure-web
     # turns (no rag → state empty → no collision). In a mixed turn (rag +

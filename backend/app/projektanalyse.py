@@ -1,28 +1,35 @@
-"""Projektanalyse v2 batch handler — Gemini edition.
+"""Projektanalyse v2 batch handler — RAG-specialist fan-out edition.
 
-Triggered when the LLM calls run_projektanalyse_v2.
+Triggered when the chat orchestrator calls run_projektanalyse_v2.
 
-v2: full-document context per question — concatenates every chunk of the
-    project's files and includes it as the system prompt prefix once, so
-    Gemini's context cache can amortize across the parallel calls.
+v2 (post-2026-05-02 rewrite): the user-supplied template is fanned out
+across rag_specialist (Vertex RAG corpus, native grounding, full SIA
+instruction) instead of stuffing document_chunks into a single Gemini
+call. Empirically (see backend/scripts/test_batched_rag_recall.py) this
+recovers facts that the previous batched-prompt approach lost — most
+notably the Bausumme — while reusing the same per-question instruction
+the chat path uses.
 
-Reads from `document_chunks`, which is only populated for legacy EU
-projects ingested under plan 18.x. New serverless projects degrade to
-"Keine Projektdokumente gefunden" — a v1-style rewrite that calls
-rag_specialist per question is the planned replacement.
+Concurrency cap keeps wallclock predictable: 11 simultaneous rag_specialist
+calls saturate the DSQ pool and serialise through ADK retry backoff
+(~608s). DISPATCH_CONCURRENCY=4 keeps it to ~3 batches × ~19s.
 """
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from typing import AsyncGenerator
 
 from langsmith import traceable
 
-from app.config import settings
+from app.adk.agents import make_rag_specialist
+from app.adk.dispatch_rag_questions_tool import (
+    DISPATCH_CONCURRENCY,
+    _run_one_rag_specialist,
+)
 from app.db import supabase
-from app.gemini_client import gemini_client
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +48,12 @@ def _gemini_error_placeholder(exc: Exception) -> str:  # noqa: ARG001 — kept f
 # stream_projektanalyse_v2 streamer below via the chat handler's hand-off.
 
 
+# Kept as legacy/reference: the v2 (Volltext) instruction the previous
+# document_chunks-based path used. The new RAG-specialist fan-out path uses
+# RAG_SPECIALIST_INSTRUCTION (per-call, native grounding) instead — same
+# domain rules (SIA scope-fallback, no-self-sum, ROLLEN-FRAGEN), authored once
+# in app/adk/instructions.py and reused. Kept here only to make the diff
+# auditable; the constant is no longer consumed.
 ANSWER_INSTRUCTIONS = (
     "Du beantwortest eine einzelne Frage einer strukturierten Projektanalyse "
     "für ein Schweizer Bahn-/Ingenieurprojekt. Deine Antwort wird unverändert "
@@ -121,58 +134,42 @@ def _project_id_for_chat(chat_id: str, user_id: str) -> str | None:
     return (res.data or {}).get("project_id")
 
 
-def _load_full_corpus(project_id: str, user_id: str) -> str:
-    """Pull every chunk of every indexed file in the project, ordered by
-    file then chunk_index, and join them into a single context block."""
-    res = (
+def _load_corpus_name(project_id: str) -> str | None:
+    """Resolve the Vertex RAG corpus resource name for a project.
+
+    Inlined here (rather than imported from app.routers.chats) to avoid a
+    circular dependency: chats.py imports stream_projektanalyse_v2, so
+    projektanalyse.py cannot import from chats.py.
+    """
+    row = (
         supabase()
-        .table("document_chunks")
-        .select(
-            "file_id,chunk_index,page_start,page_end,figure_label,content,"
-            "project_files(filename)"
-        )
-        .eq("project_id", project_id)
-        .eq("user_id", user_id)
-        .order("file_id")
-        .order("chunk_index")
+        .table("projects")
+        .select("rag_corpus_name")
+        .eq("id", project_id)
+        .single()
         .execute()
     )
-    rows = res.data or []
-    if not rows:
-        return "(Keine Projektdokumente gefunden.)"
-    parts: list[str] = []
-    last_file = None
-    for r in rows:
-        pf = r.get("project_files") or {}
-        if isinstance(pf, list):
-            pf = pf[0] if pf else {}
-        fname = pf.get("filename", "?")
-        if fname != last_file:
-            parts.append(f"\n\n=== {fname} ===")
-            last_file = fname
-        head = f"[S.{r['page_start']}"
-        if r.get("figure_label"):
-            head += f" — {r['figure_label']}"
-        head += "]"
-        parts.append(f"{head}\n{r['content']}")
-    return "\n\n".join(parts)
+    return (row.data or {}).get("rag_corpus_name")
 
 
 @traceable(run_type="llm", name="projektanalyse_v2.answer_one")
-def _answer_v2_sync(question: str, corpus: str) -> str:
-    user_text = f"Projektdokumente:\n{corpus}\n\n---\n\nFrage: {question}"
+async def _answer_v2_via_rag(question: str, *, rag_specialist, user_id: str) -> str:
+    """Run a single template question through rag_specialist.
+
+    Replaces the previous v2 path that stuffed document_chunks into a single
+    Gemini call — that path is broken on serverless corpora (document_chunks
+    is empty) and degrades on multi-fact questions even when chunks exist.
+    Native vertex_rag_store grounding inside rag_specialist now does the
+    retrieval per question.
+    """
     try:
-        resp = gemini_client().chat.completions.create(
-            model=settings.gemini_chat_model,
-            messages=[
-                {"role": "system", "content": ANSWER_INSTRUCTIONS},
-                {"role": "user", "content": user_text},
-            ],
+        text, _gm = await _run_one_rag_specialist(
+            rag_specialist, question, user_id=user_id
         )
     except Exception as exc:
         log.warning("projektanalyse v2 question failed: %s", exc)
         return _gemini_error_placeholder(exc)
-    return (resp.choices[0].message.content or "").strip() or "_(keine Antwort)_"
+    return text or "_(keine Antwort)_"
 
 
 def _assemble_report(
@@ -186,13 +183,31 @@ def _assemble_report(
 
 @traceable(run_type="chain", name="projektanalyse.run")
 async def _run_batch(
-    *, questions: list[str], answer_fn
+    *, questions: list[str], answer_fn, concurrency: int | None = None
 ) -> AsyncGenerator[tuple[str, dict], None]:
+    """Fan out questions across answer_fn with progress events.
+
+    answer_fn may be sync (wrapped via to_thread) or async (awaited directly).
+    `concurrency` caps the number of in-flight calls; defaults to unbounded
+    for backwards compatibility. The new RAG-backed v2 passes
+    DISPATCH_CONCURRENCY to avoid saturating the Vertex DSQ pool.
+    """
     total = len(questions)
     answers: list[str] = [""] * total
+    sem = asyncio.Semaphore(concurrency) if concurrency else None
+    is_async = inspect.iscoroutinefunction(answer_fn)
 
     async def _run(idx: int, q: str) -> tuple[int, str]:
-        ans = await asyncio.to_thread(answer_fn, q)
+        async def _do() -> str:
+            if is_async:
+                return await answer_fn(q)
+            return await asyncio.to_thread(answer_fn, q)
+
+        if sem is None:
+            ans = await _do()
+        else:
+            async with sem:
+                ans = await _do()
         return idx, ans
 
     tasks = [asyncio.create_task(_run(i, q)) for i, q in enumerate(questions)]
@@ -240,6 +255,7 @@ async def _stream_common(
     chat_id: str,
     user_id: str,
     no_input_msg: str,
+    concurrency: int | None = None,
 ) -> AsyncGenerator[str, None]:
     questions = [q.strip() for q in (template or []) if q and q.strip()]
     total = len(questions)
@@ -258,7 +274,9 @@ async def _stream_common(
     yield f"data: {json.dumps({'progress': {'done': 0, 'total': total}})}\n\n"
 
     report = ""
-    async for kind, payload in _run_batch(questions=questions, answer_fn=answer_fn):
+    async for kind, payload in _run_batch(
+        questions=questions, answer_fn=answer_fn, concurrency=concurrency
+    ):
         if kind == "progress":
             yield f"data: {json.dumps({'progress': payload})}\n\n"
         elif kind == "report":
@@ -280,13 +298,19 @@ async def _stream_common(
 async def stream_projektanalyse_v2(
     *, template: list[str] | None, chat_id: str, user_id: str
 ) -> AsyncGenerator[str, None]:
-    """v2: full-corpus context per question (no retrieval)."""
+    """v2: per-question rag_specialist fan-out (Vertex RAG corpus, native grounding).
+
+    Each template question runs through a fresh rag_specialist Runner with
+    its own retrieval window (top_k=10 per call, see app/adk/agents.py).
+    Concurrency capped at DISPATCH_CONCURRENCY to avoid DSQ pool saturation.
+    """
+    title = "Projektanalyse"
     project_id = await asyncio.to_thread(_project_id_for_chat, chat_id, user_id)
     if not project_id:
         async for sse in _stream_common(
             template=template,
             answer_fn=None,
-            title="Projektanalyse v2 (Volltext)",
+            title=title,
             chat_id=chat_id,
             user_id=user_id,
             no_input_msg="_(Projekt nicht gefunden — Vorlage konnte nicht beantwortet werden.)_",
@@ -294,15 +318,33 @@ async def stream_projektanalyse_v2(
             yield sse
         return
 
-    corpus = await asyncio.to_thread(_load_full_corpus, project_id, user_id)
-    has_corpus = "Keine Projektdokumente gefunden" not in corpus
-    answer_fn = (lambda q: _answer_v2_sync(q, corpus)) if has_corpus else None
+    corpus_name = await asyncio.to_thread(_load_corpus_name, project_id)
+    if not corpus_name:
+        async for sse in _stream_common(
+            template=template,
+            answer_fn=None,
+            title=title,
+            chat_id=chat_id,
+            user_id=user_id,
+            no_input_msg="_(Keine Projektdokumente vorhanden — Vorlage konnte nicht beantwortet werden.)_",
+        ):
+            yield sse
+        return
+
+    rag_specialist = make_rag_specialist(corpus_name)
+
+    async def answer_fn(q: str) -> str:
+        return await _answer_v2_via_rag(
+            q, rag_specialist=rag_specialist, user_id=user_id
+        )
+
     async for sse in _stream_common(
         template=template,
         answer_fn=answer_fn,
-        title="Projektanalyse v2 (Volltext)",
+        title=title,
         chat_id=chat_id,
         user_id=user_id,
-        no_input_msg="_(Keine Projektdateien vorhanden — Vorlage konnte nicht beantwortet werden.)_",
+        no_input_msg="_(Keine Projektdokumente vorhanden — Vorlage konnte nicht beantwortet werden.)_",
+        concurrency=DISPATCH_CONCURRENCY,
     ):
         yield sse

@@ -1,38 +1,39 @@
-"""ADK agent factories + module-level constants (plan 19.0 T3-T7).
+"""ADK agent factories + module-level constants.
 
-Tree shape (post-collapse, see comment below):
+Tree shape:
 
     chat_orchestrator (gemini-2.5-flash)
-      tool: rag_specialist (AgentTool)
-        tool: search_project_documents (FunctionTool, corpus-bound)
-      tool: web_researcher (AgentTool)
-        tool: web_google_search (AgentTool)
-        tool: web_url_fetcher (AgentTool)
+      tool: rag_specialist (StreamingAgentTool)
+        tool: VertexAiRagRetrieval — Gemini-native managed retrieval
+              (injected as `Tool(retrieval=...)` for Gemini 2+, lets the
+               model think → retrieve → think → retrieve in one inference)
+      tool: web_researcher (StreamingAgentTool)
+        tool: web_google_search (StreamingAgentTool)
+        tool: web_url_fetcher (StreamingAgentTool)
       tool: run_projektanalyse_v2 (FunctionTool)
 
-Per-corpus state lives in the closure of make_search_project_documents_tool;
-each cached AdkApp owns its own orchestrator subtree.
-
-History note: an intermediate `document_retriever` LlmAgent layer used to
-sit between rag_specialist and search_project_documents. Its instruction
-was a 100% verbatim passthrough ("call the tool with the query and return
-the chunks unchanged") — pure indirection inherited from an earlier
-plan that envisioned a managed VertexAiRagRetrieval tool. We collapsed it
-to cut the agent tree's per-sub-question Flash call count from 6 to 4
-(-33%), which directly reduces DSQ shared-pool burst pressure during
-N-question chat turns.
+Why managed retrieval: the previous custom `search_project_documents`
+FunctionTool forced exactly one retrieval per ADK round-trip — the model
+got two thinking passes (planning + post-retrieval analysis) regardless
+of question complexity. The native `Tool(retrieval=Retrieval(vertex_rag_
+store=...))` runs server-side during model inference, so Gemini can chain
+think → retrieve → refine → retrieve → answer in a single response,
+matching the rich iterative reasoning Vertex Agent Builder demonstrates
+with the same model + thinking_config.
 """
 from __future__ import annotations
 
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.tools import url_context
 from google.adk.tools.google_search_tool import GoogleSearchTool
+from google.adk.tools.retrieval.vertex_ai_rag_retrieval import VertexAiRagRetrieval
 from google.genai import types as genai_types
+from vertexai.preview import rag
 
 from app.projektanalyse_v2_tool import run_projektanalyse_v2_tool
 
+from .dispatch_rag_questions_tool import make_dispatch_rag_questions_tool
 from .instructions import CHAT_ORCHESTRATOR_INSTRUCTION, RAG_SPECIALIST_INSTRUCTION
-from .retrieval_tool import make_search_project_documents_tool
 from .streaming_agent_tool import StreamingAgentTool
 
 
@@ -65,11 +66,36 @@ _RETRY_CONFIG = genai_types.GenerateContentConfig(http_options=_HTTP_OPTIONS)
 # Thinking surfaces the model's chain-of-thought as `thought=True` text parts
 # in the event stream. We expose them in the activity panel so debug users can
 # see WHY the agent reached an answer; the streamed user-facing reply still
-# only contains non-thought text. budget=-1 lets the model decide how much
-# thinking it needs (matches Vertex Agent Builder's default).
+# only contains non-thought text.
+#
+# Budget-split rationale (added 2026-05-02 after observing 5-10min orchestrator
+# stalls on 11-question fan-out summarization):
+#   - SUB-AGENT (`rag_specialist`, web tree): keeps `budget=-1` (model decides).
+#     Single-question deep reasoning + retrieval genuinely benefits from
+#     unbounded thinking; latency per call stays in the 10-25s range.
+#   - ORCHESTRATOR: capped at `budget=512`. Its job is routing + pass-through
+#     aggregation per the instructions — NOT synthesis. With `-1` the model
+#     burns thousands of thinking tokens on the post-tool summarization pass
+#     for an 11-answer fan-out, which is a documented Flash failure mode
+#     (cf. ai.google.dev forum: 8k-char HTML refinement -> 400s on Flash).
+#     512 tokens is roughly enough for routing nuance ("dispatch vs single
+#     rag_specialist vs web vs direct answer") but caps summarization-pass
+#     thinking at a few seconds.
 _THINKING_CONFIG = genai_types.ThinkingConfig(
     include_thoughts=True,
     thinking_budget=-1,
+)
+
+# Orchestrator: no thinking, no thought emission. Matches the pre-`01a1437`
+# (`24c2534`) branch behavior where the orchestrator ran on plain
+# `_RETRY_CONFIG` and 11-question summaries returned in seconds, not minutes.
+# The orchestrator's instruction is prescriptive ("pass through unchanged")
+# so it doesn't benefit from chain-of-thought; the latency cost was pure
+# loss. Sub-agent (`rag_specialist`) thinking stays on — that's where it
+# legitimately helps.
+_ORCHESTRATOR_THINKING_CONFIG = genai_types.ThinkingConfig(
+    include_thoughts=False,
+    thinking_budget=0,
 )
 
 
@@ -81,47 +107,51 @@ def _retry_with_thinking() -> genai_types.GenerateContentConfig:
     )
 
 
+def _retry_with_orchestrator_thinking() -> genai_types.GenerateContentConfig:
+    """Orchestrator-only config: same retries + thoughts, but capped budget
+    so post-tool aggregation doesn't run for minutes. See _THINKING_CONFIG
+    block above for rationale."""
+    return genai_types.GenerateContentConfig(
+        http_options=_HTTP_OPTIONS,
+        thinking_config=_ORCHESTRATOR_THINKING_CONFIG,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Per-project (corpus-bound) sub-tree
 # ---------------------------------------------------------------------------
 
 
-def make_document_retriever(corpus_name: str) -> LlmAgent:
-    """Per-project document retriever. Bound to a specific RAG corpus.
-
-    [TEMPORARILY RE-ADDED for A/B testing — see commit 3cc6f47 which removed
-    this layer. We're keeping it briefly to compare turn behaviour with vs
-    without the passthrough agent.]
-    """
-    return LlmAgent(
-        name="document_retriever",
-        model="gemini-2.5-flash",
-        description=(
-            "Ruft relevante Textstellen aus dem RAG-Korpus des aktuellen "
-            "Projekts ab. Gibt rohe Chunks mit Quellangabe (Datei, Seite, "
-            "Score) zurueck — ohne Interpretation. Wird ausschliesslich "
-            "vom rag_specialist als Werkzeug aufgerufen, nie direkt vom "
-            "Chat-Agenten."
-        ),
-        instruction=(
-            "Du rufst das Tool search_project_documents mit der vom "
-            "rag_specialist uebergebenen Suchanfrage auf. Gib die Treffer "
-            "wortwoertlich und vollstaendig zurueck — keine Zusammen-"
-            "fassung, keine Auswahl, keine Reformulierung. Wenn das Tool "
-            "{'status': 'no_results'} meldet, gib das explizit als "
-            "'Keine Treffer' zurueck."
-        ),
-        tools=[make_search_project_documents_tool(corpus_name)],
-        generate_content_config=_RETRY_CONFIG,
-    )
+_RETRIEVAL_TOP_K = 10
 
 
 def make_rag_specialist(corpus_name: str) -> LlmAgent:
-    """Per-question RAG worker. Owns SIA domain rules + [N] citation contract.
+    """Per-question RAG worker. Uses Gemini's NATIVE managed retrieval.
 
-    [TEMPORARILY routes through document_retriever again — A/B test, see
-    make_document_retriever above.]
+    `VertexAiRagRetrieval` injects a `Tool(retrieval=Retrieval(vertex_rag_
+    store=...))` directly into the GenerateContent config (see ADK's
+    `google/adk/tools/retrieval/vertex_ai_rag_retrieval.py:67-81`). For
+    Gemini 2+ models the retrieval runs server-side during inference, so
+    the model can chain multiple think → retrieve → think iterations in a
+    single response — same pattern as Vertex Agent Builder.
+
+    Citations come back via `event.grounding_metadata.grounding_chunks`
+    (each carrying `retrieved_context.{text, title, uri}`); `chats.py`
+    extracts these from the StreamingAgentTool's propagated grounding
+    metadata and turns them into the [N] citation records the chat UI
+    already knows how to render.
     """
+    retrieval_tool = VertexAiRagRetrieval(
+        name="search_project_documents",
+        description=(
+            "Searches the project's RAG corpus (Vertex AI Search-managed "
+            "store) for chunks relevant to a query. Returns excerpts the "
+            "model can use to ground its answer. Use whenever the question "
+            "is about content of the uploaded project documents."
+        ),
+        rag_resources=[rag.RagResource(rag_corpus=corpus_name)],
+        similarity_top_k=_RETRIEVAL_TOP_K,
+    )
     return LlmAgent(
         name="rag_specialist",
         model="gemini-2.5-flash",
@@ -134,7 +164,7 @@ def make_rag_specialist(corpus_name: str) -> LlmAgent:
             "Vom Chat-Agenten pro Einzelfrage delegiert."
         ),
         instruction=RAG_SPECIALIST_INSTRUCTION,
-        tools=[StreamingAgentTool(agent=make_document_retriever(corpus_name))],
+        tools=[retrieval_tool],
         generate_content_config=_retry_with_thinking(),
     )
 
@@ -233,9 +263,16 @@ web_researcher = LlmAgent(
 
 def make_chat_orchestrator(corpus_name: str) -> LlmAgent:
     """Top-level chat agent. Builds a fresh rag_specialist (corpus-bound)
-    and wires it alongside the corpus-independent web_researcher and the
-    run_projektanalyse_v2 hand-off tool.
+    and wires it alongside the corpus-independent web_researcher, the
+    dispatch_rag_questions fan-out tool, and the run_projektanalyse_v2
+    hand-off tool.
+
+    rag_specialist is constructed ONCE per orchestrator and shared by both
+    the single-question StreamingAgentTool path and the multi-question
+    dispatch_rag_questions path. This keeps Vertex RAG retrieval bound to
+    a single LlmAgent instance regardless of how it's invoked.
     """
+    rag_specialist = make_rag_specialist(corpus_name)
     return LlmAgent(
         name="chat_orchestrator",
         # Flash for orchestrator latency. The original plan called for Pro
@@ -246,17 +283,31 @@ def make_chat_orchestrator(corpus_name: str) -> LlmAgent:
         model="gemini-2.5-flash",
         description=(
             "Hauptagent im Dialog mit dem Nutzer. Versteht die Nutzeranfrage, "
-            "entscheidet ueber das Routing (rag_specialist fuer Projekt-"
-            "fragen, web_researcher fuer externe Recherche, "
+            "entscheidet ueber das Routing (rag_specialist fuer eine einzelne "
+            "Projektfrage, dispatch_rag_questions fuer 2+ unabhaengige "
+            "Projektfragen, web_researcher fuer externe Recherche, "
             "run_projektanalyse_v2 nur auf explizite Anfrage, Direktantwort "
             "bei Smalltalk und reinen Folgefragen) und fasst Sub-Agent-"
             "Antworten zu einer kohaerenten Antwort zusammen."
         ),
         instruction=CHAT_ORCHESTRATOR_INSTRUCTION,
         tools=[
-            StreamingAgentTool(agent=make_rag_specialist(corpus_name)),
+            # propagate_grounding_metadata=True forwards rag_specialist's
+            # GroundingMetadata (sources + supports + segments from the
+            # native vertex_rag_store retrieval) into the orchestrator's
+            # tool_context.state under "temp:_adk_grounding_metadata", so
+            # chats.py can build citation records from it.
+            StreamingAgentTool(
+                agent=rag_specialist,
+                propagate_grounding_metadata=True,
+            ),
+            # Deterministic N-way fan-out for multi-question turns. Replaces
+            # relying on Flash to emit N parallel function calls (which it
+            # does unreliably). See dispatch_rag_questions_tool.py for the
+            # empirical justification.
+            make_dispatch_rag_questions_tool(rag_specialist),
             StreamingAgentTool(agent=web_researcher),
             run_projektanalyse_v2_tool,
         ],
-        generate_content_config=_retry_with_thinking(),
+        generate_content_config=_retry_with_orchestrator_thinking(),
     )

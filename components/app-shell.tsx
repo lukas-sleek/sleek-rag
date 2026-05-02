@@ -984,9 +984,24 @@ export function App() {
                   const last = arr[arr.length - 1];
                   if (last?.role !== "assistant") return prev;
                   const existing = last.traces ?? [];
+                  // Upsert by id: per-batched-question dispatch frames
+                  // emit the SAME id (e.g. `dispatch-3`) for the start
+                  // (`laeuft`) and done (`fertig`) phases — we replace
+                  // the existing row in place so the activity panel
+                  // shows one row per question that flips status
+                  // rather than two separate rows.
+                  const existingIdx = existing.findIndex(
+                    (t) => t.id === step.id
+                  );
+                  const nextTraces =
+                    existingIdx >= 0
+                      ? existing.map((t, i) =>
+                          i === existingIdx ? step : t
+                        )
+                      : [...existing, step];
                   arr[arr.length - 1] = {
                     ...last,
-                    traces: [...existing, step],
+                    traces: nextTraces,
                   };
                   return { ...prev, [chatId]: arr };
                 });

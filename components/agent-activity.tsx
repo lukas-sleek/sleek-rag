@@ -62,29 +62,67 @@ function StepHeader({ step }: { step: TraceStep }) {
     step.kind === "tool_call" || step.kind === "tool_response"
       ? step.name ?? KIND_LABEL[step.kind]
       : KIND_LABEL[step.kind];
+  // Per-batched-question dispatch frames carry stable ids of the form
+  // `dispatch-<idx>` and the frontend upserts by id, so a single row
+  // flips its kind/status as the sub-question progresses. Derive phase
+  // from kind+status rather than the id suffix:
+  //   running -> kind=tool_call (no status yet)
+  //   done    -> kind=tool_response, status=ok
+  //   error   -> kind=tool_response, status=error
+  const isDispatch = typeof step.id === "string" && step.id.startsWith("dispatch-");
+  let dispatchPhase: "start" | "done" | "error" | null = null;
+  if (isDispatch) {
+    if (step.kind === "tool_call") dispatchPhase = "start";
+    else if (step.kind === "tool_response" && step.status === "error")
+      dispatchPhase = "error";
+    else if (step.kind === "tool_response") dispatchPhase = "done";
+  }
   return (
     <div className="flex items-center gap-2 text-left text-[12.5px] w-full">
       <KindIcon kind={step.kind} />
       <span className="font-medium text-text">{author}</span>
       <span className="text-text-tertiary">·</span>
       <span className="text-text-secondary">{detail}</span>
+      {dispatchPhase === "start" && (
+        <span className="ml-auto inline-flex items-center gap-1 text-[10.5px] uppercase tracking-wider text-amber-300">
+          <Loader2Icon className="size-3 animate-spin" />
+          laeuft
+        </span>
+      )}
+      {dispatchPhase === "done" && (
+        <span className="ml-auto inline-flex items-center gap-1 text-[10.5px] uppercase tracking-wider text-emerald-300">
+          <CheckCircle2Icon className="size-3" />
+          fertig
+        </span>
+      )}
+      {dispatchPhase === "error" && (
+        <span className="ml-auto text-[10.5px] uppercase tracking-wider text-rose-300">
+          fehler
+        </span>
+      )}
     </div>
   );
 }
 
-// Vertex retrieval scores live in [0, 1]; map to a coarse confidence label
-// + tinted badge so the ordering becomes obvious at a glance.
-function scoreBadgeProps(score: number): {
+// Vertex `RagContext.score` for the default RagManagedVertexVectorSearch
+// backend is a vector-DISTANCE (lower = more relevant), not a similarity.
+// The presence of `vector_distance_threshold` in the retrieval config —
+// which "returns contexts smaller than the threshold" — is the giveaway.
+// So our thresholds invert the usual similarity-style colouring:
+//   <= 0.30  → green (top-of-corpus match for normalised cosine distance)
+//   <= 0.50  → amber
+//   >  0.50  → rose
+function distanceBadgeProps(distance: number): {
   variant: "default" | "secondary" | "outline";
   className: string;
 } {
-  if (score >= 0.7) {
+  if (distance <= 0.30) {
     return {
       variant: "default",
       className: "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30",
     };
   }
-  if (score >= 0.4) {
+  if (distance <= 0.50) {
     return {
       variant: "secondary",
       className: "bg-amber-500/15 text-amber-300 border border-amber-500/30",
@@ -107,7 +145,7 @@ function ChunkRow({ chunk }: { chunk: RetrievalChunk }) {
           variant: "outline" as const,
           className: "border border-border text-text-tertiary",
         }
-      : scoreBadgeProps(chunk.score);
+      : distanceBadgeProps(chunk.score);
   return (
     <div className="rounded-md border border-border bg-bg-input p-2.5">
       <div className="flex items-center gap-2 mb-1.5">
@@ -118,6 +156,7 @@ function ChunkRow({ chunk }: { chunk: RetrievalChunk }) {
         </span>
         <Badge
           variant={badgeProps.variant}
+          title="Vektor-Distanz (niedriger = relevanter)"
           className={"font-mono text-[10px] py-0 px-1.5 " + badgeProps.className}
         >
           {scoreText}
@@ -140,6 +179,9 @@ function StepBody({ step }: { step: TraceStep }) {
           <span>Treffer</span>
           <span className="text-text-tertiary">·</span>
           <span>{step.chunks.length}</span>
+          <span className="text-text-tertiary normal-case tracking-normal italic ml-auto">
+            Distanz ↓ besser
+          </span>
           {step.status && step.status !== "ok" && (
             <span className="text-text-tertiary italic">({step.status})</span>
           )}

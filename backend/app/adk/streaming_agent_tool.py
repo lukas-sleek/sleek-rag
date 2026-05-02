@@ -140,6 +140,24 @@ class StreamingAgentTool(AgentTool):
         merged_text = "\n".join(
             p.text for p in last_content.parts if p.text and not p.thought
         )
+
+        # Native vertex_rag_store retrieval doesn't make the model emit
+        # [N] markers reliably (it has no per-chunk index handle to cite).
+        # Vertex DOES return `grounding_supports` — claim segments paired
+        # with the chunk indices that supported them — so we can insert
+        # [N] markers automatically using those segment boundaries.
+        # Important: do this BEFORE appending chunks to parent state so
+        # we know the correct GLOBAL idx offset (per-call chunks become
+        # entries [offset+1 .. offset+len(chunks)] in the eventual
+        # citation list).
+        if self.propagate_grounding_metadata and last_grounding_metadata:
+            existing_count = len(
+                tool_context.state.get("agent_grounding_chunks", []) or []
+            )
+            merged_text = self._annotate_with_grounding_supports(
+                merged_text, last_grounding_metadata, idx_offset=existing_count
+            )
+
         output_schema = _get_output_schema(self.agent)
         if output_schema:
             tool_result = validate_schema(output_schema, merged_text)
@@ -147,11 +165,74 @@ class StreamingAgentTool(AgentTool):
             tool_result = merged_text
 
         if self.propagate_grounding_metadata and last_grounding_metadata:
+            # Upstream contract — kept so any caller that still reads
+            # this exact key sees the metadata from the LAST sub-call.
             tool_context.state["temp:_adk_grounding_metadata"] = (
                 last_grounding_metadata
             )
+            # Per-call APPEND for our chat use-case: a multi-question fan-out
+            # produces multiple rag_specialist invocations within one turn
+            # and we need every call's chunks to survive into the final
+            # citation list. We serialise to plain dicts here so the state
+            # stays JSON-friendly when ADK persists it.
+            self._append_grounding_chunks(tool_context, last_grounding_metadata)
 
         return tool_result
+
+    @staticmethod
+    def _annotate_with_grounding_supports(
+        text: str, gm, *, idx_offset: int
+    ) -> str:
+        """Insert `[N]` markers into `text` at each grounding-support segment.
+
+        `grounding_supports` is a list of {segment, grounding_chunk_indices}
+        entries that Vertex returns alongside the answer. Each support says
+        "this segment of the answer was grounded on these chunk indices".
+        We append `[N1][N2]...` markers right after each segment, where
+        `Nk = grounding_chunk_indices[k] + idx_offset + 1` (global 1-based
+        idx; idx_offset is the count of chunks already accumulated by
+        previous rag_specialist calls in the same turn).
+
+        Insertions walk supports in DESCENDING end_index order so each
+        write doesn't shift the offsets of later writes. start/end_index
+        are byte offsets per the Vertex spec, so we encode/decode UTF-8
+        around each splice.
+        """
+        supports = getattr(gm, "grounding_supports", None) or []
+        if not supports:
+            return text
+
+        # Build (insert_at_byte, marker_str) pairs we'll splice in.
+        edits: list[tuple[int, str]] = []
+        for sup in supports:
+            seg = getattr(sup, "segment", None)
+            if seg is None:
+                continue
+            # Only annotate single-part text responses (part_index 0 / None).
+            part_index = getattr(seg, "part_index", None)
+            if part_index not in (None, 0):
+                continue
+            end_index = getattr(seg, "end_index", None)
+            if end_index is None:
+                continue
+            chunk_indices = getattr(sup, "grounding_chunk_indices", None) or []
+            if not chunk_indices:
+                continue
+            markers = "".join(f"[{i + idx_offset + 1}]" for i in chunk_indices)
+            if not markers:
+                continue
+            edits.append((end_index, markers))
+
+        if not edits:
+            return text
+
+        # Walk descending so earlier byte offsets stay valid.
+        edits.sort(key=lambda x: x[0], reverse=True)
+        buf = text.encode("utf-8")
+        for at, markers in edits:
+            at = max(0, min(at, len(buf)))
+            buf = buf[:at] + markers.encode("utf-8") + buf[at:]
+        return buf.decode("utf-8", errors="replace")
 
     @staticmethod
     def _capture_activity(event, tool_context: ToolContext) -> None:
@@ -219,6 +300,41 @@ class StreamingAgentTool(AgentTool):
 
         if len(existing) != len(tool_context.state.get("agent_trace", []) or []):
             tool_context.state["agent_trace"] = existing
+
+    @staticmethod
+    def _append_grounding_chunks(tool_context: ToolContext, gm) -> None:
+        """Serialise this sub-call's grounding chunks into parent state.
+
+        Each chunk lands as one entry under `state["agent_grounding_chunks"]`
+        with the shape chats.py expects:
+            {"agent": <sub-agent name>, "text", "title", "uri", "rag_chunk"}
+        Multi-question fan-outs produce one StreamingAgentTool call per
+        sub-question, so we APPEND rather than overwrite.
+        """
+        chunks = getattr(gm, "grounding_chunks", None) or []
+        if not chunks:
+            return
+        author = "rag_specialist"  # only this agent has grounding wired today
+        existing = list(tool_context.state.get("agent_grounding_chunks", []) or [])
+        for c in chunks:
+            rc = getattr(c, "retrieved_context", None)
+            if rc is None:
+                continue
+            entry = {
+                "agent": author,
+                "text": getattr(rc, "text", None) or "",
+                "title": getattr(rc, "title", None) or "",
+                "uri": getattr(rc, "uri", None) or "",
+            }
+            rag_chunk = getattr(rc, "rag_chunk", None)
+            if rag_chunk is not None:
+                entry["rag_chunk_text"] = getattr(rag_chunk, "text", None) or ""
+                page_span = getattr(rag_chunk, "page_span", None)
+                if page_span is not None:
+                    entry["page_first"] = getattr(page_span, "first_page", None)
+                    entry["page_last"] = getattr(page_span, "last_page", None)
+            existing.append(entry)
+        tool_context.state["agent_grounding_chunks"] = existing
 
 
 def _safe_json(obj) -> str:

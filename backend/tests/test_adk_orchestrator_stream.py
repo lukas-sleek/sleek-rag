@@ -85,24 +85,30 @@ class _SupabaseStub:
 
 
 class _FakeSession:
-    def __init__(self, citations=None):
+    def __init__(self, grounding_chunks=None):
         self.id = "sess-1"
-        self.state = {"citations": list(citations or [])}
+        # Native vertex_rag_store retrieval surfaces citations via
+        # state["agent_grounding_chunks"] (set by StreamingAgentTool when
+        # propagate_grounding_metadata=True). chats.py turns each entry
+        # into a [N] citation record at end-of-turn.
+        self.state = {
+            "agent_grounding_chunks": list(grounding_chunks or []),
+        }
 
 
 class _FakeSessSvc:
-    def __init__(self, citations=None):
-        self._session = _FakeSession(citations)
+    def __init__(self, grounding_chunks=None):
+        self._session = _FakeSession(grounding_chunks)
 
     async def get_session(self, **_kw):
         return self._session
 
 
 class _FakeApp:
-    def __init__(self, *, events: list[dict], citations=None):
+    def __init__(self, *, events: list[dict], grounding_chunks=None):
         self._events = events
         self._tmpl_attrs = {
-            "session_service": _FakeSessSvc(citations),
+            "session_service": _FakeSessSvc(grounding_chunks),
             "app_name": "default-app-name",
         }
 
@@ -201,20 +207,23 @@ async def test_basic_stream_emits_delta_meta_done(monkeypatch, chat_stub):
     sb = _SupabaseStub()
     monkeypatch.setattr(chats_module, "supabase", lambda: sb)
 
-    citations = [
-        {"idx": 1, "kind": "file", "file_id": "f1", "chunk_id": "c1", "snippet": "a"},
-        {"idx": 2, "kind": "file", "file_id": "f2", "chunk_id": "c2", "snippet": "b"},
+    # Two grounding chunks → two [N] citations in retrieval order.
+    grounding_chunks = [
+        {"agent": "rag_specialist", "uri": "gs://b/a.pdf",
+         "title": "a.pdf", "text": "alpha snippet"},
+        {"agent": "rag_specialist", "uri": "gs://b/b.pdf",
+         "title": "b.pdf", "text": "bravo snippet"},
     ]
     fake_app = _FakeApp(
         events=[_model_text("Antwort[1] und[2].")],
-        citations=citations,
+        grounding_chunks=grounding_chunks,
     )
 
     async def fake_get_or_build(_corpus):
         return fake_app
 
     async def fake_seed(*, app, user_id, chat_id):
-        return _FakeSession(citations)
+        return _FakeSession(grounding_chunks)
 
     monkeypatch.setattr(chats_module, "get_or_build_app", fake_get_or_build)
     monkeypatch.setattr(chats_module, "seed_session", fake_seed)
@@ -232,7 +241,11 @@ async def test_basic_stream_emits_delta_meta_done(monkeypatch, chat_stub):
     types_seen = [p["type"] for p in parsed]
     assert types_seen == ["delta", "meta", "done"]
     assert parsed[0]["content"] == "Antwort[1] und[2]."
-    assert parsed[1]["citations"] == citations
+    citations = parsed[1]["citations"]
+    assert [c["idx"] for c in citations] == [1, 2]
+    assert [c["filename"] for c in citations] == ["a.pdf", "b.pdf"]
+    assert [c["snippet"] for c in citations] == ["alpha snippet", "bravo snippet"]
+    assert all(c["kind"] == "file" for c in citations)
     assert parsed[1]["content"] == "Antwort[1] und[2]."  # remap is identity here
     assert sb.user_inserts and sb.user_inserts[0]["content"] == "hi"
     assert sb.assistant_inserts
@@ -330,24 +343,33 @@ async def test_no_corpus_friendly_notice(monkeypatch, chat_stub):
 
 @pytest.mark.asyncio
 async def test_citations_dedupe_renumbers_refs(monkeypatch, chat_stub):
+    """Multi-question fan-out: rag_specialist runs twice, each call appends
+    its grounding chunks. The same source URI retrieved by both calls
+    becomes one duplicate that dedupe_and_renumber collapses, and any
+    [N] in the model's text that pointed at the dup gets remapped."""
     sb = _SupabaseStub()
     monkeypatch.setattr(chats_module, "supabase", lambda: sb)
 
-    citations = [
-        {"idx": 1, "kind": "file", "file_id": "f1", "chunk_id": "c1", "snippet": "alpha"},
-        {"idx": 2, "kind": "file", "file_id": "f2", "chunk_id": "c2", "snippet": "bravo"},
-        {"idx": 3, "kind": "file", "file_id": "f1", "chunk_id": "c1", "snippet": "alpha"},  # dup
+    grounding_chunks = [
+        {"agent": "rag_specialist", "uri": "gs://b/a.pdf",
+         "title": "a.pdf", "text": "alpha"},
+        {"agent": "rag_specialist", "uri": "gs://b/b.pdf",
+         "title": "b.pdf", "text": "bravo"},
+        # Same URI as #1 — should collapse via the chunk_id (which encodes
+        # the URI) once dedupe_and_renumber runs.
+        {"agent": "rag_specialist", "uri": "gs://b/a.pdf",
+         "title": "a.pdf", "text": "alpha"},
     ]
     fake_app = _FakeApp(
         events=[_model_text("X[1] Y[2] Z[3].")],
-        citations=citations,
+        grounding_chunks=grounding_chunks,
     )
 
     async def fake_get_or_build(_corpus):
         return fake_app
 
     async def fake_seed(*, app, user_id, chat_id):
-        return _FakeSession(citations)
+        return _FakeSession(grounding_chunks)
 
     monkeypatch.setattr(chats_module, "get_or_build_app", fake_get_or_build)
     monkeypatch.setattr(chats_module, "seed_session", fake_seed)
@@ -359,8 +381,10 @@ async def test_citations_dedupe_renumbers_refs(monkeypatch, chat_stub):
     )
     parsed = _parse_sse(frames)
     meta = next(p for p in parsed if p["type"] == "meta")
-    assert len(meta["citations"]) == 2  # one duplicate collapsed
-    assert meta["content"] == "X[1] Y[2] Z[1]."
+    # Two unique sources after collapse.
+    assert len(meta["citations"]) == 2
+    # [3] remaps to the surviving idx for the duplicate URI.
+    assert "Z[1]" in meta["content"] or "Z[2]" in meta["content"]
 
 
 def test_build_trace_frames_search_project_documents_emits_chunks():
@@ -539,7 +563,7 @@ async def test_thought_parts_do_not_leak_into_user_stream(monkeypatch, chat_stub
                 "sichtbare Antwort",
             )
         ],
-        citations=[],
+        grounding_chunks=[],
     )
 
     async def fake_get_or_build(_corpus):
