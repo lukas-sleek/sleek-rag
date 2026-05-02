@@ -1347,7 +1347,7 @@ export function App() {
           </div>
           <div className="inline-flex items-center gap-1.5 bg-bg-input border border-border px-2.5 py-[5px] rounded-full text-xs text-text-secondary">
             <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-            EAG LLM · gpt-4o
+            EAG LLM
           </div>
           {activeChat?.projectHasFiles && (
             <button

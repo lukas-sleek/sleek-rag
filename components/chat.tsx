@@ -108,6 +108,58 @@ export function Message({
     const linked = oldToNew.size ? linkifyCitations(rewritten, visible) : rewritten;
     return { visibleCitations: visible, renderedContent: linked };
   }, [msg.content, citations]);
+  const contentRef = React.useRef<HTMLDivElement>(null);
+  const [copied, setCopied] = React.useState(false);
+
+  const stripCitations = (root: HTMLElement) => {
+    // Citation links/buttons rendered by ReactMarkdown for "[N]" markers.
+    root.querySelectorAll('a[href^="#cite-"], button[title]').forEach((el) => {
+      if (el.tagName === "BUTTON" && !/^\[\d+\]$/.test(el.textContent ?? "")) return;
+      el.remove();
+    });
+    // Any stray "[N]" text that survived (shouldn't, but safe).
+    root.innerHTML = root.innerHTML.replace(/\[\d+\]/g, "");
+  };
+
+  const handleCopy = async () => {
+    if (!contentRef.current) return;
+    const clone = contentRef.current.cloneNode(true) as HTMLElement;
+    stripCitations(clone);
+    const text = (clone.innerText || "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {}
+  };
+
+  const handleOpenInWord = () => {
+    if (!contentRef.current) return;
+    const clone = contentRef.current.cloneNode(true) as HTMLElement;
+    stripCitations(clone);
+    const body = clone.innerHTML;
+    const html =
+      '<html xmlns:o="urn:schemas-microsoft-com:office:office" ' +
+      'xmlns:w="urn:schemas-microsoft-com:office:word" ' +
+      'xmlns="http://www.w3.org/TR/REC-html40">' +
+      '<head><meta charset="utf-8"><title>EAG LLM Antwort</title>' +
+      '<style>body{font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.45;}' +
+      'h1{font-size:18pt;}h2{font-size:14pt;}h3{font-size:12pt;}' +
+      'table{border-collapse:collapse;}th,td{border:1px solid #999;padding:4px 6px;}' +
+      'code{font-family:Consolas,monospace;background:#f3f3f3;padding:1px 3px;}' +
+      'pre{font-family:Consolas,monospace;background:#f3f3f3;padding:8px;}</style>' +
+      '</head><body>' + body + '</body></html>';
+    const blob = new Blob(["﻿", html], { type: "application/msword" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `eag-llm-antwort-${new Date().toISOString().slice(0, 10)}.doc`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
   return (
     <div className="group flex flex-col items-stretch">
       {msg.traces && msg.traces.length > 0 && (
@@ -124,7 +176,7 @@ export function Message({
           <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-[chat-dot_1s_infinite] [animation-delay:300ms]" />
         </div>
       )}
-      <div className={MD_PROSE}>
+      <div className={MD_PROSE} ref={contentRef}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           components={{
@@ -177,13 +229,21 @@ export function Message({
           ))}
         </div>
       )}
-      {!streaming && (
+      {!streaming && msg.content && (
         <div className="flex gap-1 mt-2.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-          <button className="bg-transparent border border-transparent rounded-md px-2 py-1 text-text-tertiary text-[11px] inline-flex items-center gap-[5px] transition-[background-color,color,border-color] duration-150 hover:bg-bg-hover hover:text-text hover:border-border">
-            <Icon.Copy /> Kopieren
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="bg-transparent border border-transparent rounded-md px-2 py-1 text-text-tertiary text-[11px] inline-flex items-center gap-[5px] transition-[background-color,color,border-color] duration-150 hover:bg-bg-hover hover:text-text hover:border-border"
+          >
+            <Icon.Copy /> {copied ? "Kopiert" : "Kopieren"}
           </button>
-          <button className="bg-transparent border border-transparent rounded-md px-2 py-1 text-text-tertiary text-[11px] inline-flex items-center gap-[5px] transition-[background-color,color,border-color] duration-150 hover:bg-bg-hover hover:text-text hover:border-border">
-            ↻ Neu generieren
+          <button
+            type="button"
+            onClick={handleOpenInWord}
+            className="bg-transparent border border-transparent rounded-md px-2 py-1 text-text-tertiary text-[11px] inline-flex items-center gap-[5px] transition-[background-color,color,border-color] duration-150 hover:bg-bg-hover hover:text-text hover:border-border"
+          >
+            <Icon.FileText /> In Word öffnen
           </button>
         </div>
       )}
@@ -262,13 +322,6 @@ export function EmptyState({
   );
 }
 
-const MODELS = [
-  { id: "gpt-4o", name: "GPT-4o", provider: "OpenAI", maxTokens: "128k" },
-  { id: "claude-3.5-sonnet", name: "Claude 3.5 Sonnet", provider: "Anthropic", maxTokens: "200k" },
-  { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro", provider: "Google", maxTokens: "1M" },
-  { id: "llama-3.1-70b", name: "Llama 3.1 70B", provider: "Meta", maxTokens: "128k" },
-];
-
 const DD_MENU =
   "absolute bottom-[calc(100%+4px)] z-[60] min-w-[200px] bg-bg-elevated border border-border " +
   "rounded-[8px] shadow-[0_8px_24px_rgba(0,0,0,.12),0_2px_6px_rgba(0,0,0,.06)] p-1 flex flex-col";
@@ -336,7 +389,6 @@ export function Composer({
   onStop: () => void;
 }) {
   const [value, setValue] = React.useState("");
-  const [model, setModel] = React.useState(MODELS[0]);
   const [temp, setTemp] = React.useState(0.7);
   const [showSettings, setShowSettings] = React.useState(false);
   const [attachments, setAttachments] = React.useState<Attachment[]>([]);
@@ -438,28 +490,6 @@ export function Composer({
         )}
 
         <div className="flex items-center gap-1 px-3 py-2 rounded-b-[11px]">
-          <Dropdown
-            trigger={
-              <button type="button" className={ICON_BTN} title="Hinzufügen">
-                <Icon.Plus />
-              </button>
-            }
-          >
-            {({ close }) => (
-              <>
-                <button type="button" className={MENU_ITEM} onClick={() => { addFile(); close(); }}>
-                  <Icon.Paperclip /> Dateien hinzufügen
-                </button>
-                <button type="button" className={MENU_ITEM} onClick={close}>
-                  <Icon.Sparkles /> Agent-Modus
-                </button>
-                <button type="button" className={MENU_ITEM} onClick={close}>
-                  <Icon.SearchSm /> Deep Research
-                </button>
-              </>
-            )}
-          </Dropdown>
-
           <button
             type="button"
             disabled={streaming}
@@ -469,42 +499,6 @@ export function Composer({
           >
             <Icon.Sparkles /> Projektanalyse erstellen
           </button>
-
-          <Dropdown
-            trigger={
-              <button
-                type="button"
-                className="h-7 inline-flex items-center gap-1 px-2 rounded-md bg-transparent border-none text-text-secondary text-xs font-medium whitespace-nowrap transition-[background-color,color] duration-150 hover:bg-bg-hover hover:text-text [&_svg]:text-text-tertiary"
-                title="Modell wählen"
-              >
-                {model.name}
-                <Icon.ChevronDownSm />
-              </button>
-            }
-          >
-            {({ close }) => (
-              <>
-                {MODELS.map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    className={
-                      MENU_ITEM +
-                      " justify-between min-w-[240px]" +
-                      (m.id === model.id ? " bg-bg-hover" : "")
-                    }
-                    onClick={() => { setModel(m); close(); }}
-                  >
-                    <span className="inline-flex items-baseline gap-1.5">
-                      <span className="text-[13px] text-text">{m.name}</span>
-                      <span className="text-[11px] text-text-tertiary">{m.provider}</span>
-                    </span>
-                    <span className="text-[10px] text-text-tertiary font-mono">{m.maxTokens}</span>
-                  </button>
-                ))}
-              </>
-            )}
-          </Dropdown>
 
           <button
             type="button"
