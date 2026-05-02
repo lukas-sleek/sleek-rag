@@ -404,6 +404,84 @@ export function Composer({
   const recorderRef = React.useRef<MediaRecorder | null>(null);
   const chunksRef = React.useRef<Blob[]>([]);
   const streamRef = React.useRef<MediaStream | null>(null);
+  const audioCtxRef = React.useRef<AudioContext | null>(null);
+  const analyserRef = React.useRef<AnalyserNode | null>(null);
+  const rafRef = React.useRef<number | null>(null);
+  const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
+
+  const stopVisualizer = () => {
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    try { audioCtxRef.current?.close(); } catch {}
+    audioCtxRef.current = null;
+    analyserRef.current = null;
+  };
+
+  const startVisualizer = (stream: MediaStream) => {
+    const Ctx =
+      (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!Ctx) return;
+    const ctx: AudioContext = new Ctx();
+    const src = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.6;
+    src.connect(analyser);
+    audioCtxRef.current = ctx;
+    analyserRef.current = analyser;
+
+    const buf = new Uint8Array(analyser.fftSize);
+    const draw = () => {
+      const canvas = canvasRef.current;
+      const a = analyserRef.current;
+      if (!canvas || !a) {
+        rafRef.current = requestAnimationFrame(draw);
+        return;
+      }
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = canvas.clientWidth;
+      const cssH = canvas.clientHeight;
+      if (canvas.width !== cssW * dpr || canvas.height !== cssH * dpr) {
+        canvas.width = cssW * dpr;
+        canvas.height = cssH * dpr;
+      }
+      const c = canvas.getContext("2d");
+      if (!c) {
+        rafRef.current = requestAnimationFrame(draw);
+        return;
+      }
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.clearRect(0, 0, cssW, cssH);
+
+      a.getByteTimeDomainData(buf);
+      // 48 vertical bars, height = local RMS amplitude.
+      const bars = 48;
+      const slice = Math.floor(buf.length / bars);
+      const gap = 3;
+      const barW = (cssW - gap * (bars - 1)) / bars;
+      const mid = cssH / 2;
+      // Read accent color from CSS variable so the waveform matches theme.
+      const accent =
+        getComputedStyle(document.documentElement).getPropertyValue("--accent") ||
+        "#ff8a3d";
+      c.fillStyle = accent.trim();
+      for (let i = 0; i < bars; i++) {
+        let sumSq = 0;
+        for (let j = 0; j < slice; j++) {
+          const v = (buf[i * slice + j] - 128) / 128;
+          sumSq += v * v;
+        }
+        const rms = Math.sqrt(sumSq / slice);
+        const h = Math.max(2, Math.min(cssH - 2, rms * cssH * 3.2));
+        const x = i * (barW + gap);
+        c.fillRect(x, mid - h / 2, barW, h);
+      }
+      rafRef.current = requestAnimationFrame(draw);
+    };
+    rafRef.current = requestAnimationFrame(draw);
+  };
 
   const refreshMicDevices = React.useCallback(async () => {
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) return;
@@ -452,6 +530,7 @@ export function Composer({
     refreshMicDevices();
     streamRef.current = stream;
     chunksRef.current = [];
+    startVisualizer(stream);
     const mime =
       ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"].find(
         (t) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(t)
@@ -459,6 +538,7 @@ export function Composer({
     const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
     rec.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
     rec.onstop = async () => {
+      stopVisualizer();
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
       setListening(false);
@@ -492,6 +572,7 @@ export function Composer({
     return () => {
       try { recorderRef.current?.stop(); } catch {}
       streamRef.current?.getTracks().forEach((t) => t.stop());
+      stopVisualizer();
     };
   }, []);
 
@@ -556,16 +637,38 @@ export function Composer({
           </div>
         )}
 
-        <div className="pt-3 px-4 pb-2">
+        <div className="pt-3 px-4 pb-2 relative">
           <textarea
             ref={ref}
             rows={1}
-            placeholder="Frag etwas…"
+            placeholder={
+              transcribing ? "Transkribiere…" : listening ? "" : "Frag etwas…"
+            }
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={onKey}
-            className="w-full bg-transparent border-none [outline:none] text-text text-sm leading-[1.55] resize-none min-h-[24px] max-h-[208px] [font-family:inherit] placeholder:text-text-tertiary"
+            disabled={listening || transcribing}
+            className={
+              "w-full bg-transparent border-none [outline:none] text-text text-sm leading-[1.55] resize-none min-h-[24px] max-h-[208px] [font-family:inherit] placeholder:text-text-tertiary disabled:cursor-not-allowed " +
+              (listening ? "opacity-0 pointer-events-none" : "")
+            }
           />
+          {listening && (
+            <div className="absolute inset-0 px-4 pt-3 pb-2 flex items-center gap-3 pointer-events-none">
+              <span
+                className="inline-flex items-center gap-1.5 text-[11px] font-medium text-accent shrink-0"
+                aria-live="polite"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+                Aufnahme läuft
+              </span>
+              <canvas
+                ref={canvasRef}
+                className="flex-1 h-6"
+                aria-hidden="true"
+              />
+            </div>
+          )}
         </div>
 
         {showSettings && (
@@ -620,18 +723,18 @@ export function Composer({
               <button
                 type="button"
                 onClick={toggleMic}
-                disabled={transcribing}
+                disabled={transcribing || listening}
                 className={
                   ICON_BTN +
                   " !w-7 !pr-1" +
-                  (listening ? " text-accent bg-bg-hover animate-pulse" : "") +
+                  (listening ? " text-accent" : "") +
                   (transcribing ? " opacity-50 cursor-wait animate-pulse" : "")
                 }
                 title={
                   transcribing
                     ? "Transkribiere…"
                     : listening
-                    ? "Spracheingabe stoppen"
+                    ? "Aufnahme läuft – mit Stop-Button beenden"
                     : "Spracheingabe starten"
                 }
                 aria-pressed={listening}
@@ -701,13 +804,28 @@ export function Composer({
                 layout shift. Visibility + the pop-in are driven by Tailwind
                 transitions on opacity and scale. */}
             {(() => {
-              const visible = streaming || !!value.trim();
-              const stopMode = streaming;
+              // Single button slot, four modes:
+              //   listening    → stop icon, click stops mic recording
+              //   streaming    → stop icon, click stops generation
+              //   transcribing → hidden (waiting for STT roundtrip)
+              //   has-value    → send icon, submits form
+              const stopMode = streaming || listening;
+              const visible = !transcribing && (stopMode || !!value.trim());
+              const onClick = listening
+                ? stopMic
+                : streaming
+                ? onStop
+                : undefined;
+              const title = listening
+                ? "Aufnahme stoppen"
+                : streaming
+                ? "Generierung stoppen"
+                : "Senden";
               return (
                 <button
                   type={stopMode ? "button" : "submit"}
-                  onClick={stopMode ? onStop : undefined}
-                  title={stopMode ? "Generierung stoppen" : "Senden"}
+                  onClick={onClick}
+                  title={title}
                   aria-hidden={visible ? undefined : true}
                   tabIndex={visible ? 0 : -1}
                   className={
