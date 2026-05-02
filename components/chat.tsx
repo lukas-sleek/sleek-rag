@@ -456,17 +456,22 @@ export function Composer({
       c.clearRect(0, 0, cssW, cssH);
 
       a.getByteTimeDomainData(buf);
-      // 48 vertical bars, height = local RMS amplitude.
-      const bars = 48;
+      // Apple-style: thin rounded lines, more pillars, generous gap.
+      // At silence the min height equals the stroke width so each bar
+      // collapses to a perfect dot.
+      const stroke = 2;
+      const gap = 5;
+      const bars = Math.max(12, Math.floor((cssW + gap) / (stroke + gap)));
       const slice = Math.floor(buf.length / bars);
-      const gap = 3;
-      const barW = (cssW - gap * (bars - 1)) / bars;
+      const totalW = bars * stroke + (bars - 1) * gap;
+      const startX = (cssW - totalW) / 2;
       const mid = cssH / 2;
-      // Read accent color from CSS variable so the waveform matches theme.
       const accent =
         getComputedStyle(document.documentElement).getPropertyValue("--accent") ||
         "#ff8a3d";
-      c.fillStyle = accent.trim();
+      c.strokeStyle = accent.trim();
+      c.lineWidth = stroke;
+      c.lineCap = "round";
       for (let i = 0; i < bars; i++) {
         let sumSq = 0;
         for (let j = 0; j < slice; j++) {
@@ -474,9 +479,12 @@ export function Composer({
           sumSq += v * v;
         }
         const rms = Math.sqrt(sumSq / slice);
-        const h = Math.max(2, Math.min(cssH - 2, rms * cssH * 3.2));
-        const x = i * (barW + gap);
-        c.fillRect(x, mid - h / 2, barW, h);
+        const h = Math.max(0, Math.min(cssH - stroke, rms * cssH * 3.2));
+        const x = startX + i * (stroke + gap) + stroke / 2;
+        c.beginPath();
+        c.moveTo(x, mid - h / 2);
+        c.lineTo(x, mid + h / 2);
+        c.stroke();
       }
       rafRef.current = requestAnimationFrame(draw);
     };
