@@ -136,12 +136,8 @@ def _extract_web_citations(text: str) -> list[dict]:
             "filename": title or domain,
             "uri": url,
             "file_id": None,
-            "page_start": None,
-            "page_end": None,
-            "figure_label": None,
-            "image_path": None,
             "score": None,
-            "snippet": title[:200] if title else url[:200],
+            "snippet": title or url,
         })
     return out
 

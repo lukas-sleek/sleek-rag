@@ -170,8 +170,8 @@ async def test_basic_stream_emits_delta_meta_done(monkeypatch, chat_stub):
     monkeypatch.setattr(chats_module, "supabase", lambda: sb)
 
     citations = [
-        {"idx": 1, "uri": "gs://a", "page_start": 1, "snippet": "a"},
-        {"idx": 2, "uri": "gs://b", "page_start": 2, "snippet": "b"},
+        {"idx": 1, "kind": "file", "file_id": "f1", "chunk_id": "c1", "snippet": "a"},
+        {"idx": 2, "kind": "file", "file_id": "f2", "chunk_id": "c2", "snippet": "b"},
     ]
     fake_app = _FakeApp(
         events=[_model_text("Antwort[1] und[2].")],
@@ -302,9 +302,9 @@ async def test_citations_dedupe_renumbers_refs(monkeypatch, chat_stub):
     monkeypatch.setattr(chats_module, "supabase", lambda: sb)
 
     citations = [
-        {"idx": 1, "uri": "gs://a", "page_start": 1, "snippet": "alpha"},
-        {"idx": 2, "uri": "gs://b", "page_start": 2, "snippet": "bravo"},
-        {"idx": 3, "uri": "gs://a", "page_start": 1, "snippet": "alpha"},  # dup
+        {"idx": 1, "kind": "file", "file_id": "f1", "chunk_id": "c1", "snippet": "alpha"},
+        {"idx": 2, "kind": "file", "file_id": "f2", "chunk_id": "c2", "snippet": "bravo"},
+        {"idx": 3, "kind": "file", "file_id": "f1", "chunk_id": "c1", "snippet": "alpha"},  # dup
     ]
     fake_app = _FakeApp(
         events=[_model_text("X[1] Y[2] Z[3].")],

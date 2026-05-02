@@ -12,7 +12,6 @@ def test_rag_specialist_instruction_contains_required_clauses():
         "ROLLEN-FRAGEN",
         "HONESTY",
         "ZITATION",
-        "SEITEN-NULL",
     ]:
         assert clause in RAG_SPECIALIST_INSTRUCTION, f"missing clause: {clause}"
 
@@ -38,7 +37,7 @@ def test_chat_orchestrator_instruction_contains_required_clauses():
         "COMPOUND-FOLGEFRAGE",
         "WIEDERHOLTE 'NICHT ANGEGEBEN'",
         "NO-V2-ESCALATION",
-        "ohne Umlaute",
+        "ASCII-Spelling",
     ]:
         assert clause in CHAT_ORCHESTRATOR_INSTRUCTION, f"missing clause: {clause}"
 

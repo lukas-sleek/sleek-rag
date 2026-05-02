@@ -6,7 +6,6 @@ import { Icon } from "./icons";
 import type { Citation, Message as Msg } from "./fixtures";
 import { CitationChip } from "./citation-chip";
 import { AgentActivity } from "./agent-activity";
-import { createClient } from "@/lib/supabase/client";
 
 const MD_PROSE =
   "text-[14.5px] leading-[1.65] text-text break-words " +
@@ -31,48 +30,6 @@ const SUGGESTIONS = [
   { title: "Projektanalyse erstellen", desc: "Strukturierte Auswertung über alle Dokumente (file_search)" },
   { title: "Projektanalyse v2 erstellen", desc: "Volltext-Analyse — Dokumente komplett im Modell-Kontext" },
 ];
-
-function FigureThumb({
-  citation,
-  onOpen,
-}: {
-  citation: Citation;
-  onOpen: () => void;
-}) {
-  const [url, setUrl] = React.useState<string | null>(null);
-  React.useEffect(() => {
-    if (!citation.image_path) return;
-    let cancelled = false;
-    const supabase = createClient();
-    supabase.storage
-      .from("chunk-images")
-      .createSignedUrl(citation.image_path, 600)
-      .then(({ data }) => {
-        if (cancelled) return;
-        setUrl(data?.signedUrl ?? null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [citation.image_path]);
-  if (!url) return null;
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="block mt-3 rounded-[10px] overflow-hidden border border-border bg-bg-elevated cursor-pointer transition-[border-color,box-shadow] duration-150 hover:border-border-strong hover:shadow-[0_0_0_3px_color-mix(in_oklch,var(--accent)_18%,transparent)]"
-    >
-      <img
-        src={url}
-        alt={citation.figure_label ?? "Figure"}
-        className="block max-w-md max-h-80 object-contain bg-[#1a1a1a]"
-      />
-      <div className="text-[11px] text-text-tertiary px-2 py-1.5 text-left border-t border-border">
-        {citation.figure_label ?? "Figure"} · {citation.filename} p.{citation.page_start}
-      </div>
-    </button>
-  );
-}
 
 function linkifyCitations(text: string, citations: Citation[]): string {
   return text.replace(/\[(\d+)\]/g, (m, n) => {
@@ -152,17 +109,6 @@ export function Message({
     const linked = oldToNew.size ? linkifyCitations(rewritten, visible) : rewritten;
     return { visibleCitations: visible, renderedContent: linked };
   }, [msg.content, citations]);
-  // De-dup figure thumbs by image_path. Cap at 3 so a chunky retrieval
-  // set doesn't blow up the message height. Only includes figures the
-  // model actually cited.
-  const figureCitations: Citation[] = [];
-  const seenImage = new Set<string>();
-  for (const c of visibleCitations) {
-    if (!c.image_path || seenImage.has(c.image_path)) continue;
-    seenImage.add(c.image_path);
-    figureCitations.push(c);
-    if (figureCitations.length >= 3) break;
-  }
   return (
     <div className="group flex flex-col items-stretch">
       {msg.traces && msg.traces.length > 0 && (
@@ -220,23 +166,6 @@ export function Message({
           {renderedContent}
         </ReactMarkdown>
       </div>
-      {figureCitations.length > 0 && (
-        <details className="mt-3 group/figs">
-          <summary className="cursor-pointer text-[12px] text-text-tertiary hover:text-text-secondary list-none [&::-webkit-details-marker]:hidden inline-flex items-center gap-1.5 select-none">
-            <span className="transition-transform duration-150 group-open/figs:rotate-90">›</span>
-            Bilder anzeigen ({figureCitations.length})
-          </summary>
-          <div className="flex flex-wrap gap-3 mt-2">
-            {figureCitations.map((c) => (
-              <FigureThumb
-                key={c.chunk_id}
-                citation={c}
-                onOpen={() => onCiteClick?.(c)}
-              />
-            ))}
-          </div>
-        </details>
-      )}
       {visibleCitations.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-3">
           {visibleCitations.map((c, i) => (

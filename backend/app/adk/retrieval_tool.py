@@ -1,85 +1,64 @@
-"""Custom FunctionTool that retrieves chunks from a per-project Vertex RAG corpus.
+"""FunctionTool that retrieves chunks from a per-project Vertex RAG corpus.
 
-Plan 19.0 T2.
+Plan 20.0 — serverless mode in us-central1.
 
-Pivot away from the originally planned VertexAiRagRetrieval subclass:
-T0 probe 2 verified that the managed tool's process_llm_request always
-registers a server-side Tool(retrieval=...) for Gemini 2.x — run_async
-is never called, so an override is dead code. Instead we declare a plain
-FunctionTool whose async callable:
-  1. Calls rag.retrieval_query (sync wrapper, dispatched to a thread).
-     We use the high-level `retrieval_query` rather than the lower-level
-     `async_retrieve_contexts` because the canonical Vertex docs example
-     uses retrieval_query, and async_retrieve_contexts has an
-     under-documented proto shape that returned `InvalidArgument` in
-     live testing.
-  2. Builds structured per-chunk records with regex-extracted page +
-     figure metadata.
-  3. Writes the records into tool_context.state["citations"] for the
-     post-run aggregator in chats.py to dedupe + renumber.
-  4. Returns a structured dict to the LLM so it can place [N] markers
-     and reason about which file/page the chunk came from.
-
-The corpus is closed over by the factory — one FunctionTool per cached
-AdkApp.
+Retrieval response on serverless does NOT carry page spans, headings, or
+figure metadata; `source_uri` is a Vertex temp-bucket URI (useless for
+mapping back to our GCS layout) and `source_display_name` is empty.
+The friendly filename comes from `chunk.file_id` -> RagFile.display_name
+via list_rag_files (cached).
 """
+from __future__ import annotations
+
 import asyncio
 import logging
-import re
+import time
 from typing import Any
 
 from google.adk.tools import FunctionTool, ToolContext
 
-# No `from __future__ import annotations` here: ADK's tool-declaration
-# builder evaluates parameter annotations via `typing.get_type_hints`,
-# which fails on stringised forwards refs that reference ADK's own
-# ToolContext. Keeping the annotation as a real type makes registration
-# work end-to-end.
 from langsmith import traceable
 from vertexai.preview import rag
 
+from app.rag_corpus import _init_vertex_for
+
 log = logging.getLogger(__name__)
 
-
-# Boundary regex — operates on parser output ([Seite N] / [Abb. N: ...]
-# markers injected by the LLM Parser during ingestion). Never applied to
-# the LLM's answer prose.
-_PAGE_RE = re.compile(r"\[Seite\s+(\d+)\]")
-_FIGURE_RE = re.compile(r"\[Abb\.?\s*(\d+(?:\.\d+)*)\s*:\s*([^\]]+)\]")
-
-# GCS layout per gcs.py: gs://{bucket}/{user_id}/{project_id}/{file_id}/{name}.pdf
-# project_id is the 3rd slash-separated segment, file_id the 4th.
-_GCS_URI_RE = re.compile(
-    r"^gs://[^/]+/[^/]+/(?P<project_id>[0-9a-fA-F-]{36})/(?P<file_id>[0-9a-fA-F-]{36})/"
-)
-
 _DEFAULT_TOP_K = 10
+_LIST_FILES_TTL_SEC = 60.0
+
+# corpus_name -> (expires_at_epoch, {file_id: display_name})
+_filename_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
 
-def _ids_from_uri(uri: str | None) -> tuple[str | None, str | None]:
-    """Return (project_id, file_id) parsed from the canonical GCS URI shape,
-    or (None, None) if the URI doesn't match (legacy rows / non-GCS paths).
-    """
-    if not uri:
-        return None, None
-    m = _GCS_URI_RE.match(uri)
-    if not m:
-        return None, None
-    return m.group("project_id"), m.group("file_id")
+def _file_id_from_chunk(chunk_obj) -> str | None:
+    """Extract the numeric file_id from a retrieval chunk."""
+    if chunk_obj is None:
+        return None
+    fid = getattr(chunk_obj, "file_id", None)
+    return str(fid) if fid else None
+
+
+def _filename_map(corpus_name: str, *, force_refresh: bool = False) -> dict[str, str]:
+    """Return {file_id: display_name} for the corpus. 60s in-process cache."""
+    now = time.time()
+    cached = _filename_cache.get(corpus_name)
+    if cached and not force_refresh and cached[0] > now:
+        return cached[1]
+    out: dict[str, str] = {}
+    try:
+        for f in rag.list_files(corpus_name):
+            file_id = f.name.rsplit("/", 1)[-1]
+            out[file_id] = f.display_name or ""
+    except Exception:
+        log.exception("list_files failed for corpus %s", corpus_name)
+        # fall through with empty map; chunks will render with file_id as label
+    _filename_cache[corpus_name] = (now + _LIST_FILES_TTL_SEC, out)
+    return out
 
 
 @traceable(run_type="retriever", name="search_project_documents")
-def _retrieve_sync(
-    *, query: str, corpus_name: str, top_k: int
-) -> Any:
-    """Inner helper: pure sync Vertex RAG retrieval, traced via langsmith.
-
-    Kept separate from the FunctionTool callable because @traceable widens
-    the wrapped function's signature with `config` / `langsmith_extra`
-    kwargs. ADK's _get_declaration() inspects the FunctionTool's func and
-    rejects the resulting schema. By doing the langsmith wrap on this
-    inner helper, ADK only sees the clean outer signature.
-    """
+def _retrieve_sync(*, query: str, corpus_name: str, top_k: int) -> Any:
     return rag.retrieval_query(
         text=query,
         rag_resources=[rag.RagResource(rag_corpus=corpus_name)],
@@ -92,11 +71,7 @@ def make_search_project_documents_tool(
     *,
     top_k: int = _DEFAULT_TOP_K,
 ) -> FunctionTool:
-    """Build a per-corpus search_project_documents FunctionTool.
-
-    The returned tool exposes a single argument query: str to the LLM and
-    yields chunks plus side-channel citations (in tool_context.state).
-    """
+    """Build a per-corpus search_project_documents FunctionTool."""
 
     async def search_project_documents(
         query: str, tool_context: ToolContext
@@ -109,16 +84,17 @@ def make_search_project_documents_tool(
                 already be resolved by the caller.
 
         Returns:
-            On hit: {"status": "ok", "chunks": [{"idx", "filename",
-            "page_start", "page_end", "text"}, ...]}.
+            On hit: {"status": "ok", "chunks": [{"idx", "filename", "text"}, ...]}.
             On miss: {"status": "no_results", "chunks": []}.
-            The LLM places [idx] markers inline in its answer; the
-            aggregator in chats.py renumbers them globally after the run.
+            The LLM places [idx] markers inline; the aggregator in chats.py
+            renumbers them globally after the run.
         """
         log.info(
             "search_project_documents: corpus=%s top_k=%s query=%r",
             corpus_name, top_k, query[:120],
         )
+        # Re-init Vertex at the corpus's region (legacy EU corpora work).
+        await asyncio.to_thread(_init_vertex_for, corpus_name)
         try:
             response = await asyncio.to_thread(
                 _retrieve_sync,
@@ -137,50 +113,41 @@ def make_search_project_documents_tool(
         if not contexts:
             return {"status": "no_results", "chunks": []}
 
-        # Per-turn citation index. The aggregator in chats.py renumbers
-        # globally after the run (handles dedup across multiple
-        # rag_specialist calls in one orchestrator turn).
+        # Build file_id -> display_name map. If a chunk's file_id misses,
+        # bypass the cache once to pick up newly-imported files.
+        names = await asyncio.to_thread(_filename_map, corpus_name)
+        unknown = {
+            _file_id_from_chunk(ctx.chunk)
+            for ctx in contexts
+            if _file_id_from_chunk(ctx.chunk) and _file_id_from_chunk(ctx.chunk) not in names
+        }
+        if unknown:
+            names = await asyncio.to_thread(_filename_map, corpus_name, force_refresh=True)
+
         citations: list[dict] = tool_context.state.setdefault("citations", [])
         next_idx = len(citations) + 1
 
         out_chunks: list[dict] = []
         for ctx in contexts:
             text = ctx.text or ""
-            pages = [int(m.group(1)) for m in _PAGE_RE.finditer(text)]
-            fig = _FIGURE_RE.search(text)
-
-            uri = getattr(ctx, "source_uri", None)
-            project_id, file_id = _ids_from_uri(uri)
-            page_start = pages[0] if pages else None
+            file_id = _file_id_from_chunk(ctx.chunk)
+            chunk_id = str(getattr(ctx.chunk, "chunk_id", "")) if ctx.chunk else ""
+            filename = names.get(file_id or "", "") or file_id or "Dokument"
             record = {
                 "idx": next_idx,
                 "kind": "file",
-                "uri": uri,
-                "project_id": project_id,
-                "file_id": file_id,
-                # chunk_id is the frontend's dedup key; synthesise from
-                # file_id+page+score so identical chunks pulled by two
-                # rag_specialist calls collapse to one chip.
-                "chunk_id": f"{file_id or uri}:{page_start}:{next_idx}",
-                "filename": getattr(ctx, "source_display_name", None)
-                or getattr(ctx, "source_uri", None),
-                "page_start": page_start,
-                "page_end": pages[-1] if pages else None,
-                "figure_label": f"Abb. {fig.group(1)}" if fig else None,
-                "image_path": None,
+                "filename": filename,
+                "snippet": text,
                 "score": getattr(ctx, "score", None),
-                "snippet": text.strip()[:200],
+                "chunk_id": chunk_id or f"{file_id}:{next_idx}",
+                "file_id": file_id,
             }
             citations.append(record)
-            out_chunks.append(
-                {
-                    "idx": next_idx,
-                    "filename": record["filename"],
-                    "page_start": record["page_start"],
-                    "page_end": record["page_end"],
-                    "text": text,
-                }
-            )
+            out_chunks.append({
+                "idx": next_idx,
+                "filename": filename,
+                "text": text,
+            })
             next_idx += 1
 
         return {"status": "ok", "chunks": out_chunks}

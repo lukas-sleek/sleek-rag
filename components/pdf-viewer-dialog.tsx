@@ -19,9 +19,10 @@ export function PdfViewerDialog({
     let cancelled = false;
     setUrl(null);
     setError(null);
-    // PDFs live in GCS now (plan 18.2). Backend mints a V4 signed URL via
+    // PDFs live in GCS. Backend mints a V4 signed URL via
     // /api/projects/{project_id}/files/{file_id}/signed-url; the dialog
-    // iframes it with #page=N when a page anchor is available.
+    // iframes it. Page anchors are gone — Vertex serverless retrieval
+    // doesn't return page spans, so the viewer always opens at page 1.
     if (!citation.project_id || !citation.file_id) {
       setError("Quelle nicht gefunden");
       return;
@@ -42,8 +43,7 @@ export function PdfViewerDialog({
           setError("Datei kann nicht geladen werden");
           return;
         }
-        const anchor = citation.page_start ? `#page=${citation.page_start}` : "";
-        setUrl(`${body.url}${anchor}`);
+        setUrl(body.url);
       } catch {
         if (!cancelled) setError("Datei kann nicht geladen werden");
       }
@@ -64,11 +64,6 @@ export function PdfViewerDialog({
 
   if (!citation) return null;
 
-  const pageLabel =
-    citation.page_start === citation.page_end
-      ? `p.${citation.page_start}`
-      : `p.${citation.page_start}-${citation.page_end}`;
-
   return (
     <div
       className="fixed inset-0 bg-black/60 flex items-center justify-center z-[200] p-6 animate-[pf-fade_.15s_ease-out]"
@@ -82,10 +77,6 @@ export function PdfViewerDialog({
           <div className="flex-1 min-w-0">
             <div className="text-sm font-medium text-text whitespace-nowrap overflow-hidden text-ellipsis">
               {citation.filename}
-            </div>
-            <div className="text-xs text-text-tertiary mt-0.5">
-              {pageLabel}
-              {citation.figure_label && ` · ${citation.figure_label}`}
             </div>
           </div>
           <button

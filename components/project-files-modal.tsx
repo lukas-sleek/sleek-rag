@@ -323,10 +323,7 @@ export function ProjectFilesModal({
                         {(() => {
                           if (file.status === "failed") return "Fehlgeschlagen";
                           if (file.status === "complete") {
-                            const c = file.chunkCount;
-                            return c
-                              ? `${c} ${c === 1 ? "Chunk" : "Chunks"} indiziert`
-                              : `${file.size} · ${file.pages} ${file.pages === 1 ? "Seite" : "Seiten"}`;
+                            return `${file.size} · ${file.pages} ${file.pages === 1 ? "Seite" : "Seiten"}`;
                           }
                           switch (file.ingestStatus) {
                             case "uploading":
@@ -382,9 +379,6 @@ export function ProjectFilesModal({
                     <div className="text-xs text-text-tertiary mt-0.5">
                       {FILE_TYPE[selected.type].label} · {selected.size} · {selected.pages}{" "}
                       {selected.pages === 1 ? "Seite" : "Seiten"}
-                      {selected.chunkCount != null && (
-                        <> · {selected.chunkCount} {selected.chunkCount === 1 ? "Chunk" : "Chunks"}</>
-                      )}
                     </div>
                   </div>
                   {onPreview && selected.type === "pdf" && (
@@ -555,14 +549,6 @@ export function ProjectFilesModal({
   );
 }
 
-const BLOCK_LABEL: Record<string, string> = {
-  paragraph: "Textblöcke",
-  figure: "Abbildungen",
-  table: "Tabellen",
-  heading: "Überschriften",
-  list_item: "Listenpunkte",
-};
-
 function formatBytes(bytes: number | null | undefined) {
   if (bytes == null) return "—";
   if (bytes < 1024) return `${bytes} B`;
@@ -581,67 +567,12 @@ function formatDate(iso: string | null | undefined) {
   });
 }
 
-function FigureThumbnail({
-  storagePath,
-  label,
-  page,
-}: {
-  storagePath: string;
-  label: string;
-  page: number;
-}) {
-  const [url, setUrl] = React.useState<string | null>(null);
-  React.useEffect(() => {
-    let cancelled = false;
-    const supabase = createClient();
-    supabase.storage
-      .from("chunk-images")
-      .createSignedUrl(storagePath, 600)
-      .then(({ data }) => {
-        if (cancelled) return;
-        setUrl(data?.signedUrl ?? null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [storagePath]);
-  return (
-    <div className="rounded-[8px] overflow-hidden border border-border bg-bg-elevated">
-      <div className="aspect-[4/3] bg-[#1a1a1a] flex items-center justify-center">
-        {url ? (
-          <img src={url} alt={label} className="max-w-full max-h-full object-contain" />
-        ) : (
-          <Icon.FileImage />
-        )}
-      </div>
-      <div className="text-[10.5px] text-text-tertiary px-2 py-1.5 border-t border-border whitespace-nowrap overflow-hidden text-ellipsis">
-        Abbildung, S. {page}
-      </div>
-    </div>
-  );
-}
-
 function FileDetailView({ detail }: { detail: FileDetail }) {
   const stats: { label: string; value: string }[] = [
     { label: "Seiten", value: detail.page_count != null ? String(detail.page_count) : "—" },
-    { label: "Chunks", value: detail.chunk_count != null ? String(detail.chunk_count) : "—" },
-    {
-      label: "Abbildungen",
-      value: String(detail.block_breakdown.figure ?? 0),
-    },
-    {
-      label: "Tabellen",
-      value: String(detail.block_breakdown.table ?? 0),
-    },
     { label: "Größe", value: formatBytes(detail.size_bytes) },
     { label: "Hochgeladen", value: formatDate(detail.created_at) },
   ];
-
-  const breakdownEntries = Object.entries(detail.block_breakdown)
-    .filter(([, n]) => n > 0)
-    .sort((a, b) => b[1] - a[1]);
-  const totalBlocks = breakdownEntries.reduce((sum, [, n]) => sum + n, 0);
-  const figuresWithImages = detail.figures.filter((f) => f.storage_path);
 
   return (
     <>
@@ -649,94 +580,13 @@ function FileDetailView({ detail }: { detail: FileDetail }) {
         {stats.map((s) => (
           <div
             key={s.label}
-            className="px-4 py-2.5 border-r border-b border-border [&:nth-child(3n)]:border-r-0 [&:nth-child(n+4)]:border-b-0"
+            className="px-4 py-2.5 border-r border-border last:border-r-0"
           >
             <div className="text-[10px] text-text-tertiary tracking-[0.04em]">{s.label}</div>
             <div className="text-sm font-semibold text-text tabular-nums mt-0.5">{s.value}</div>
           </div>
         ))}
       </div>
-
-      {breakdownEntries.length > 0 && (
-        <div className="px-5 py-3.5 border-b border-border">
-          <div className="text-[11px] font-medium text-text-tertiary mb-2">
-            Struktur ({totalBlocks} Blöcke)
-          </div>
-          <div className="flex h-2 rounded-full overflow-hidden bg-bg-elevated">
-            {breakdownEntries.map(([type, n]) => {
-              const pct = (n / totalBlocks) * 100;
-              const color =
-                type === "figure" ? "#f59e0b"
-                : type === "table" ? "#10b981"
-                : type === "heading" ? "#8b5cf6"
-                : type === "list_item" ? "#3b82f6"
-                : "#6b7280";
-              return (
-                <div
-                  key={type}
-                  style={{ width: `${pct}%`, background: color }}
-                  title={`${BLOCK_LABEL[type] || type}: ${n}`}
-                />
-              );
-            })}
-          </div>
-          <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2">
-            {breakdownEntries.map(([type, n]) => {
-              const color =
-                type === "figure" ? "#f59e0b"
-                : type === "table" ? "#10b981"
-                : type === "heading" ? "#8b5cf6"
-                : type === "list_item" ? "#3b82f6"
-                : "#6b7280";
-              return (
-                <span key={type} className="inline-flex items-center gap-1.5 text-[11px] text-text-secondary">
-                  <span className="w-2 h-2 rounded-full" style={{ background: color }} />
-                  {BLOCK_LABEL[type] || type}
-                  <span className="text-text-tertiary tabular-nums">{n}</span>
-                </span>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {detail.outline.length > 0 && (
-        <div className="px-5 py-3.5 border-b border-border">
-          <div className="text-[11px] font-medium text-text-tertiary mb-2">
-            Gliederung ({detail.outline.length})
-          </div>
-          <ul className="m-0 list-none p-0 flex flex-col gap-1">
-            {detail.outline.map((h, i) => (
-              <li
-                key={i}
-                className="text-[12.5px] text-text leading-[1.5] whitespace-nowrap overflow-hidden text-ellipsis"
-                title={h}
-              >
-                <span className="text-text-tertiary tabular-nums mr-2">{(i + 1).toString().padStart(2, "0")}</span>
-                {h}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {figuresWithImages.length > 0 && (
-        <div className="px-5 py-3.5 border-b border-border">
-          <div className="text-[11px] font-medium text-text-tertiary mb-2">
-            Abbildungen ({figuresWithImages.length})
-          </div>
-          <div className="grid grid-cols-3 gap-2">
-            {figuresWithImages.map((f) => (
-              <FigureThumbnail
-                key={f.chunk_id}
-                storagePath={f.storage_path!}
-                label={f.caption || f.figure_label || "Abbildung"}
-                page={f.page_start}
-              />
-            ))}
-          </div>
-        </div>
-      )}
 
       {detail.mime_type && (
         <div className="px-5 py-3 border-b border-border flex items-center justify-between">

@@ -45,11 +45,7 @@ export type Citation = {
   project_id?: string | null;
   file_id?: string | null;
   filename: string;
-  page_start: number | null;
-  page_end: number | null;
   snippet: string;
-  figure_label: string | null;
-  image_path: string | null;
   score: number | null;
   // web fields (only present when kind === "web")
   url?: string | null;
@@ -108,27 +104,15 @@ export type FileAnalysis = {
   recommendations?: string[];
 };
 
-export type FileFigure = {
-  chunk_id: string;
-  figure_label: string | null;
-  page_start: number;
-  caption: string | null;
-  storage_path: string | null;
-};
-
 export type FileDetail = {
   id: string;
   filename: string;
   size_bytes: number | null;
   mime_type: string | null;
   page_count: number | null;
-  chunk_count: number | null;
   status: string;
   ingest_error: string | null;
   created_at: string | null;
-  block_breakdown: Record<string, number>;
-  outline: string[];
-  figures: FileFigure[];
 };
 
 export type FileItem = {
@@ -139,10 +123,9 @@ export type FileItem = {
   pages: number;
   status: "complete" | "analyzing" | "failed";
   // Raw backend status — drives the granular label in the file modal.
-  // 'uploading' | 'parsing' | 'embedding' | 'ready' | 'failed' for new files;
-  // 'pending' | 'indexed' | 'failed' for legacy OpenAI files.
+  // 'queued' | 'parsing' | 'ready' | 'failed' for new files;
+  // 'pending' | 'indexed' for legacy rows.
   ingestStatus?: string;
-  chunkCount?: number;
   ingestError?: string | null;
   analysis: FileAnalysis | null;
 };

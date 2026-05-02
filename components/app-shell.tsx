@@ -439,7 +439,6 @@ export function App() {
           ...list[idx],
           status: ready ? "complete" : failed ? "failed" : "analyzing",
           ingestStatus: row.status,
-          chunkCount: row.chunk_count ?? list[idx].chunkCount,
           ingestError: row.ingest_error ?? null,
         };
         const next = [...list];
@@ -490,7 +489,6 @@ export function App() {
       pages: row.page_count ?? 1,
       status: ready ? "complete" : failed ? "failed" : "analyzing",
       ingestStatus: row.status,
-      chunkCount: row.chunk_count ?? undefined,
       ingestError: row.ingest_error ?? null,
       analysis: null,
     };
@@ -1434,11 +1432,7 @@ export function App() {
               chunk_id: `preview-${file.id}`,
               file_id: file.id,
               filename: file.name,
-              page_start: 1,
-              page_end: 1,
               snippet: "",
-              figure_label: null,
-              image_path: null,
               score: 0,
             })
           }

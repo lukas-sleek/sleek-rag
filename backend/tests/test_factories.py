@@ -16,6 +16,13 @@ class _ToolCtx:
         self.state = {}
 
 
+@pytest.fixture(autouse=True)
+def _stub_init_vertex(monkeypatch):
+    monkeypatch.setattr(retrieval_tool, "_init_vertex_for", lambda *_a, **_k: "us-central1")
+    monkeypatch.setattr(retrieval_tool.rag, "list_files", lambda _c: [])
+    retrieval_tool._filename_cache.clear()
+
+
 @pytest.mark.asyncio
 async def test_document_retriever_binds_corpus(monkeypatch):
     seen = []

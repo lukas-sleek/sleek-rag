@@ -90,15 +90,21 @@ def test_delete_project_without_corpus_skips_corpus_call(client, fake_supabase, 
     delete_prefix.assert_called_once()
 
 
-def test_delete_project_continues_when_corpus_delete_fails(
+def test_delete_project_fails_loudly_when_corpus_delete_fails(
     client, fake_supabase, monkeypatch
 ):
-    monkeypatch.setattr(
-        projects_router,
-        "delete_corpus",
-        MagicMock(side_effect=RuntimeError("boom")),
-    )
-    monkeypatch.setattr(projects_router, "delete_prefix", MagicMock(return_value=0))
+    """No try/except: a real corpus delete failure surfaces as 500 instead
+    of orphaning a corpus and silently dropping the project row."""
+    delete_corpus = MagicMock(side_effect=RuntimeError("boom"))
+    delete_prefix = MagicMock(return_value=0)
+    monkeypatch.setattr(projects_router, "delete_corpus", delete_corpus)
+    monkeypatch.setattr(projects_router, "delete_prefix", delete_prefix)
 
-    res = client.delete("/api/projects/proj-1")
-    assert res.status_code == 200
+    with pytest.raises(RuntimeError, match="boom"):
+        client.delete("/api/projects/proj-1")
+
+    delete_corpus.assert_called_once()
+    # GCS + DB delete must NOT run when corpus delete fails.
+    delete_prefix.assert_not_called()
+    modes = [m for _, m in fake_supabase["calls"]]
+    assert modes == ["select"]

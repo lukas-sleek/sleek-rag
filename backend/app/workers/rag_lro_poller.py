@@ -1,86 +1,96 @@
-"""Drives rag.import_files LROs end-to-end.
+"""Drives Vertex RAG folder-import LROs end-to-end.
+
+Plan 20.0: serverless mode in us-central1. One folder import per
+(corpus, project, user) — Vertex recurses the project folder
+`gs://{bucket}/{user}/{project}/` and ingests every file.
 
 Two responsibilities, both run on every tick:
 
 1. Dispatcher — for each project with rows in status='queued' AND no
-   in-flight LRO on its corpus, batch every queued GCS URI into a single
-   rag.import_files_async call. Vertex serialises operations per corpus,
-   so concurrent uploads MUST share an LRO instead of each firing one.
+   in-flight LRO on its corpus, fire ONE folder import covering every
+   queued file at once. Vertex serialises operations per corpus, so
+   concurrent uploads MUST share an LRO.
 
-2. Resolver — for each row in status='parsing', poll the LRO and flip
-   the status (ready / failed) when it resolves. When several rows share
-   one LRO, the resolver maps per-file partialFailures back to the right
-   row by GCS URI.
+2. Resolver — for each row in status='parsing':
+     * map the row's sanitized filename to a RagFile via list_rag_files
+       (display_name match — gcs_source.uris is empty under serverless)
+     * when the matching RagFile reports state=ACTIVE, flip the row
+       to ready and persist rag_file_name
+     * when the LRO completes with a hard error, mark every still-parsing
+       row in the batch as failed
+     * partial failures are mapped by display_name where possible
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import defaultdict
 
 from google.cloud.aiplatform_v1beta1.services.vertex_rag_data_service import (
     VertexRagDataServiceClient,
 )
+from google.cloud.aiplatform_v1beta1.types import ListRagFilesRequest
 from google.longrunning.operations_pb2 import GetOperationRequest
-from google.oauth2 import service_account
 
 from app.config import settings
 from app.db import supabase
-from app.rag_corpus import import_pdfs
+from app.gcs import sanitize_filename
+from app.rag_corpus import _credentials, _init_vertex_for, import_folder
 
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL_SEC = 15
 
-_client: VertexRagDataServiceClient | None = None
+_CORPUS_LOCATION_RE = re.compile(r"projects/[^/]+/locations/([^/]+)/ragCorpora/")
+_clients: dict[str, VertexRagDataServiceClient] = {}
 
 
-def _ops_client() -> VertexRagDataServiceClient:
-    """Regional Vertex RAG client used to resolve operation names. Cached."""
-    global _client
-    if _client is None:
-        creds = None
-        if settings.gcp_service_account_json_path:
-            creds = service_account.Credentials.from_service_account_file(
-                settings.gcp_service_account_json_path
-            )
-        endpoint = f"{settings.gcp_location}-aiplatform.googleapis.com"
-        _client = VertexRagDataServiceClient(
-            credentials=creds,
-            client_options={"api_endpoint": endpoint},
+def _ops_client(corpus_name: str) -> VertexRagDataServiceClient:
+    """Per-region GAPIC client. Cached so legacy EU corpora keep working."""
+    m = _CORPUS_LOCATION_RE.match(corpus_name or "")
+    location = m.group(1) if m else settings.gcp_location
+    client = _clients.get(location)
+    if client is None:
+        client = VertexRagDataServiceClient(
+            credentials=_credentials(),
+            client_options={
+                "api_endpoint": f"{location}-aiplatform.googleapis.com"
+            },
         )
-    return _client
+        _clients[location] = client
+    return client
 
 
-def _resolve_rag_file_name(corpus_name: str, gcs_uri: str) -> str | None:
-    """Find the RagFile resource imported from this gcs_uri.
+def _list_rag_files_by_display_name(corpus_name: str) -> dict[str, dict]:
+    """Return {display_name: {rag_file_name, state}} for the corpus.
 
-    Uses the GAPIC client directly (vertexai's rag.list_files wrapper drops
-    gcs_source from the returned RagFile, leaving only display_name — which
-    collides because Vertex sets display_name to the GCS basename and our
-    keys all end in either "original.pdf" or the sanitized filename).
+    Treats NotFound as empty — the corpus may have been deleted in Vertex
+    while a stale `projects.rag_corpus_name` still points at it. Logging
+    the full traceback every tick was noisy.
     """
+    from google.api_core.exceptions import NotFound
+
+    out: dict[str, dict] = {}
     try:
-        from google.cloud.aiplatform_v1beta1.types import ListRagFilesRequest
-        pager = _ops_client().list_rag_files(
+        pager = _ops_client(corpus_name).list_rag_files(
             ListRagFilesRequest(parent=corpus_name)
         )
         for f in pager:
-            uris = list(f.gcs_source.uris) if f.gcs_source else []
-            if gcs_uri in uris:
-                return f.name
+            out[f.display_name] = {
+                "rag_file_name": f.name,
+                "state": f.file_status.state.name,
+            }
+    except NotFound:
+        log.warning("list_rag_files: corpus %s does not exist (stale row?)", corpus_name)
     except Exception:
         log.exception("list_rag_files failed for corpus %s", corpus_name)
-    return None
+    return out
 
 
 def _proto_any_to_dict(any_msg) -> dict:
-    """Best-effort decode of a google.protobuf.Any holding a known JSON-able type."""
     try:
         from google.protobuf.json_format import MessageToDict
-        # Any messages can be unpacked when their type_url is known. For
-        # response/metadata we only need the JSON-like field map, so use
-        # MessageToDict on the wrapper which yields {'@type': ..., ...fields}.
         return MessageToDict(any_msg, preserving_proto_field_name=False)
     except Exception:
         return {}
@@ -90,28 +100,47 @@ def _row_corpus(row: dict) -> str | None:
     return row.get("rag_corpus_name") or (row.get("projects") or {}).get("rag_corpus_name")
 
 
-def _partial_failure_uris(meta: dict) -> set[str]:
-    """Extract GCS URIs from partialFailures messages.
+def _expected_display_name(row: dict) -> str:
+    """Match what Vertex assigns when importing from a GCS folder.
 
-    Vertex puts the offending URI into the failure message body
-    (e.g. "...processing gs://bucket/path/file.pdf"). We pattern-match it
-    out so multi-file LROs can mark only the failed rows as failed.
+    The Layout-Parser-imported RagFile's display_name is the GCS object's
+    basename, which is `sanitize_filename(row.filename)` (set at upload time
+    by app/gcs.object_key). Keep these in sync.
     """
-    uris: set[str] = set()
-    pfs = (meta.get("genericMetadata") or {}).get("partialFailures") or []
-    for f in pfs:
-        msg = f.get("message") or ""
-        for token in msg.split():
-            if token.startswith("gs://"):
-                # strip trailing punctuation a Vertex message might tack on
-                uris.add(token.rstrip(".,)\""))
-    return uris
+    return sanitize_filename(row.get("filename") or "")
 
 
 def _resolve_lro(op_name: str, rows_for_op: list[dict]) -> None:
-    """Resolve one LRO and update every row that shares its operation name."""
+    """Per-tick reconciliation for one LRO and the rows it covers."""
+    corpus_names = {_row_corpus(r) for r in rows_for_op if _row_corpus(r)}
+    if not corpus_names:
+        return
+    # All rows in one LRO share a corpus by construction (dispatcher groups
+    # by corpus). Pick any.
+    corpus_name = next(iter(corpus_names))
+
+    # 1. Per-file readiness — flip rows whose RagFile is already ACTIVE,
+    #    even before the LRO completes.
+    files_by_display = _list_rag_files_by_display_name(corpus_name)
+    still_parsing: list[dict] = []
+    for r in rows_for_op:
+        match = files_by_display.get(_expected_display_name(r))
+        if match and match["state"] == "ACTIVE":
+            supabase().table("project_files").update({
+                "status": "ready",
+                "ingest_lro_name": None,
+                "rag_file_name": match["rag_file_name"],
+            }).eq("id", r["id"]).execute()
+            log.info("file %s ingest ready: %s", r["id"], match["rag_file_name"])
+        else:
+            still_parsing.append(r)
+
+    if not still_parsing:
+        return
+
+    # 2. LRO terminal-state check for any rows still without an ACTIVE RagFile.
     try:
-        op = _ops_client().get_operation(GetOperationRequest(name=op_name))
+        op = _ops_client(corpus_name).get_operation(GetOperationRequest(name=op_name))
     except Exception:
         log.exception("get_operation failed for op=%s", op_name)
         return
@@ -119,10 +148,10 @@ def _resolve_lro(op_name: str, rows_for_op: list[dict]) -> None:
     if not op.done:
         return
 
-    # Hard error: every row in the batch fails with the same message.
+    # Hard error: every still-parsing row in the batch fails with the same message.
     if op.HasField("error") and op.error.code != 0:
         msg = (op.error.message or "import failed")[:500]
-        for r in rows_for_op:
+        for r in still_parsing:
             supabase().table("project_files").update({
                 "status": "failed",
                 "ingest_error": msg,
@@ -135,8 +164,6 @@ def _resolve_lro(op_name: str, rows_for_op: list[dict]) -> None:
     metadata_payload = _proto_any_to_dict(op.metadata) if op.HasField("metadata") else {}
     failed_count = int(response_payload.get("failedRagFilesCount", 0) or 0)
     imported_count = int(response_payload.get("importedRagFilesCount", 0) or 0)
-
-    failed_uris = _partial_failure_uris(metadata_payload)
     pfs = (metadata_payload.get("genericMetadata") or {}).get("partialFailures") or []
     fallback_msg = (
         (pfs[0].get("message") or "import failed")[:500]
@@ -144,53 +171,35 @@ def _resolve_lro(op_name: str, rows_for_op: list[dict]) -> None:
         else f"import failed: {failed_count} failed, {imported_count} imported"
     )
 
-    # If the LRO yielded zero imports AND we couldn't resolve which URIs failed,
-    # mark every row in the batch as failed — better than stranding them as
-    # parsing forever.
-    if imported_count == 0 and failed_count > 0 and not failed_uris:
-        for r in rows_for_op:
-            supabase().table("project_files").update({
-                "status": "failed",
-                "ingest_error": fallback_msg,
-                "ingest_lro_name": None,
-            }).eq("id", r["id"]).execute()
-        log.warning("LRO %s failed (all rows): %s", op_name, fallback_msg)
-        return
-
-    for r in rows_for_op:
-        gcs_uri = r.get("gcs_blob_path") or ""
-        corpus_name = _row_corpus(r)
-        if gcs_uri in failed_uris:
-            # Find the specific message for this URI, fall back to the first.
-            specific = next(
-                (f.get("message") for f in pfs if f.get("message") and gcs_uri in f["message"]),
-                fallback_msg,
-            )
-            supabase().table("project_files").update({
-                "status": "failed",
-                "ingest_error": (specific or fallback_msg)[:500],
-                "ingest_lro_name": None,
-            }).eq("id", r["id"]).execute()
-            log.warning("file %s ingest failed: %s", r["id"], specific)
-            continue
-
-        rag_file_name = (
-            _resolve_rag_file_name(corpus_name, gcs_uri)
-            if corpus_name and gcs_uri
-            else None
-        )
-        update = {"status": "ready", "ingest_lro_name": None}
-        if rag_file_name:
-            update["rag_file_name"] = rag_file_name
-        supabase().table("project_files").update(update).eq("id", r["id"]).execute()
-        log.info("file %s ingest ready: %s", r["id"], rag_file_name)
+    # If we couldn't match by display_name and the LRO is done, mark
+    # leftover rows failed — better than leaving them stuck on parsing.
+    for r in still_parsing:
+        expected = _expected_display_name(r)
+        # Try matching any partial-failure message against the row's
+        # display_name (Vertex sometimes embeds it in the failure text).
+        specific = None
+        for f in pfs:
+            msg = (f.get("message") or "")
+            if expected and expected in msg:
+                specific = msg
+                break
+        ingest_error = (specific or fallback_msg)[:500]
+        supabase().table("project_files").update({
+            "status": "failed",
+            "ingest_error": ingest_error,
+            "ingest_lro_name": None,
+        }).eq("id", r["id"]).execute()
+        log.warning("file %s ingest failed: %s", r["id"], ingest_error)
 
 
 def _claim_in_flight_rows() -> list[dict]:
     res = (
         supabase()
         .table("project_files")
-        .select("id,ingest_lro_name,gcs_blob_path,project_id,projects(rag_corpus_name)")
+        .select(
+            "id,ingest_lro_name,filename,user_id,project_id,"
+            "projects(rag_corpus_name)"
+        )
         .eq("status", "parsing")
         .not_.is_("ingest_lro_name", "null")
         .execute()
@@ -202,7 +211,9 @@ def _claim_queued_rows() -> list[dict]:
     res = (
         supabase()
         .table("project_files")
-        .select("id,gcs_blob_path,project_id,projects(rag_corpus_name)")
+        .select(
+            "id,filename,user_id,project_id,projects(rag_corpus_name)"
+        )
         .eq("status", "queued")
         .execute()
     )
@@ -223,26 +234,33 @@ def _resolve_step() -> None:
 
 
 async def _dispatch_step() -> None:
-    """Batch queued rows into one LRO per corpus, skipping corpora with in-flight imports."""
+    """Fire one folder-import LRO per (corpus,project,user), skipping busy corpora."""
     queued = await asyncio.to_thread(_claim_queued_rows)
     if not queued:
         return
 
     busy_corpora = await asyncio.to_thread(_corpora_with_in_flight_imports)
 
-    by_corpus: dict[str, list[dict]] = defaultdict(list)
+    # Group by (corpus, project_id, user_id) — folder URI is per-project.
+    groups: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for r in queued:
         corpus = _row_corpus(r)
         if not corpus or corpus in busy_corpora:
             continue
-        by_corpus[corpus].append(r)
-
-    for corpus_name, rows in by_corpus.items():
-        uris = [r["gcs_blob_path"] for r in rows if r.get("gcs_blob_path")]
-        if not uris:
+        project_id = r.get("project_id")
+        user_id = r.get("user_id")
+        if not project_id or not user_id:
             continue
+        groups[(corpus, project_id, user_id)].append(r)
+
+    for (corpus_name, project_id, user_id), rows in groups.items():
+        folder_uri = (
+            f"gs://{settings.gcs_files_bucket}/{user_id}/{project_id}/"
+        )
+        # Re-init Vertex at the corpus's region before the LRO call.
+        await asyncio.to_thread(_init_vertex_for, corpus_name)
         try:
-            op_name = await import_pdfs(corpus_name, uris)
+            op_name = await import_folder(corpus_name, folder_uri)
         except Exception:
             log.exception("dispatch failed for corpus %s", corpus_name)
             continue
@@ -251,7 +269,10 @@ async def _dispatch_step() -> None:
                 "status": "parsing",
                 "ingest_lro_name": op_name,
             }).eq("id", r["id"]).execute()
-        log.info("dispatched %d file(s) on corpus %s as %s", len(rows), corpus_name, op_name)
+        log.info(
+            "dispatched %d file(s) on corpus %s (folder=%s) as %s",
+            len(rows), corpus_name, folder_uri, op_name,
+        )
 
 
 def _corpora_with_in_flight_imports() -> set[str]:
@@ -272,7 +293,6 @@ def _corpora_with_in_flight_imports() -> set[str]:
 
 
 async def run_poller() -> None:
-    """Main loop: every POLL_INTERVAL_SEC, dispatch queued + resolve in-flight."""
     log.info("rag LRO poller started (interval=%ss)", POLL_INTERVAL_SEC)
     while True:
         try:

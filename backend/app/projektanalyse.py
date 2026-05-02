@@ -1,13 +1,15 @@
-"""Projektanalyse batch handler — Gemini edition.
+"""Projektanalyse v2 batch handler — Gemini edition.
 
-Triggered when the LLM calls run_projektanalyse / run_projektanalyse_v2.
-v1: hybrid retrieval per question against document_chunks.
+Triggered when the LLM calls run_projektanalyse_v2.
+
 v2: full-document context per question — concatenates every chunk of the
     project's files and includes it as the system prompt prefix once, so
     Gemini's context cache can amortize across the parallel calls.
 
-Both stream progress events and persist the final report as an assistant
-message to chat_messages.
+Reads from `document_chunks`, which is only populated for legacy EU
+projects ingested under plan 18.x. New serverless projects degrade to
+"Keine Projektdokumente gefunden" — a v1-style rewrite that calls
+rag_specialist per question is the planned replacement.
 """
 from __future__ import annotations
 
@@ -16,13 +18,11 @@ import json
 import logging
 from typing import AsyncGenerator
 
-from google.genai import types
 from langsmith import traceable
 
 from app.config import settings
 from app.db import supabase
 from app.gemini_client import gemini_client
-from app.tools.search import execute_search_chunks
 
 log = logging.getLogger(__name__)
 
@@ -121,18 +121,6 @@ def _project_id_for_chat(chat_id: str, user_id: str) -> str | None:
     return (res.data or {}).get("project_id")
 
 
-def _format_chunks_block(chunks: list) -> str:
-    if not chunks:
-        return "(Keine relevanten Stellen gefunden.)"
-    lines = []
-    for i, c in enumerate(chunks, 1):
-        head = f"[{i}] {c.filename} S.{c.page_start}"
-        if c.figure_label:
-            head += f" — {c.figure_label}"
-        lines.append(f"{head}\n{c.content}")
-    return "\n\n".join(lines)
-
-
 def _load_full_corpus(project_id: str, user_id: str) -> str:
     """Pull every chunk of every indexed file in the project, ordered by
     file then chunk_index, and join them into a single context block."""
@@ -168,35 +156,6 @@ def _load_full_corpus(project_id: str, user_id: str) -> str:
         head += "]"
         parts.append(f"{head}\n{r['content']}")
     return "\n\n".join(parts)
-
-
-@traceable(run_type="llm", name="projektanalyse.answer_one")
-def _answer_v1_sync(question: str, project_id: str, user_id: str) -> str:
-    # Plan 16: route through the same hybrid + rerank pipeline as the chat
-    # path, with batch-tuned settings (wider candidate pool, larger final
-    # top_k) — Projektanalyse is already a multi-second operation, can
-    # afford the extra recall headroom.
-    result = execute_search_chunks(
-        args={"query": question, "top_k": settings.projektanalyse_top_k},
-        project_id=project_id,
-        user_id=user_id,
-        pre_rerank_k_override=settings.projektanalyse_pre_rerank_k,
-    )
-    chunks = result.get("_chunks") or []
-    context = _format_chunks_block(chunks)
-    user_text = f"Kontext:\n{context}\n\n---\n\nFrage: {question}"
-    try:
-        resp = gemini_client().chat.completions.create(
-            model=settings.gemini_chat_model,
-            messages=[
-                {"role": "system", "content": ANSWER_INSTRUCTIONS},
-                {"role": "user", "content": user_text},
-            ],
-        )
-    except Exception as exc:
-        log.warning("projektanalyse v1 question failed: %s", exc)
-        return _gemini_error_placeholder(exc)
-    return (resp.choices[0].message.content or "").strip() or "_(keine Antwort)_"
 
 
 @traceable(run_type="llm", name="projektanalyse_v2.answer_one")
@@ -316,25 +275,6 @@ async def _stream_common(
     if msg_id:
         done_payload["message_id"] = msg_id
     yield f"data: {json.dumps(done_payload)}\n\n"
-
-
-async def stream_projektanalyse(
-    *, template: list[str] | None, chat_id: str, user_id: str
-) -> AsyncGenerator[str, None]:
-    """v1: hybrid retrieval per question."""
-    project_id = await asyncio.to_thread(_project_id_for_chat, chat_id, user_id)
-    answer_fn = (
-        (lambda q: _answer_v1_sync(q, project_id, user_id)) if project_id else None
-    )
-    async for sse in _stream_common(
-        template=template,
-        answer_fn=answer_fn,
-        title="Projektanalyse",
-        chat_id=chat_id,
-        user_id=user_id,
-        no_input_msg="_(Projekt nicht gefunden — Vorlage konnte nicht beantwortet werden.)_",
-    ):
-        yield sse
 
 
 async def stream_projektanalyse_v2(

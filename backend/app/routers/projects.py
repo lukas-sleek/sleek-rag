@@ -1,5 +1,3 @@
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -7,8 +5,6 @@ from app.auth import current_user_id
 from app.db import supabase
 from app.gcs import delete_prefix
 from app.rag_corpus import delete_corpus
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -191,14 +187,14 @@ def update_project(
 
 @router.delete("/{project_id}")
 def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
-    """Delete the project + its Vertex RAG corpus + its GCS prefix (plan 18.2 T7).
+    """Delete the project + its Vertex RAG corpus + its GCS prefix.
 
     Cascade order:
-      1. Vertex RAG corpus (so failures here don't strand a half-deleted DB).
+      1. Vertex RAG corpus (force=True; NotFound treated as success).
       2. GCS prefix gs://{bucket}/{user}/{project}/.
       3. Postgres row (cascades to project_files / chats / chat_messages).
-    GCS / Vertex failures are logged but do not block the DB delete — orphan
-    cleanup is cheaper than a phantom project the user cannot remove.
+    Real failures bubble up as 500 — better than orphaning a corpus or
+    leaving the LRO poller spinning on a stale row.
     """
     row_res = (
         supabase()
@@ -214,15 +210,9 @@ def delete_project(project_id: str, user_id: str = Depends(current_user_id)):
     corpus_name = (row_res.data[0] or {}).get("rag_corpus_name")
 
     if corpus_name:
-        try:
-            delete_corpus(corpus_name)
-        except Exception:
-            logger.exception("rag corpus delete failed for %s", corpus_name)
+        delete_corpus(corpus_name)
 
-    try:
-        delete_prefix(f"{user_id}/{project_id}/")
-    except Exception:
-        logger.exception("gcs prefix delete failed for %s/%s", user_id, project_id)
+    delete_prefix(f"{user_id}/{project_id}/")
 
     res = (
         supabase()

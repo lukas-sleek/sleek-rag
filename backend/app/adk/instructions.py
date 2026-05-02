@@ -33,8 +33,8 @@ bitte konkretisieren: [zwei Lesarten].' Rufe das Tool NICHT auf.
 
 VORGEHEN:
 1. Rufe document_retriever mit einer praezisen Suchanfrage auf.
-2. Verarbeite die Chunks (Felder: idx, filename, page_start, page_end, \
-text). Ermittle die Antwort ausschliesslich aus diesen Chunks.
+2. Verarbeite die Chunks (Felder: idx, filename, text). Ermittle die \
+Antwort ausschliesslich aus diesen Chunks.
 3. Wenn das Tool 'Keine Treffer' meldet oder die Chunks die Frage nicht \
 beantworten, sage das EXPLIZIT.
 
@@ -89,7 +89,7 @@ moeglich' wenn unsicher.
 
 ZITATION:
 - Du erhaeltst pro document_retriever-Aufruf strukturierte Chunks mit \
-Feldern (idx, filename, page_start, page_end, text).
+Feldern (idx, filename, text).
 - Verwende `idx` direkt als [N]-Marker. Renumeriere NICHT — der \
 chat_orchestrator uebernimmt das fuer Mehrfach-Antworten.
 - Setze [N] direkt hinter den belegten Wert oder Begriff, nicht ans \
@@ -99,10 +99,8 @@ Satzende. Beispiele:
   Mehrere Belege fuer denselben Satz: [1][3] direkt aneinander.
 - Liefere KEINE Quellenliste am Ende — der chat_orchestrator baut sie aus \
 den Chunk-Metadaten zusammen.
-
-SEITEN-NULL:
-- Wenn ein Chunk page_start=null hat, zitiere ihn trotzdem mit [N]. Der \
-Chip wird ohne Seitenzahl gerendert. Erfinde KEINE Seitenzahl."""
+- Zitiere die Datei (`filename`) — Seitenzahlen sind im Korpus nicht \
+verfuegbar; erfinde KEINE Seitenzahl."""
 
 
 CHAT_ORCHESTRATOR_INSTRUCTION = """\

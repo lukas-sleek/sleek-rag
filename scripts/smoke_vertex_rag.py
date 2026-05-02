@@ -60,7 +60,7 @@ def main() -> int:
                             "publishers/google/models/"
                             + os.environ.get(
                                 "VERTEX_RAG_EMBEDDING_MODEL",
-                                "text-embedding-005",
+                                "text-embedding-002",
                             )
                         )
                     )

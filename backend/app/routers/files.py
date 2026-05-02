@@ -67,16 +67,7 @@ class FileOut(BaseModel):
     filename: str
     size_bytes: int | None = None
     status: str
-    chunk_count: int | None = None
     page_count: int | None = None
-
-
-class FigureRef(BaseModel):
-    chunk_id: str
-    figure_label: str | None = None
-    page_start: int
-    caption: str | None = None
-    storage_path: str | None = None
 
 
 class FileDetail(BaseModel):
@@ -85,13 +76,9 @@ class FileDetail(BaseModel):
     size_bytes: int | None = None
     mime_type: str | None = None
     page_count: int | None = None
-    chunk_count: int | None = None
     status: str
     ingest_error: str | None = None
     created_at: str | None = None
-    block_breakdown: dict[str, int]
-    outline: list[str]
-    figures: list[FigureRef]
 
 
 def _load_project(project_id: str, user_id: str) -> dict:
@@ -116,7 +103,7 @@ def list_files(project_id: str, user_id: str = Depends(current_user_id)):
         supabase()
         .table("project_files")
         .select(
-            "id,filename,size_bytes,status,chunk_count,page_count"
+            "id,filename,size_bytes,status,page_count"
         )
         .eq("project_id", project_id)
         .eq("user_id", user_id)
@@ -201,7 +188,6 @@ async def upload_file(
         filename=file.filename,
         size_bytes=size_bytes,
         status="queued",
-        chunk_count=0,
         page_count=page_count,
     )
 
@@ -210,15 +196,19 @@ async def upload_file(
 def get_file_detail(
     project_id: str, file_id: str, user_id: str = Depends(current_user_id)
 ):
-    """Rich detail for a single file: ingestion status, structure breakdown,
-    section outline, and figure thumbnails. Powers the file panel's analysis
-    pane after Document AI finishes."""
+    """Basic detail for a single file: ingestion status + size/page metadata.
+
+    Plan 20.0: Vertex serverless does its own chunking inside the corpus,
+    so we no longer surface block_breakdown / outline / figure thumbnails
+    here. Those came from `document_chunks` under the legacy DocAI
+    pipeline and are gone for new projects.
+    """
     _load_project(project_id, user_id)
     f_res = (
         supabase()
         .table("project_files")
         .select(
-            "id,filename,size_bytes,mime_type,page_count,chunk_count,status,"
+            "id,filename,size_bytes,mime_type,page_count,status,"
             "ingest_error,created_at"
         )
         .eq("id", file_id)
@@ -231,77 +221,15 @@ def get_file_detail(
         raise HTTPException(404, "file not found")
     f = f_res.data[0]
 
-    chunks: list[dict] = []
-    page_size = 1000
-    offset = 0
-    while True:
-        page = (
-            supabase()
-            .table("document_chunks")
-            .select("id,chunk_index,block_type,heading_path,page_start,figure_label")
-            .eq("file_id", file_id)
-            .eq("user_id", user_id)
-            .order("chunk_index")
-            .range(offset, offset + page_size - 1)
-            .execute()
-        )
-        rows = page.data or []
-        chunks.extend(rows)
-        if len(rows) < page_size:
-            break
-        offset += page_size
-
-    breakdown: dict[str, int] = {}
-    outline: list[str] = []
-    seen_headings: set[str] = set()
-    figure_chunks: list[dict] = []
-    for c in chunks:
-        bt = c.get("block_type") or "paragraph"
-        breakdown[bt] = breakdown.get(bt, 0) + 1
-        hp = c.get("heading_path") or []
-        for h in hp:
-            if h and h not in seen_headings:
-                seen_headings.add(h)
-                outline.append(h)
-        if bt == "figure":
-            figure_chunks.append(c)
-
-    figures: list[FigureRef] = []
-    if figure_chunks:
-        chunk_ids = [c["id"] for c in figure_chunks]
-        img_res = (
-            supabase()
-            .table("chunk_images")
-            .select("chunk_id,storage_path")
-            .in_("chunk_id", chunk_ids)
-            .execute()
-        )
-        img_by_chunk = {r["chunk_id"]: r for r in (img_res.data or [])}
-        for c in figure_chunks:
-            img = img_by_chunk.get(c["id"]) or {}
-            figures.append(
-                FigureRef(
-                    chunk_id=c["id"],
-                    figure_label=c.get("figure_label"),
-                    page_start=c.get("page_start") or 1,
-                    caption=None,
-                    storage_path=img.get("storage_path"),
-                )
-            )
-
     return FileDetail(
         id=f["id"],
         filename=f["filename"],
         size_bytes=f.get("size_bytes"),
         mime_type=f.get("mime_type"),
         page_count=f.get("page_count"),
-        chunk_count=f.get("chunk_count"),
         status=f["status"],
         ingest_error=f.get("ingest_error"),
         created_at=f.get("created_at"),
-        block_breakdown=breakdown,
-        outline=outline,
-        figures=figures,
     )
 
 

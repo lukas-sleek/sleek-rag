@@ -1,13 +1,17 @@
 """Helpers for managing per-project Vertex RAG corpora.
 
-Plan 18.2: every project gets exactly one corpus (Q4 in 18.0 master spec).
-Corpus is lazy-created on first upload, persisted via projects.rag_corpus_name,
-and deleted on project deletion.
+Plan 20.0: serverless mode in us-central1.
+
+Each project gets exactly one corpus. New corpora use serverless mode
+(`RagManagedVertexVectorSearch` + Document AI Layout Parser). Legacy EU
+corpora created under plan 18.x stay reachable via `_init_vertex_for(name)`
+which re-points the SDK at the corpus's actual region for queries.
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 
 import vertexai
@@ -16,88 +20,108 @@ from vertexai.preview import rag
 
 from app.config import settings
 from app.db import supabase
-from app.parsing_prompts import SIA_PARSING_PROMPT
 
 log = logging.getLogger(__name__)
 
-_initialized = False
+_CORPUS_LOCATION_RE = re.compile(r"projects/[^/]+/locations/([^/]+)/ragCorpora/")
+
+_init_lock = threading.Lock()
+_active_location: str | None = None
 
 
-def _init_vertex() -> None:
-    """Lazy vertexai.init using the existing service account JSON key.
-
-    Also exports `GOOGLE_APPLICATION_CREDENTIALS` so every downstream Google
-    client that resolves credentials via `google.auth.default()` (notably
-    google-adk's google_llm path, which calls Gemini directly and does NOT
-    inherit `vertexai.init()` credentials) picks up the same service account.
-    """
-    global _initialized
-    if _initialized:
-        return
-    if not settings.gcp_project_id:
-        raise RuntimeError("GCP_PROJECT_ID not configured")
-    creds = None
+def _set_genai_env() -> None:
+    """Configure ADK's genai client to use Vertex with our service account."""
     if settings.gcp_service_account_json_path:
-        creds = service_account.Credentials.from_service_account_file(
-            settings.gcp_service_account_json_path
-        )
         os.environ.setdefault(
             "GOOGLE_APPLICATION_CREDENTIALS",
             settings.gcp_service_account_json_path,
         )
-        # ADK's genai client honours these to skip ADC entirely and force
-        # the Vertex AI endpoint (instead of the Generative Language API,
-        # which doesn't accept service-account creds).
-        #
-        # Region: route the genai client to the project's home region
-        # (settings.gcp_location, default europe-west3). The `global`
-        # endpoint we used briefly was forced by the original plan calling
-        # for gemini-2.5-pro on chat_orchestrator (Pro is not published in
-        # europe-west3). We've since switched the orchestrator to Flash,
-        # which IS published regionally, and live diagnostics
-        # (backend/scripts/dsq_diagnose.py) showed the regional pool has
-        # materially better DSQ headroom than `global` for our profile —
-        # 0/30 vs 8/30 429s in identical bursts.
         os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
         os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings.gcp_project_id)
         os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.gcp_location)
-    vertexai.init(
-        project=settings.gcp_project_id,
-        location=settings.gcp_location,
-        credentials=creds,
-    )
-    _initialized = True
 
 
-def _embedding_config() -> rag.RagEmbeddingModelConfig:
-    return rag.RagEmbeddingModelConfig(
-        vertex_prediction_endpoint=rag.VertexPredictionEndpoint(
+def _credentials():
+    if settings.gcp_service_account_json_path:
+        return service_account.Credentials.from_service_account_file(
+            settings.gcp_service_account_json_path
+        )
+    return None
+
+
+def _init_vertex_at(location: str) -> None:
+    """Initialise vertexai for the given location.
+
+    `vertexai.init` is process-wide. When we operate against an existing
+    corpus that lives in a different region (legacy EU projects), we
+    re-init at the corpus's location for the duration of that call.
+    Subsequent calls re-init back to whatever location they need.
+    """
+    global _active_location
+    if not settings.gcp_project_id:
+        raise RuntimeError("GCP_PROJECT_ID not configured")
+    with _init_lock:
+        if _active_location == location:
+            return
+        _set_genai_env()
+        vertexai.init(
+            project=settings.gcp_project_id,
+            location=location,
+            credentials=_credentials(),
+        )
+        _active_location = location
+
+
+def _init_vertex() -> None:
+    """Initialise at the default location (us-central1, serverless region)."""
+    _init_vertex_at(settings.gcp_location)
+
+
+def _init_vertex_for(corpus_name: str) -> str:
+    """Initialise at the corpus's actual region. Returns that region.
+
+    Required for cross-region calls against legacy EU corpora. Falls back
+    to the default location if the corpus name doesn't carry a region.
+    """
+    m = _CORPUS_LOCATION_RE.match(corpus_name or "")
+    location = m.group(1) if m else settings.gcp_location
+    _init_vertex_at(location)
+    return location
+
+
+def _vector_db_config() -> rag.RagVectorDbConfig:
+    """Serverless: RagManagedVertexVectorSearch (Vector Search 2.0).
+
+    The vector DB is managed; the embedding model is pinned via the env
+    var `VERTEX_RAG_EMBEDDING_MODEL` (default text-embedding-002). The
+    SDK's set_embedding_model_config helper unpacks the *flat*
+    `EmbeddingModelConfig` shape (publisher_model attr), not the nested
+    `RagEmbeddingModelConfig` — passing the latter raises
+    AttributeError inside `_gapic_utils.set_embedding_model_config`.
+    """
+    embedding = None
+    if settings.vertex_rag_embedding_model:
+        embedding = rag.EmbeddingModelConfig(
             publisher_model=(
                 f"publishers/google/models/{settings.vertex_rag_embedding_model}"
             )
         )
+    return rag.RagVectorDbConfig(
+        vector_db=rag.RagManagedVertexVectorSearch(),
+        rag_embedding_model_config=embedding,
     )
 
 
-def _llm_parser_config() -> rag.LlmParserConfig:
-    # Parsing model lives in `vertex_rag_parsing_model_location` (default
-    # "global"), independent of the corpus region — Gemini 2.5 Pro is not
-    # published in europe-west3.
-    parsing_model = (
+def _layout_parser_config() -> rag.LayoutParserConfig:
+    """Document AI Layout Parser used by Vertex's import pipeline."""
+    processor = (
         f"projects/{settings.gcp_project_id}"
-        f"/locations/{settings.vertex_rag_parsing_model_location}"
-        f"/publishers/google/models/{settings.vertex_rag_parsing_model}"
+        f"/locations/{settings.documentai_us_location}"
+        f"/processors/{settings.documentai_us_processor_id}"
     )
-    return rag.LlmParserConfig(
-        model_name=parsing_model,
-        max_parsing_requests_per_min=settings.vertex_rag_parsing_max_requests_per_min,
-        custom_parsing_prompt=SIA_PARSING_PROMPT,
-    )
-
-
-def _transformation_config() -> rag.TransformationConfig:
-    return rag.TransformationConfig(
-        chunking_config=rag.ChunkingConfig(chunk_size=1024, chunk_overlap=200)
+    return rag.LayoutParserConfig(
+        processor_name=processor,
+        max_parsing_requests_per_min=120,
     )
 
 
@@ -106,11 +130,7 @@ _locks_guard = threading.Lock()
 
 
 def _project_lock(project_id: str) -> threading.Lock:
-    """Per-project lock so concurrent uploads don't race to create N corpora.
-
-    Process-local. Multi-process deploys still need the post-create
-    reconciliation below as a backstop.
-    """
+    """Per-project lock so concurrent uploads don't race to create N corpora."""
     with _locks_guard:
         lock = _locks.get(project_id)
         if lock is None:
@@ -132,33 +152,21 @@ def _read_corpus_name(project_id: str) -> str | None:
 
 
 def ensure_corpus_for_project(project_id: str) -> str:
-    """Return the corpus resource name for this project, creating on first call.
-
-    Race-safe: a per-project in-process lock serialises concurrent callers,
-    and a post-create read+reconcile step deletes any duplicate corpus that
-    sneaks past (e.g. multi-process worker setups).
-    """
+    """Return the corpus resource name for this project, creating on first call."""
     _init_vertex()
     existing = _read_corpus_name(project_id)
     if existing:
         return existing
 
     with _project_lock(project_id):
-        # Re-check inside the lock — another thread may have created it
-        # between our read above and acquiring the lock.
         existing = _read_corpus_name(project_id)
         if existing:
             return existing
 
         corpus = rag.create_corpus(
             display_name=f"sleek-rag-{project_id}",
-            backend_config=rag.RagVectorDbConfig(
-                rag_embedding_model_config=_embedding_config()
-            ),
+            backend_config=_vector_db_config(),
         )
-        # Conditional update: only set rag_corpus_name if still NULL. If
-        # another process already wrote one (multi-worker race), this
-        # update returns no row and we delete our duplicate.
         upd = (
             supabase()
             .table("projects")
@@ -170,8 +178,6 @@ def ensure_corpus_for_project(project_id: str) -> str:
         if upd.data:
             return corpus.name
 
-        # Lost the race: another process beat us to the persisted name.
-        # Drop our orphan corpus and return the persisted one.
         log.warning(
             "lost ensure_corpus race for project %s; deleting duplicate %s",
             project_id, corpus.name,
@@ -188,45 +194,43 @@ def ensure_corpus_for_project(project_id: str) -> str:
         return winner
 
 
-async def import_pdf(corpus_name: str, gcs_uri: str) -> str:
-    """Trigger ingestion of a single PDF. Returns the LRO operation name."""
-    return await import_pdfs(corpus_name, [gcs_uri])
+async def import_folder(corpus_name: str, folder_uri: str) -> str:
+    """Trigger ingestion of every file under a GCS folder. Returns the LRO name.
 
-
-async def import_pdfs(corpus_name: str, gcs_uris: list[str]) -> str:
-    """Trigger a batched import. One LRO covers every path.
-
-    Vertex serialises operations per corpus, so concurrent uploads must
-    share a single LRO instead of firing one each (which 409s with
-    FailedPrecondition).
+    Vertex recurses the folder and ingests each PDF (and supported office
+    formats) using the Document AI Layout Parser. One LRO covers the
+    whole folder; per-file readiness is observed via list_rag_files.
     """
-    _init_vertex()
+    _init_vertex_for(corpus_name)
     op = await rag.import_files_async(
         corpus_name,
-        paths=gcs_uris,
-        llm_parser=_llm_parser_config(),
-        transformation_config=_transformation_config(),
+        paths=[folder_uri],
+        layout_parser=_layout_parser_config(),
     )
     return op.operation.name
 
 
 def delete_corpus(corpus_name: str) -> None:
-    """Delete a corpus AND its files. The SDK wrapper refuses non-empty corpora."""
-    _init_vertex()
+    """Delete a corpus AND its files (force=True). Routes to the corpus's region.
+
+    Treats NotFound as success: the goal is "corpus is gone", and a stale
+    `projects.rag_corpus_name` pointing at an already-deleted corpus must
+    not block the project delete.
+    """
+    from google.api_core.exceptions import NotFound
     from google.cloud.aiplatform_v1beta1.services.vertex_rag_data_service import (
         VertexRagDataServiceClient,
     )
     from google.cloud.aiplatform_v1beta1.types import DeleteRagCorpusRequest
 
-    creds = None
-    if settings.gcp_service_account_json_path:
-        creds = service_account.Credentials.from_service_account_file(
-            settings.gcp_service_account_json_path
-        )
+    location = _init_vertex_for(corpus_name)
     client = VertexRagDataServiceClient(
-        credentials=creds,
+        credentials=_credentials(),
         client_options={
-            "api_endpoint": f"{settings.gcp_location}-aiplatform.googleapis.com"
+            "api_endpoint": f"{location}-aiplatform.googleapis.com"
         },
     )
-    client.delete_rag_corpus(DeleteRagCorpusRequest(name=corpus_name, force=True))
+    try:
+        client.delete_rag_corpus(DeleteRagCorpusRequest(name=corpus_name, force=True))
+    except NotFound:
+        log.info("rag corpus %s already gone — treating as deleted", corpus_name)

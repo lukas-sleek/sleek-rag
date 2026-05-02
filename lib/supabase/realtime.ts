@@ -1,19 +1,23 @@
 import { createClient } from "./client";
 
-// New ingestion states (plan 11) plus legacy OpenAI states still on existing rows.
+// Vertex serverless flow emits queued | parsing | ready | failed.
+// Legacy strings (uploading, embedding, pending, indexed, complete) are
+// retained as accepted values so rows from older project versions continue
+// to render correctly.
 export type FileStatus =
+  | "queued"
   | "uploading"
   | "parsing"
   | "embedding"
   | "ready"
   | "failed"
   | "pending"
-  | "indexed";
+  | "indexed"
+  | "complete";
 
 export type FileStatusUpdate = {
   id: string;
   status: FileStatus;
-  chunk_count: number | null;
   ingest_error: string | null;
 };
 
