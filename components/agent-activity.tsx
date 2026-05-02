@@ -62,21 +62,16 @@ function StepHeader({ step }: { step: TraceStep }) {
     step.kind === "tool_call" || step.kind === "tool_response"
       ? step.name ?? KIND_LABEL[step.kind]
       : KIND_LABEL[step.kind];
-  // Per-batched-question dispatch frames carry stable ids of the form
-  // `dispatch-<idx>` and the frontend upserts by id, so a single row
-  // flips its kind/status as the sub-question progresses. Derive phase
-  // from kind+status rather than the id suffix:
-  //   running -> kind=tool_call (no status yet)
-  //   done    -> kind=tool_response, status=ok
-  //   error   -> kind=tool_response, status=error
-  const isDispatch = typeof step.id === "string" && step.id.startsWith("dispatch-");
+  // Tool-call rows in the activity panel can flip in place as the call
+  // resolves: a frame with kind=tool_call gets upserted by a frame with
+  // kind=tool_response sharing the same id (function_call.id from Gemini,
+  // or `dispatch-<idx>` for batched questions). Render an inline status
+  // pill so the user sees at a glance which calls are still running.
   let dispatchPhase: "start" | "done" | "error" | null = null;
-  if (isDispatch) {
-    if (step.kind === "tool_call") dispatchPhase = "start";
-    else if (step.kind === "tool_response" && step.status === "error")
-      dispatchPhase = "error";
-    else if (step.kind === "tool_response") dispatchPhase = "done";
-  }
+  if (step.kind === "tool_call") dispatchPhase = "start";
+  else if (step.kind === "tool_response" && step.status === "error")
+    dispatchPhase = "error";
+  else if (step.kind === "tool_response") dispatchPhase = "done";
   return (
     <div className="flex items-center gap-2 text-left text-[12.5px] w-full">
       <KindIcon kind={step.kind} />

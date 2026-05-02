@@ -272,11 +272,17 @@ class StreamingAgentTool(AgentTool):
                 })
                 seq += 1
             elif fc is not None:
+                # Capture the function_call.id alongside the call entry so
+                # the matching tool_response can reuse it — chats.py turns
+                # this into a stable trace row id, letting the response
+                # frame upsert onto the call frame in the activity panel
+                # (one row that flips `laeuft` -> `fertig` instead of two).
                 existing.append({
                     "agent": author,
                     "kind": "tool_call",
                     "seq": seq,
                     "name": getattr(fc, "name", None),
+                    "call_id": getattr(fc, "id", None),
                     "args": _safe_json(getattr(fc, "args", None) or {}),
                 })
                 seq += 1
@@ -294,6 +300,7 @@ class StreamingAgentTool(AgentTool):
                     "kind": "tool_response",
                     "seq": seq,
                     "name": getattr(fr, "name", None),
+                    "call_id": getattr(fr, "id", None),
                     "response": response_dict,
                 })
                 seq += 1

@@ -271,6 +271,15 @@ def _build_trace_frames(event: dict, *, next_id: int) -> list[dict]:
             if not fc:
                 continue
             f = _new_frame()
+            # Use Gemini's function_call.id (the same id is echoed back on
+            # the matching function_response) as the trace row id, so the
+            # tool_response frame upserts onto the tool_call frame and the
+            # UI shows ONE row that flips status — same UX as the batched
+            # dispatch frames. Falls back to the auto-assigned evt-id when
+            # the SDK doesn't surface an id.
+            fc_id = fc.get("id")
+            if fc_id:
+                f["id"] = f"tool-{fc_id}"
             f["name"] = fc.get("name")
             f["args"] = json.dumps(fc.get("args") or {}, ensure_ascii=False)[
                 :_TRACE_ARGS_PREVIEW_LIMIT
@@ -282,6 +291,9 @@ def _build_trace_frames(event: dict, *, next_id: int) -> list[dict]:
             if not fr:
                 continue
             f = _new_frame()
+            fr_id = fr.get("id")
+            if fr_id:
+                f["id"] = f"tool-{fr_id}"
             tool_name = fr.get("name")
             f["name"] = tool_name
             body = fr.get("response") or {}
@@ -365,9 +377,19 @@ def _build_sub_agent_trace_frames(
                 continue
             frame["text"] = text[:_TRACE_TEXT_PREVIEW_LIMIT]
         elif kind == "tool_call":
+            # Stable id from function_call.id (set by StreamingAgentTool's
+            # _capture_activity) so the matching tool_response upserts onto
+            # this row in the UI. Falls back to the auto evt-id when ADK
+            # doesn't surface one.
+            cid = entry.get("call_id")
+            if cid:
+                frame["id"] = f"tool-{cid}"
             frame["name"] = entry.get("name")
             frame["args"] = (entry.get("args") or "")[:_TRACE_ARGS_PREVIEW_LIMIT]
         elif kind == "tool_response":
+            cid = entry.get("call_id")
+            if cid:
+                frame["id"] = f"tool-{cid}"
             tool_name = entry.get("name")
             frame["name"] = tool_name
             body = entry.get("response") or {}
