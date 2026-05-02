@@ -23,14 +23,26 @@ export function PdfViewerDialog({
     // /api/projects/{project_id}/files/{file_id}/signed-url; the dialog
     // iframes it. Page anchors are gone — Vertex serverless retrieval
     // doesn't return page spans, so the viewer always opens at page 1.
-    if (!citation.project_id || !citation.file_id) {
+    // Legacy citations stored before the file_id refactor have file_id set
+    // to the raw `gs://{bucket}/{user_id}/{project_id}/{file_id}/...` URI.
+    // Parse the layout so old chats keep working without a DB migration.
+    let projectId = citation.project_id || null;
+    let fileId = citation.file_id || null;
+    if (fileId && fileId.startsWith("gs://")) {
+      const parts = fileId.slice("gs://".length).split("/");
+      if (parts.length >= 5) {
+        projectId = projectId || parts[2];
+        fileId = parts[3];
+      }
+    }
+    if (!projectId || !fileId) {
       setError("Quelle nicht gefunden");
       return;
     }
     (async () => {
       try {
         const res = await api(
-          `/api/projects/${citation.project_id}/files/${citation.file_id}/signed-url`,
+          `/api/projects/${projectId}/files/${fileId}/signed-url`,
         );
         if (cancelled) return;
         if (!res.ok) {

@@ -1498,6 +1498,7 @@ export function App() {
             setViewerCitation({
               chunk_id: `preview-${file.id}`,
               file_id: file.id,
+              project_id: activeChat?.projectId ?? null,
               filename: file.name,
               snippet: "",
               score: 0,

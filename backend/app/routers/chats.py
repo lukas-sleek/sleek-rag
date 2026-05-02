@@ -155,6 +155,31 @@ def _filename_from_uri(uri: str) -> str:
     return cleaned.rsplit("/", 1)[-1]
 
 
+def _ids_from_gs_uri(uri: str) -> tuple[str | None, str | None]:
+    """Extract (project_id, file_id) from the canonical GCS object key.
+
+    The ingest pipeline pins the layout to
+    `gs://{bucket}/{user_id}/{project_id}/{file_id}/{sanitized}.pdf`
+    (see `app/gcs.py::object_key`). The frontend's PDF viewer needs both
+    ids to call `/api/projects/{pid}/files/{fid}/signed-url`, but Vertex
+    grounding only returns the URI. Parsing the layout locally avoids a
+    DB lookup per citation.
+
+    Returns (None, None) if the URI doesn't fit the layout.
+    """
+    if not uri or not uri.startswith("gs://"):
+        return (None, None)
+    rest = uri[len("gs://"):]
+    parts = rest.split("/", 4)
+    # [bucket, user_id, project_id, file_id, basename] — exactly 5 segments.
+    if len(parts) < 5:
+        return (None, None)
+    _bucket, _user_id, project_id, file_id, _basename = parts
+    if not project_id or not file_id:
+        return (None, None)
+    return (project_id, file_id)
+
+
 def _citations_from_grounding(chunks: list[dict]) -> list[dict]:
     """Translate `state["agent_grounding_chunks"]` entries (written by
     StreamingAgentTool from Vertex `GroundingMetadata.grounding_chunks`)
@@ -185,12 +210,17 @@ def _citations_from_grounding(chunks: list[dict]) -> list[dict]:
         text_key = (text or "")[:120]
         h = hashlib.sha1(text_key.encode("utf-8")).hexdigest()[:12]
         chunk_id = f"rag:{uri}:{h}" if (uri or text_key) else f"rag:chunk:{i}"
+        project_id, file_id = _ids_from_gs_uri(uri)
         out.append({
             "idx": i,
             "kind": "file",
             "filename": filename,
             "snippet": text,
-            "file_id": uri or None,
+            # file_id was previously the raw gs:// URI, which the PDF viewer
+            # endpoint can't resolve. We now parse the canonical GCS layout
+            # to surface the real DB row id + project_id.
+            "file_id": file_id,
+            "project_id": project_id,
             "chunk_id": chunk_id,
             "score": None,  # native retrieval doesn't surface a per-chunk score
             "uri": uri,
