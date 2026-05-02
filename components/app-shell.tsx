@@ -507,10 +507,14 @@ export function App() {
     const placeholders: FileItem[] = accepted.map((f, i) => ({
       id: "uploading-" + Date.now() + "-" + i,
       name: f.name,
+      // size/pages get overwritten with backend truth after upload completes.
+      // Until then we drive the row label off ingestStatus="uploading" so the
+      // list shows "Hochladen…" instead of stale local size + fake pages=1.
       size: formatBytes(f.size),
       type: inferFileType(f.name),
-      pages: 1,
+      pages: 0,
       status: "analyzing",
+      ingestStatus: "uploading",
       analysis: null,
     }));
     setProjectFiles((prev) => ({

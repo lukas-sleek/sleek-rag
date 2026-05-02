@@ -78,12 +78,12 @@
   --bg-bubble: #2f2f2f;
   --bg-hover: #2a2a2a;
   --bg-active: #333333;
-  --border: oklch(0.922 0 0);
+  --border: #333333;
   --border-strong: #424242;
   --text: #ffffff;
   --text-secondary: #a8a8a8;
   --text-tertiary: #6e6e6e;
-  --accent: oklch(0.97 0 0);
+  --accent: #ff6b4a;
   --accent-hover: #ff8466;
   --accent-soft: rgba(255, 107, 74, 0.12);
   --eichenberger-red: #ff4539;

@@ -71,15 +71,40 @@ export function ProjectFilesModal({
   const [internalFiles, setInternalFiles] = React.useState<FileItem[]>(
     externalFiles || []
   );
-  const files = externalFiles !== undefined ? externalFiles : internalFiles;
+  const filesRaw = externalFiles !== undefined ? externalFiles : internalFiles;
   const setFiles = externalSetFiles || setInternalFiles;
-  const [selectedId, setSelectedId] = React.useState<string | null>(
-    () => (files[0] && files[0].id) || null
+  // Always alphabetical (locale-aware, case-insensitive). Applies during
+  // upload too — placeholders sort by their original filename.
+  const files = React.useMemo(
+    () =>
+      [...filesRaw].sort((a, b) =>
+        a.name.localeCompare(b.name, "de", { sensitivity: "base", numeric: true })
+      ),
+    [filesRaw]
+  );
+  const pickInitial = (list: FileItem[]) =>
+    list.find((f) => f.status === "complete")?.id ?? list[0]?.id ?? null;
+  const [selectedId, setSelectedId] = React.useState<string | null>(() =>
+    pickInitial(files)
   );
   const [dragOver, setDragOver] = React.useState(false);
   const dragCounterRef = React.useRef(0);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const autoOpenedRef = React.useRef(false);
+  const autoSelectedRef = React.useRef(false);
+
+  // When files populate asynchronously (typical: empty on open, then a
+  // fetch resolves), promote the first "complete" file as the default
+  // selection so the user lands on a real analysis instead of a skeleton.
+  React.useEffect(() => {
+    if (autoSelectedRef.current) return;
+    if (files.length === 0) return;
+    const next = pickInitial(files);
+    if (next) {
+      autoSelectedRef.current = true;
+      setSelectedId(next);
+    }
+  }, [files]);
 
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -111,27 +136,33 @@ export function ProjectFilesModal({
     if (selected.status !== "complete") return;
     if (selected.analysis) return; // fixture data — skip backend
     if (selected.id.startsWith("uploading-")) return;
-    if (fetchedRef.current.has(selected.id)) return;
-    fetchedRef.current.add(selected.id);
+    // Skip only if we've already SUCCEEDED for this id. Don't add to the set
+    // on entry — otherwise a fetch that gets cancelled (user switches files
+    // mid-flight) leaves the id flagged as "fetched", which blocks the
+    // re-selection from re-fetching and the detail panel hangs on "Lade…".
+    if (detailsById[selected.id]) return;
     let cancelled = false;
+    const targetId = selected.id;
     setDetailError(null);
     (async () => {
       try {
-        const res = await api(`/api/projects/${projectId}/files/${selected.id}`);
+        const res = await api(`/api/projects/${projectId}/files/${targetId}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = (await res.json()) as FileDetail;
         if (cancelled) return;
-        setDetailsById((prev) => ({ ...prev, [body.id]: body }));
+        // Key by the request's targetId, not body.id — defensive in case the
+        // backend ever returns a body without a matching id field.
+        setDetailsById((prev) => ({ ...prev, [targetId]: body }));
+        fetchedRef.current.add(targetId);
       } catch (err) {
         if (cancelled) return;
-        fetchedRef.current.delete(selected.id);
         setDetailError(err instanceof Error ? err.message : "Fehler");
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [projectId, selected?.id, selected?.status, selected?.analysis]);
+  }, [projectId, selected?.id, selected?.status, selected?.analysis, detailsById]);
 
   const [deleting, setDeleting] = React.useState(false);
   const handleDelete = async () => {
@@ -396,7 +427,7 @@ export function ProjectFilesModal({
                     <button
                       type="button"
                       disabled={deleting}
-                      className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-transparent border border-border text-text-secondary text-[11.5px] font-medium cursor-pointer transition-[background-color,color,border-color] duration-150 hover:bg-[rgba(239,68,68,.08)] hover:text-[#fca5a5] hover:border-[rgba(239,68,68,.4)] disabled:opacity-50 disabled:cursor-not-allowed [&_svg]:w-3 [&_svg]:h-3"
+                      className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-[rgba(239,68,68,.1)] border border-[rgba(239,68,68,.4)] text-[#fca5a5] text-[11.5px] font-medium cursor-pointer transition-[background-color,color,border-color] duration-150 hover:bg-[rgba(239,68,68,.18)] hover:text-[#fecaca] hover:border-[rgba(239,68,68,.6)] disabled:opacity-50 disabled:cursor-not-allowed [&_svg]:w-3 [&_svg]:h-3"
                       onClick={handleDelete}
                       title="Datei löschen"
                     >
@@ -456,7 +487,32 @@ export function ProjectFilesModal({
 
                 {!analysis && detail && <FileDetailView detail={detail} />}
               </div>
-            ) : selected && (selected.status === "analyzing" || (selected.status === "complete" && !detailError)) ? (
+            ) : selected && selected.status === "complete" && !detailError ? (
+              // Backend says the file is fully indexed; we're only waiting on
+              // the /files/<id> detail call. Show the real header (name +
+              // size + pages we already have) with a small "Lade Details…"
+              // hint instead of the full analyze skeleton — otherwise it
+              // looks like the file is still being indexed.
+              <div className="flex flex-col">
+                <div className="flex items-center gap-3 px-5 py-3.5 border-b border-border">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-text whitespace-nowrap overflow-hidden text-ellipsis">
+                      {selected.name}
+                    </div>
+                    <div className="text-xs text-text-tertiary mt-0.5">
+                      {FILE_TYPE[selected.type].label} · {selected.size}
+                      {selected.pages > 0 && (
+                        <> · {selected.pages} {selected.pages === 1 ? "Seite" : "Seiten"}</>
+                      )}
+                    </div>
+                  </div>
+                  <span className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-bg-input border border-border text-text-tertiary text-[11px] font-medium flex-shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-pulse" />
+                    Lade Details…
+                  </span>
+                </div>
+              </div>
+            ) : selected && selected.status === "analyzing" ? (
               <div className="pf-skeleton">
                 <div className="pf-skel-head">
                   <div className="pf-skel-text">
@@ -473,11 +529,6 @@ export function ProjectFilesModal({
                   <div className="pf-skel-line w-100" />
                   <div className="pf-skel-line w-95" />
                   <div className="pf-skel-line w-80" />
-                </div>
-                <div className="pf-skel-stats">
-                  <div className="pf-skel-stat" />
-                  <div className="pf-skel-stat" />
-                  <div className="pf-skel-stat" />
                 </div>
                 <div className="pf-skel-block">
                   <div className="pf-skel-label" />
@@ -503,7 +554,7 @@ export function ProjectFilesModal({
                     <button
                       type="button"
                       disabled={deleting}
-                      className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-transparent border border-border text-text-secondary text-[11.5px] font-medium cursor-pointer transition-[background-color,color,border-color] duration-150 hover:bg-[rgba(239,68,68,.08)] hover:text-[#fca5a5] hover:border-[rgba(239,68,68,.4)] disabled:opacity-50 disabled:cursor-not-allowed [&_svg]:w-3 [&_svg]:h-3"
+                      className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-[rgba(239,68,68,.1)] border border-[rgba(239,68,68,.4)] text-[#fca5a5] text-[11.5px] font-medium cursor-pointer transition-[background-color,color,border-color] duration-150 hover:bg-[rgba(239,68,68,.18)] hover:text-[#fecaca] hover:border-[rgba(239,68,68,.6)] disabled:opacity-50 disabled:cursor-not-allowed [&_svg]:w-3 [&_svg]:h-3"
                       onClick={handleDelete}
                       title="Datei löschen"
                     >
