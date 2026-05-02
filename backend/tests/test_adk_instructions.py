@@ -38,8 +38,31 @@ def test_chat_orchestrator_instruction_contains_required_clauses():
         "WIEDERHOLTE 'NICHT ANGEGEBEN'",
         "NO-V2-ESCALATION",
         "ASCII-Spelling",
+        "KONTEXT-INTELLIGENZ",
+        "NO-SELF-DERIVATION",
     ]:
         assert clause in CHAT_ORCHESTRATOR_INSTRUCTION, f"missing clause: {clause}"
+
+
+def test_chat_orchestrator_followup_uses_history_before_refusing():
+    """Follow-ups must use chat history + rewrite to rag_specialist before any
+    blanket refusal. The rule is generic — covers sums, counts, filters,
+    comparisons, time spans, etc., not a specific question type."""
+    txt = CHAT_ORCHESTRATOR_INSTRUCTION
+    # Generic operations covered, not just sums
+    for op in ["Summe", "Durchschnitt", "Differenz", "Anzahl", "Filterung",
+               "Zeitspanne", "Min/Max"]:
+        assert op in txt, f"missing generic operation example: {op}"
+    # Three-step escalation: history → smart rewrite → labeled derivation
+    assert "VERLAUF AUSWERTEN" in txt
+    assert "SMART-REWRITE" in txt
+    assert "DERIVATION AUS VERLAUF" in txt
+    # Blanket refusals are explicitly forbidden
+    assert "NIEMALS mit einer pauschalen Verweigerung" in txt
+    # Derived value must be transparently labeled (not from documents)
+    assert "NICHT direkt" in txt and "Dokumenten" in txt
+    # Rewrite step must produce a *new* query, not repeat the previous one
+    assert "WIEDERHOLE NICHT EINFACH die alte Anfrage" in txt
 
 
 def test_chat_orchestrator_instruction_has_pronoun_resolution_examples():

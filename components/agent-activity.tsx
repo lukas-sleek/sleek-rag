@@ -2,8 +2,10 @@
 import * as React from "react";
 import {
   BotIcon,
+  BrainIcon,
   HammerIcon,
   CheckCircle2Icon,
+  FileTextIcon,
   Loader2Icon,
   MessageSquareTextIcon,
   ChevronRightIcon,
@@ -15,7 +17,7 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import { Badge } from "@/components/ui/badge";
-import type { TraceStep } from "./fixtures";
+import type { RetrievalChunk, TraceStep } from "./fixtures";
 
 // Friendly headline for the agent author, in Schweizer Deutsch ohne Umlaute
 // to match the rest of the chat UI.
@@ -33,12 +35,15 @@ const AGENT_LABEL: Record<string, string> = {
 const KIND_LABEL: Record<TraceStep["kind"], string> = {
   tool_call: "ruft Tool auf",
   tool_response: "Tool-Ergebnis",
-  model_text: "denkt nach",
+  model_text: "antwortet",
+  model_thought: "denkt laut",
 };
 
 function KindIcon({ kind }: { kind: TraceStep["kind"] }) {
   if (kind === "tool_call") return <HammerIcon className="size-3.5" />;
   if (kind === "tool_response") return <CheckCircle2Icon className="size-3.5" />;
+  if (kind === "model_thought")
+    return <BrainIcon className="size-3.5 text-amber-300" />;
   return <MessageSquareTextIcon className="size-3.5" />;
 }
 
@@ -67,11 +72,105 @@ function StepHeader({ step }: { step: TraceStep }) {
   );
 }
 
+// Vertex retrieval scores live in [0, 1]; map to a coarse confidence label
+// + tinted badge so the ordering becomes obvious at a glance.
+function scoreBadgeProps(score: number): {
+  variant: "default" | "secondary" | "outline";
+  className: string;
+} {
+  if (score >= 0.7) {
+    return {
+      variant: "default",
+      className: "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30",
+    };
+  }
+  if (score >= 0.4) {
+    return {
+      variant: "secondary",
+      className: "bg-amber-500/15 text-amber-300 border border-amber-500/30",
+    };
+  }
+  return {
+    variant: "outline",
+    className: "bg-rose-500/10 text-rose-300 border border-rose-500/30",
+  };
+}
+
+function ChunkRow({ chunk }: { chunk: RetrievalChunk }) {
+  const scoreText =
+    chunk.score === null || chunk.score === undefined
+      ? "—"
+      : chunk.score.toFixed(3);
+  const badgeProps =
+    chunk.score === null || chunk.score === undefined
+      ? {
+          variant: "outline" as const,
+          className: "border border-border text-text-tertiary",
+        }
+      : scoreBadgeProps(chunk.score);
+  return (
+    <div className="rounded-md border border-border bg-bg-input p-2.5">
+      <div className="flex items-center gap-2 mb-1.5">
+        <FileTextIcon className="size-3 text-text-tertiary shrink-0" />
+        <span className="text-[11px] font-mono text-text-tertiary">[{chunk.idx}]</span>
+        <span className="text-[12px] font-medium text-text truncate flex-1">
+          {chunk.filename}
+        </span>
+        <Badge
+          variant={badgeProps.variant}
+          className={"font-mono text-[10px] py-0 px-1.5 " + badgeProps.className}
+        >
+          {scoreText}
+        </Badge>
+      </div>
+      <p className="text-[11.5px] leading-[1.45] text-text-secondary whitespace-pre-wrap break-words">
+        {chunk.snippet}
+      </p>
+    </div>
+  );
+}
+
 function StepBody({ step }: { step: TraceStep }) {
-  const blocks: Array<{ label: string; body: string }> = [];
+  // search_project_documents responses get a structured chunk list with
+  // confidence badges instead of the truncated-JSON preview.
+  if (step.chunks && step.chunks.length > 0) {
+    return (
+      <div className="px-3 pb-3 space-y-2">
+        <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1 flex items-center gap-2">
+          <span>Treffer</span>
+          <span className="text-text-tertiary">·</span>
+          <span>{step.chunks.length}</span>
+          {step.status && step.status !== "ok" && (
+            <span className="text-text-tertiary italic">({step.status})</span>
+          )}
+        </div>
+        <div className="space-y-1.5">
+          {step.chunks.map((c) => (
+            <ChunkRow key={`${step.id}-${c.idx}`} chunk={c} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (step.chunks && step.chunks.length === 0) {
+    return (
+      <div className="text-[12px] text-text-tertiary px-3 pb-3 italic">
+        Keine Treffer{step.status ? ` (${step.status})` : ""}.
+      </div>
+    );
+  }
+
+  const blocks: Array<{ label: string; body: string; thought?: boolean }> = [];
   if (step.args) blocks.push({ label: "Argumente", body: prettyJSON(step.args) });
   if (step.response) blocks.push({ label: "Antwort", body: prettyJSON(step.response) });
-  if (step.text) blocks.push({ label: "Inhalt", body: step.text });
+  if (step.text) {
+    const isThought = step.kind === "model_thought";
+    blocks.push({
+      label: isThought ? "Gedanke" : "Inhalt",
+      body: step.text,
+      thought: isThought,
+    });
+  }
   if (blocks.length === 0) {
     return (
       <div className="text-[12px] text-text-tertiary px-3 pb-3 italic">
@@ -83,10 +182,17 @@ function StepBody({ step }: { step: TraceStep }) {
     <div className="px-3 pb-3 space-y-2">
       {blocks.map((b) => (
         <div key={b.label}>
-          <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1">
+          <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1 flex items-center gap-1.5">
+            {b.thought && <BrainIcon className="size-3 text-amber-300" />}
             {b.label}
           </div>
-          <pre className="bg-bg-input border border-border rounded-md p-2.5 text-[11.5px] leading-[1.5] font-mono text-text-secondary overflow-x-auto whitespace-pre-wrap break-words max-h-72">
+          <pre
+            className={
+              b.thought
+                ? "bg-amber-500/5 border border-amber-500/20 rounded-md p-2.5 text-[11.5px] leading-[1.55] text-amber-100/80 italic overflow-x-auto whitespace-pre-wrap break-words max-h-72"
+                : "bg-bg-input border border-border rounded-md p-2.5 text-[11.5px] leading-[1.5] font-mono text-text-secondary overflow-x-auto whitespace-pre-wrap break-words max-h-72"
+            }
+          >
             {b.body}
           </pre>
         </div>

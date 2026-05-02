@@ -945,6 +945,8 @@ export function App() {
               args?: string;
               response?: string;
               text?: string;
+              chunks?: import("./fixtures").RetrievalChunk[];
+              status?: string;
             };
             if (payload.progress) {
               const { done, total, question } = payload.progress;
@@ -974,6 +976,8 @@ export function App() {
                   args: payload.args ?? null,
                   response: payload.response ?? null,
                   text: payload.text ?? null,
+                  chunks: payload.chunks ?? null,
+                  status: payload.status ?? null,
                 };
                 setThreads((prev) => {
                   const arr = [...(prev[chatId] || [])];

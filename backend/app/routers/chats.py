@@ -34,8 +34,11 @@ from app.adk.app_factory import get_or_build_app
 from app.adk.citation_aggregator import dedupe_and_renumber, rewrite_refs
 from app.adk.event_translator import (
     event_author,
+    event_has_thought,
     event_kind,
+    event_state_delta,
     event_text,
+    event_thought_text,
     is_v2_handoff,
 )
 from app.adk.history import seed_session
@@ -193,6 +196,18 @@ def _build_trace_frames(event: dict, *, next_id: int) -> list[dict]:
             "kind": kind,
         }
 
+    # Gemini emits the model's chain-of-thought INLINE with the action it
+    # took: the same event can carry both thought parts and a function_call,
+    # or both thought parts and final text. We extract thoughts first for
+    # ANY model event so they always render before the action they
+    # accompany — this is the orchestrator's "planning" that was previously
+    # invisible because the tool_call branch ignored text parts entirely.
+    if kind in ("tool_call", "model_text") and event_has_thought(event):
+        tf = _new_frame()
+        tf["kind"] = "model_thought"
+        tf["text"] = event_thought_text(event)[:_TRACE_TEXT_PREVIEW_LIMIT]
+        out.append(tf)
+
     if kind == "tool_call":
         for p in parts:
             fc = p.get("function_call")
@@ -210,16 +225,120 @@ def _build_trace_frames(event: dict, *, next_id: int) -> list[dict]:
             if not fr:
                 continue
             f = _new_frame()
-            f["name"] = fr.get("name")
-            f["response"] = json.dumps(
-                fr.get("response") or {}, ensure_ascii=False
-            )[:_TRACE_ARGS_PREVIEW_LIMIT]
+            tool_name = fr.get("name")
+            f["name"] = tool_name
+            body = fr.get("response") or {}
+            # search_project_documents gets a richer payload so the activity
+            # panel can render retrieved chunks + confidence scores instead
+            # of a 400-char-truncated JSON dump. Other tools keep the
+            # generic truncated-response field.
+            if (
+                tool_name == "search_project_documents"
+                and isinstance(body, dict)
+            ):
+                f["status"] = body.get("status")
+                f["chunks"] = [
+                    {
+                        "idx": c.get("idx"),
+                        "filename": c.get("filename"),
+                        "score": c.get("score"),
+                        "snippet": (c.get("text") or "")[:240],
+                    }
+                    for c in (body.get("chunks") or [])
+                ]
+            else:
+                f["response"] = json.dumps(body, ensure_ascii=False)[
+                    :_TRACE_ARGS_PREVIEW_LIMIT
+                ]
             out.append(f)
     elif kind == "model_text":
-        f = _new_frame()
-        f["text"] = event_text(event)[:_TRACE_TEXT_PREVIEW_LIMIT]
-        out.append(f)
+        # Thought parts already emitted in the prelude above; only render the
+        # answer (non-thought) text here.
+        answer = event_text(event)
+        if answer:
+            f = _new_frame()
+            f["text"] = answer[:_TRACE_TEXT_PREVIEW_LIMIT]
+            out.append(f)
     return out
+
+
+def _build_sub_agent_trace_frames(
+    state_delta: dict,
+    *,
+    seen: set[int],
+    next_id: int,
+) -> tuple[list[dict], set[int]]:
+    """Translate `state["agent_trace"]` deltas into activity-panel frames.
+
+    StreamingAgentTool appends entries shaped
+        {"agent": <author>, "kind": "model_thought" | "tool_call"
+                                    | "tool_response",
+         "seq": <int>, ...kind-specific fields}
+    Each new seq becomes one trace frame, preserving the sub-agent name as
+    the frame's `author` so e.g. document_retriever's calls show up under
+    its own row instead of being mis-attributed to rag_specialist.
+    Callers track `seen` across the turn to avoid re-emitting the same
+    entry when subsequent state deltas re-deliver the cumulative list (ADK
+    forwards the whole state, not a diff).
+    """
+    raw = state_delta.get("agent_trace") or []
+    if not raw:
+        return [], seen
+
+    out: list[dict] = []
+    seen = set(seen)
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        seq = entry.get("seq")
+        if seq is None or seq in seen:
+            continue
+        seen.add(seq)
+        kind = entry.get("kind")
+        author = entry.get("agent") or "unknown"
+        frame: dict = {
+            "type": "trace",
+            "id": f"evt-{next_id + len(out)}",
+            "author": author,
+            "kind": kind,
+        }
+        if kind == "model_thought":
+            text = entry.get("text") or ""
+            if not text:
+                continue
+            frame["text"] = text[:_TRACE_TEXT_PREVIEW_LIMIT]
+        elif kind == "tool_call":
+            frame["name"] = entry.get("name")
+            frame["args"] = (entry.get("args") or "")[:_TRACE_ARGS_PREVIEW_LIMIT]
+        elif kind == "tool_response":
+            tool_name = entry.get("name")
+            frame["name"] = tool_name
+            body = entry.get("response") or {}
+            # Mirror the rich-payload treatment from the parent
+            # `_build_trace_frames`: search_project_documents gets chunks +
+            # scores instead of a 400-char-truncated JSON dump.
+            if (
+                tool_name == "search_project_documents"
+                and isinstance(body, dict)
+            ):
+                frame["status"] = body.get("status")
+                frame["chunks"] = [
+                    {
+                        "idx": c.get("idx"),
+                        "filename": c.get("filename"),
+                        "score": c.get("score"),
+                        "snippet": (c.get("text") or "")[:240],
+                    }
+                    for c in (body.get("chunks") or [])
+                ]
+            else:
+                frame["response"] = json.dumps(body, ensure_ascii=False)[
+                    :_TRACE_ARGS_PREVIEW_LIMIT
+                ]
+        else:
+            continue
+        out.append(frame)
+    return out, seen
 
 
 class ChatIn(BaseModel):
@@ -433,6 +552,12 @@ async def _send_message_stream(
     web_response_texts: list[str] = []
     handed_off = False
     trace_id = 0
+    # Per-turn high-water mark for sub-agent activity. StreamingAgentTool
+    # writes into session state["agent_trace"] (thoughts + tool_calls +
+    # tool_responses); the parent runner sees the cumulative list on every
+    # state_delta, so we track which seq ids we've already rendered to
+    # avoid duplicates.
+    seen_trace_seqs: set[int] = set()
     try:
         async for event in app.async_stream_query(
             message=text,
@@ -449,6 +574,22 @@ async def _send_message_stream(
             # keep the bytes off the wire for prod accounts to avoid
             # leaking agent internals.
             if debug_trace:
+                # Order matters for the activity panel:
+                # 1) sub-agent thoughts FIRST so they render BEFORE the
+                #    tool_response that delivered them (chronologically the
+                #    sub-agent thought before producing its result).
+                # 2) then the event's own trace frames (which already
+                #    include the orchestrator's own thoughts inline via
+                #    `_build_trace_frames`'s prelude — those land before
+                #    the tool_call/model_text frame in the same event).
+                sub_frames, seen_trace_seqs = _build_sub_agent_trace_frames(
+                    event_state_delta(event),
+                    seen=seen_trace_seqs,
+                    next_id=trace_id + 1,
+                )
+                for f in sub_frames:
+                    trace_id += 1
+                    yield "data: " + json.dumps(f) + "\n\n"
                 frames = _build_trace_frames(event, next_id=trace_id + 1)
                 for f in frames:
                     trace_id += 1

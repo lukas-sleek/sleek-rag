@@ -125,6 +125,21 @@ def _model_text(text, author="chat_orchestrator"):
     }
 
 
+def _model_thought_and_text(thought, text, author="chat_orchestrator"):
+    """Mirrors what genai emits when ThinkingConfig.include_thoughts=True:
+    thought parts have `thought: True`, answer parts don't."""
+    return {
+        "author": author,
+        "content": {
+            "role": "model",
+            "parts": [
+                {"text": thought, "thought": True},
+                {"text": text},
+            ],
+        },
+    }
+
+
 def _tool_response(name, response, author="chat_orchestrator"):
     return {
         "author": author,
@@ -133,6 +148,23 @@ def _tool_response(name, response, author="chat_orchestrator"):
             "parts": [{
                 "function_response": {"id": "1", "name": name, "response": response}
             }],
+        },
+    }
+
+
+def _model_thought_and_tool_call(thought, tool_name, args, author="chat_orchestrator"):
+    """Gemini bundles the orchestrator's pre-tool-call planning chain-of-thought
+    into the SAME event as the function_call. We must surface that thought in
+    the activity panel, otherwise the user only sees the bare tool_call and
+    thinks the orchestrator did no planning."""
+    return {
+        "author": author,
+        "content": {
+            "role": "model",
+            "parts": [
+                {"text": thought, "thought": True},
+                {"function_call": {"id": "1", "name": tool_name, "args": args}},
+            ],
         },
     }
 
@@ -329,3 +361,206 @@ async def test_citations_dedupe_renumbers_refs(monkeypatch, chat_stub):
     meta = next(p for p in parsed if p["type"] == "meta")
     assert len(meta["citations"]) == 2  # one duplicate collapsed
     assert meta["content"] == "X[1] Y[2] Z[1]."
+
+
+def test_build_trace_frames_search_project_documents_emits_chunks():
+    """Activity panel must receive structured chunks (idx/filename/score/snippet)
+    for search_project_documents tool_responses, not the truncated JSON blob."""
+    long_text = "x" * 600  # would normally be cut off by the 400-char preview
+    event = _tool_response(
+        "search_project_documents",
+        {
+            "status": "ok",
+            "chunks": [
+                {"idx": 1, "filename": "a.pdf", "text": long_text, "score": 0.82},
+                {"idx": 2, "filename": "b.pdf", "text": "short hit", "score": 0.31},
+                {"idx": 3, "filename": "c.pdf", "text": "no score", "score": None},
+            ],
+        },
+    )
+    frames = chats_module._build_trace_frames(event, next_id=10)
+    assert len(frames) == 1
+    f = frames[0]
+    assert f["name"] == "search_project_documents"
+    assert f["status"] == "ok"
+    # No truncated-JSON blob — replaced by structured chunks
+    assert "response" not in f
+    assert [c["idx"] for c in f["chunks"]] == [1, 2, 3]
+    assert [c["score"] for c in f["chunks"]] == [0.82, 0.31, None]
+    # Snippet truncated to ~240 chars regardless of original size
+    assert len(f["chunks"][0]["snippet"]) <= 240
+    assert f["chunks"][2]["filename"] == "c.pdf"
+
+
+def test_build_trace_frames_other_tools_keep_truncated_response():
+    """Non-retrieval tool_responses keep the generic truncated JSON-blob
+    preview (no chunks field)."""
+    event = _tool_response("web_researcher", {"result": "antwort"})
+    frames = chats_module._build_trace_frames(event, next_id=1)
+    assert len(frames) == 1
+    f = frames[0]
+    assert f["name"] == "web_researcher"
+    assert "chunks" not in f
+    assert "antwort" in f["response"]
+
+
+def test_build_sub_agent_trace_frames_emits_one_per_new_seq():
+    """StreamingAgentTool appends to state['agent_trace'] with monotonic
+    seq ids. The chats.py builder must emit one frame per *new* seq,
+    preserving the sub-agent name as the frame author, and skip seqs
+    already rendered earlier in the turn."""
+    state_delta = {
+        "agent_trace": [
+            {"agent": "rag_specialist", "kind": "model_thought",
+             "text": "scanne nach Projektleiter", "seq": 0},
+            {"agent": "rag_specialist", "kind": "model_thought",
+             "text": "fasse Treffer zusammen", "seq": 1},
+        ],
+    }
+    frames, seen = chats_module._build_sub_agent_trace_frames(
+        state_delta, seen=set(), next_id=10,
+    )
+    assert [f["kind"] for f in frames] == ["model_thought", "model_thought"]
+    assert [f["author"] for f in frames] == ["rag_specialist", "rag_specialist"]
+    assert frames[0]["text"] == "scanne nach Projektleiter"
+    assert seen == {0, 1}
+
+    # Next event delivers the cumulative list again + a new entry.
+    state_delta2 = {
+        "agent_trace": [
+            {"agent": "rag_specialist", "kind": "model_thought",
+             "text": "scanne nach Projektleiter", "seq": 0},
+            {"agent": "rag_specialist", "kind": "model_thought",
+             "text": "fasse Treffer zusammen", "seq": 1},
+            {"agent": "document_retriever", "kind": "tool_call",
+             "name": "search_project_documents",
+             "args": '{"query": "Projektleiter"}', "seq": 2},
+        ],
+    }
+    frames2, seen2 = chats_module._build_sub_agent_trace_frames(
+        state_delta2, seen=seen, next_id=20,
+    )
+    assert len(frames2) == 1
+    assert frames2[0]["author"] == "document_retriever"
+    assert frames2[0]["kind"] == "tool_call"
+    assert frames2[0]["name"] == "search_project_documents"
+    assert seen2 == {0, 1, 2}
+
+
+def test_build_sub_agent_trace_frames_renders_tool_response_chunks():
+    """search_project_documents tool_responses captured via state must keep
+    the rich chunks-with-scores rendering, not the truncated-JSON fallback,
+    so confidence badges still surface inside nested calls."""
+    state_delta = {
+        "agent_trace": [
+            {
+                "agent": "document_retriever",
+                "kind": "tool_response",
+                "name": "search_project_documents",
+                "seq": 5,
+                "response": {
+                    "status": "ok",
+                    "chunks": [
+                        {"idx": 1, "filename": "a.pdf", "text": "x" * 600,
+                         "score": 0.91},
+                        {"idx": 2, "filename": "b.pdf", "text": "kurz",
+                         "score": 0.42},
+                    ],
+                },
+            },
+        ],
+    }
+    frames, _ = chats_module._build_sub_agent_trace_frames(
+        state_delta, seen=set(), next_id=1,
+    )
+    assert len(frames) == 1
+    f = frames[0]
+    assert f["kind"] == "tool_response"
+    assert f["name"] == "search_project_documents"
+    assert f["status"] == "ok"
+    assert "response" not in f
+    assert [c["score"] for c in f["chunks"]] == [0.91, 0.42]
+    assert len(f["chunks"][0]["snippet"]) <= 240
+
+
+def test_build_sub_agent_trace_frames_no_trace_returns_empty():
+    frames, seen = chats_module._build_sub_agent_trace_frames(
+        {}, seen=set(), next_id=1,
+    )
+    assert frames == []
+    assert seen == set()
+
+
+def test_build_trace_frames_emits_thought_before_tool_call():
+    """Orchestrator's inline thought (planning before invoking the tool) must
+    surface as a `model_thought` frame BEFORE the `tool_call` frame. Without
+    this, the orchestrator looks like it does no planning at all."""
+    event = _model_thought_and_tool_call(
+        "ich pruefe was der Nutzer braucht und delegiere an rag_specialist",
+        "rag_specialist",
+        {"request": "Wer ist der Projektleiter?"},
+    )
+    frames = chats_module._build_trace_frames(event, next_id=1)
+    assert len(frames) == 2
+    assert frames[0]["kind"] == "model_thought"
+    assert frames[0]["author"] == "chat_orchestrator"
+    assert "delegiere" in frames[0]["text"]
+    assert frames[1]["kind"] == "tool_call"
+    assert frames[1]["name"] == "rag_specialist"
+
+
+def test_build_trace_frames_splits_thought_and_answer():
+    """Events from thinking-enabled agents carry both `thought=True` parts
+    and answer parts. The activity panel must see them as two separate
+    frames so it can render distinct headlines/icons."""
+    event = _model_thought_and_text(
+        "ich pruefe Quelle [3]",
+        "Die Bausumme betraegt CHF 12 Mio.",
+    )
+    frames = chats_module._build_trace_frames(event, next_id=5)
+    assert len(frames) == 2
+    assert frames[0]["kind"] == "model_thought"
+    assert frames[0]["text"] == "ich pruefe Quelle [3]"
+    assert frames[1]["kind"] == "model_text"
+    assert frames[1]["text"] == "Die Bausumme betraegt CHF 12 Mio."
+
+
+@pytest.mark.asyncio
+async def test_thought_parts_do_not_leak_into_user_stream(monkeypatch, chat_stub):
+    """Chain-of-thought MUST stay in the activity panel — never in the
+    streamed delta the user sees, and never persisted to chat_messages."""
+    sb = _SupabaseStub()
+    monkeypatch.setattr(chats_module, "supabase", lambda: sb)
+
+    fake_app = _FakeApp(
+        events=[
+            _model_thought_and_text(
+                "interner Gedanke darf nicht raus",
+                "sichtbare Antwort",
+            )
+        ],
+        citations=[],
+    )
+
+    async def fake_get_or_build(_corpus):
+        return fake_app
+
+    async def fake_seed(*, app, user_id, chat_id):
+        return _FakeSession([])
+
+    monkeypatch.setattr(chats_module, "get_or_build_app", fake_get_or_build)
+    monkeypatch.setattr(chats_module, "seed_session", fake_seed)
+
+    frames = await _collect(
+        chats_module._send_message_stream(
+            chat=chat_stub, text="hi", chat_id="chat-1", user_id="u1", template=None,
+        )
+    )
+    parsed = _parse_sse(frames)
+    deltas = [p["content"] for p in parsed if p.get("type") == "delta"]
+    assert deltas == ["sichtbare Antwort"]
+    assert all("interner Gedanke" not in d for d in deltas)
+    # Persisted assistant message must not include the thought either.
+    assert sb.assistant_inserts, "assistant message was not persisted"
+    for ins in sb.assistant_inserts:
+        assert "interner Gedanke" not in ins["content"]

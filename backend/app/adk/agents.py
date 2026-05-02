@@ -25,7 +25,7 @@ N-question chat turns.
 from __future__ import annotations
 
 from google.adk.agents.llm_agent import LlmAgent
-from google.adk.tools import agent_tool, url_context
+from google.adk.tools import url_context
 from google.adk.tools.google_search_tool import GoogleSearchTool
 from google.genai import types as genai_types
 
@@ -33,6 +33,7 @@ from app.projektanalyse_v2_tool import run_projektanalyse_v2_tool
 
 from .instructions import CHAT_ORCHESTRATOR_INSTRUCTION, RAG_SPECIALIST_INSTRUCTION
 from .retrieval_tool import make_search_project_documents_tool
+from .streaming_agent_tool import StreamingAgentTool
 
 
 # ---------------------------------------------------------------------------
@@ -48,17 +49,36 @@ from .retrieval_tool import make_search_project_documents_tool
 # outage occurs.
 # ---------------------------------------------------------------------------
 
-_RETRY_CONFIG = genai_types.GenerateContentConfig(
-    http_options=genai_types.HttpOptions(
-        retry_options=genai_types.HttpRetryOptions(
-            attempts=4,
-            initial_delay=1.0,
-            max_delay=20.0,
-            exp_base=2.0,
-            http_status_codes=[429, 500, 502, 503, 504],
-        )
+_HTTP_OPTIONS = genai_types.HttpOptions(
+    retry_options=genai_types.HttpRetryOptions(
+        attempts=4,
+        initial_delay=1.0,
+        max_delay=20.0,
+        exp_base=2.0,
+        http_status_codes=[429, 500, 502, 503, 504],
     )
 )
+
+_RETRY_CONFIG = genai_types.GenerateContentConfig(http_options=_HTTP_OPTIONS)
+
+
+# Thinking surfaces the model's chain-of-thought as `thought=True` text parts
+# in the event stream. We expose them in the activity panel so debug users can
+# see WHY the agent reached an answer; the streamed user-facing reply still
+# only contains non-thought text. budget=-1 lets the model decide how much
+# thinking it needs (matches Vertex Agent Builder's default).
+_THINKING_CONFIG = genai_types.ThinkingConfig(
+    include_thoughts=True,
+    thinking_budget=-1,
+)
+
+
+def _retry_with_thinking() -> genai_types.GenerateContentConfig:
+    """Per-agent generate-content config: retry + chain-of-thought emission."""
+    return genai_types.GenerateContentConfig(
+        http_options=_HTTP_OPTIONS,
+        thinking_config=_THINKING_CONFIG,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +134,8 @@ def make_rag_specialist(corpus_name: str) -> LlmAgent:
             "Vom Chat-Agenten pro Einzelfrage delegiert."
         ),
         instruction=RAG_SPECIALIST_INSTRUCTION,
-        tools=[agent_tool.AgentTool(agent=make_document_retriever(corpus_name))],
-        generate_content_config=_RETRY_CONFIG,
+        tools=[StreamingAgentTool(agent=make_document_retriever(corpus_name))],
+        generate_content_config=_retry_with_thinking(),
     )
 
 
@@ -199,8 +219,8 @@ web_researcher = LlmAgent(
         "stattdessen 'im Web nicht belegt'."
     ),
     tools=[
-        agent_tool.AgentTool(agent=web_google_search),
-        agent_tool.AgentTool(agent=web_url_fetcher),
+        StreamingAgentTool(agent=web_google_search),
+        StreamingAgentTool(agent=web_url_fetcher),
     ],
     generate_content_config=_RETRY_CONFIG,
 )
@@ -234,9 +254,9 @@ def make_chat_orchestrator(corpus_name: str) -> LlmAgent:
         ),
         instruction=CHAT_ORCHESTRATOR_INSTRUCTION,
         tools=[
-            agent_tool.AgentTool(agent=make_rag_specialist(corpus_name)),
-            agent_tool.AgentTool(agent=web_researcher),
+            StreamingAgentTool(agent=make_rag_specialist(corpus_name)),
+            StreamingAgentTool(agent=web_researcher),
             run_projektanalyse_v2_tool,
         ],
-        generate_content_config=_RETRY_CONFIG,
+        generate_content_config=_retry_with_thinking(),
     )

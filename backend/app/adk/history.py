@@ -61,9 +61,11 @@ def load_history_rows(
 async def seed_session(*, app: AdkApp, user_id: str, chat_id: str) -> Session:
     """Create a new in-memory session, append historical events, return it.
 
-    The just-persisted user turn is included in the seeded events; chats.py
-    drops it before calling app.async_stream_query so that turn can be
-    passed as the `message` argument instead.
+    chats.py persists the current user turn BEFORE calling us (so the
+    message is durable even if the stream fails). That same turn is then
+    passed as the `message` argument to `app.async_stream_query`. To
+    avoid the model seeing the question twice (once in history, once as
+    the new message), we drop the trailing user row here.
     """
     sess_service = app._tmpl_attrs["session_service"]
     app_name = app._tmpl_attrs["app_name"]
@@ -76,6 +78,12 @@ async def seed_session(*, app: AdkApp, user_id: str, chat_id: str) -> Session:
     )
 
     rows = await asyncio.to_thread(load_history_rows, chat_id, user_id)
+    # Drop the just-persisted current turn — it'll be sent via
+    # async_stream_query(message=...) instead. Only strip a trailing
+    # user row; an assistant trailing row would mean the previous turn
+    # finished and this is a fresh question with empty history.
+    if rows and rows[-1].get("role") == "user":
+        rows = rows[:-1]
     for r in rows:
         evt = _row_to_event(r)
         if evt is not None:

@@ -143,10 +143,16 @@ def make_search_project_documents_tool(
                 "file_id": file_id,
             }
             citations.append(record)
+            score = getattr(ctx, "score", None)
             out_chunks.append({
                 "idx": next_idx,
                 "filename": filename,
                 "text": text,
+                # `score` is exposed to the LLM and to the activity-panel
+                # trace frame so debug users can see retrieval confidence.
+                # Vertex returns a relevance score in [0, 1]; None when the
+                # backend didn't supply one.
+                "score": float(score) if score is not None else None,
             })
             next_idx += 1
 

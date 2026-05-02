@@ -79,6 +79,9 @@ async def test_three_chunks_yield_idx_1_2_3(monkeypatch):
     assert out["status"] == "ok"
     assert [c["idx"] for c in out["chunks"]] == [1, 2, 3]
     assert [c["filename"] for c in out["chunks"]] == ["alpha.pdf", "bravo.pdf", "charlie.pdf"]
+    # Score is exposed on the chunk dict so the activity-panel trace frame
+    # can render confidence badges.
+    assert all(c["score"] == 0.5 for c in out["chunks"])
     assert len(ctx.state["citations"]) == 3
     record = ctx.state["citations"][0]
     assert record["filename"] == "alpha.pdf"

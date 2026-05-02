@@ -79,7 +79,137 @@ async def test_seed_session_appends_history(monkeypatch):
 
     sess = await seed_session(app=_App(), user_id="u1", chat_id="c1")
     assert sess.id == "sess-1"
-    assert len(appended) == 5
+    # The trailing user row is the just-persisted current turn — chats.py
+    # passes it via async_stream_query(message=...) instead, so seed_session
+    # MUST drop it here. Otherwise the model sees the question twice (once
+    # in history, once as the new message) and reasons about the duplicate.
+    assert len(appended) == 4
+    assert [e.content.parts[0].text for e in appended] == ["q1", "a1", "q2", "a2"]
     assert [e.content.role for e in appended] == [
-        "user", "model", "user", "model", "user"
+        "user", "model", "user", "model",
     ]
+
+
+@pytest.mark.asyncio
+async def test_seed_session_keeps_trailing_assistant_row(monkeypatch):
+    """If the most recent row is an assistant turn (means the previous
+    turn finished cleanly and this is a fresh question against an empty
+    just-created chat — or odd state), don't strip it; a missing user
+    suffix means there's nothing to dedupe."""
+    rows = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+    ]
+    monkeypatch.setattr(
+        history_module, "load_history_rows", lambda *_a, **_kw: rows
+    )
+    appended: list = []
+
+    class _SessSvc:
+        async def get_session(self, **_kw):
+            class _S:
+                state = {}
+            s = _S(); s.id = "sess-1"; return s
+
+        async def append_event(self, session, event):
+            appended.append(event)
+
+    class _App:
+        _tmpl_attrs = {"session_service": _SessSvc(), "app_name": "a"}
+
+        async def async_create_session(self, *, user_id):
+            return {"id": "sess-1"}
+
+    await seed_session(app=_App(), user_id="u1", chat_id="c1")
+    assert [e.content.parts[0].text for e in appended] == ["q1", "a1"]
+
+
+@pytest.mark.asyncio
+async def test_seed_session_filters_by_chat_id(monkeypatch):
+    """Two chats in the same project must see only their own history. We
+    fake load_history_rows to return different rows per chat_id and verify
+    seed_session forwards the chat_id correctly + the seeded events match
+    that chat alone (not the other chat in the same project)."""
+    chat_a_rows = [
+        {"role": "user", "content": "A1"},
+        {"role": "assistant", "content": "answer-A1"},
+        {"role": "user", "content": "A2"},  # current turn — gets stripped
+    ]
+    chat_b_rows = [
+        {"role": "user", "content": "B-first-ever"},  # current turn — stripped
+    ]
+    forwarded: list[str] = []
+
+    def fake_load(chat_id, user_id, limit=20):  # noqa: ARG001
+        forwarded.append(chat_id)
+        return {"chat-a": chat_a_rows, "chat-b": chat_b_rows}[chat_id]
+
+    monkeypatch.setattr(history_module, "load_history_rows", fake_load)
+
+    per_call_appends: list[list[str]] = []
+    current: list[str] = []
+
+    class _SessSvc:
+        async def get_session(self, **_kw):
+            # Mark the start of a new session by snapshotting the current
+            # buffer into the per-call list and resetting.
+            nonlocal current
+            per_call_appends.append(current)
+            current = []
+            class _S:
+                state = {}
+            s = _S(); s.id = "sess"; return s
+
+        async def append_event(self, session, event):
+            current.append(event.content.parts[0].text)
+
+    class _App:
+        _tmpl_attrs = {"session_service": _SessSvc(), "app_name": "a"}
+
+        async def async_create_session(self, *, user_id):
+            return {"id": "sess"}
+
+    await seed_session(app=_App(), user_id="u1", chat_id="chat-a")
+    await seed_session(app=_App(), user_id="u1", chat_id="chat-b")
+    # Flush the trailing call's buffer.
+    per_call_appends.append(current)
+
+    # First entry is the placeholder before any seed_session ran.
+    assert per_call_appends[0] == []
+    chat_a_appends, chat_b_appends = per_call_appends[1], per_call_appends[2]
+    assert forwarded == ["chat-a", "chat-b"]
+    # Chat A: A1 + answer-A1 (A2 is the current turn → stripped).
+    assert chat_a_appends == ["A1", "answer-A1"]
+    # Chat B: empty (only the current turn was in history → stripped).
+    # Critically, NO chat-A messages leak into the chat-B session.
+    assert chat_b_appends == []
+
+
+@pytest.mark.asyncio
+async def test_seed_session_handles_empty_history(monkeypatch):
+    """Brand-new chat: the just-persisted user message is the only row, so
+    seed_session ends up appending nothing — and the model sees only the
+    `message` argument when async_stream_query runs."""
+    rows = [{"role": "user", "content": "first ever question"}]
+    monkeypatch.setattr(
+        history_module, "load_history_rows", lambda *_a, **_kw: rows
+    )
+    appended: list = []
+
+    class _SessSvc:
+        async def get_session(self, **_kw):
+            class _S:
+                state = {}
+            s = _S(); s.id = "sess-1"; return s
+
+        async def append_event(self, session, event):
+            appended.append(event)
+
+    class _App:
+        _tmpl_attrs = {"session_service": _SessSvc(), "app_name": "a"}
+
+        async def async_create_session(self, *, user_id):
+            return {"id": "sess-1"}
+
+    await seed_session(app=_App(), user_id="u1", chat_id="c1")
+    assert appended == []

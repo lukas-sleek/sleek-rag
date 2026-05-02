@@ -60,7 +60,32 @@ def event_author(event: dict) -> str | None:
 
 
 def event_text(event: dict) -> str:
-    return "".join(p.get("text") or "" for p in _parts(event))
+    """Concatenate non-thought text parts only.
+
+    With `ThinkingConfig.include_thoughts=True`, model events can carry a
+    mix of `{"text": "...", "thought": True}` (chain-of-thought) and plain
+    `{"text": "..."}` (answer) parts. The user-facing streamed reply must
+    contain ONLY the answer parts — thoughts are surfaced separately in
+    the activity panel via `event_thought_text`.
+    """
+    return "".join(
+        p.get("text") or ""
+        for p in _parts(event)
+        if not p.get("thought")
+    )
+
+
+def event_thought_text(event: dict) -> str:
+    """Concatenate the chain-of-thought (thought=True) text parts only."""
+    return "".join(
+        p.get("text") or ""
+        for p in _parts(event)
+        if p.get("thought") and p.get("text")
+    )
+
+
+def event_has_thought(event: dict) -> bool:
+    return any(p.get("thought") and p.get("text") for p in _parts(event))
 
 
 def is_v2_handoff(event: dict) -> bool:
