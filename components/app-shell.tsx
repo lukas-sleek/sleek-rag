@@ -10,7 +10,7 @@ import { Composer, EmptyState, Message } from "./chat";
 const LAST_CHAT_KEY = "sleek-rag.last-chat-id";
 import { ProjectFilesModal } from "./project-files-modal";
 import { PdfViewerDialog } from "./pdf-viewer-dialog";
-import { TemplateAnalysisModal, loadTemplate, parseTemplate } from "./template-modal";
+import { TemplateAnalysisModal } from "./template-modal";
 import {
   ACCEPT_ATTR,
   filterAllowedFiles,
@@ -75,8 +75,16 @@ export function App() {
   const [projectFiles, setProjectFiles] = React.useState<Record<string, FileItem[]>>({});
 
   const [threads, setThreads] = React.useState<Record<string, Msg[]>>({});
-  const [streaming, setStreaming] = React.useState(false);
-  const streamRef = React.useRef<{ controller: AbortController | null }>({ controller: null });
+  // Per-chat streaming state. The Composer / Stop button reads only the
+  // active chat's flag, so opening a new chat while another is generating
+  // shows the normal Send button — the background stream keeps running and
+  // its own chat thread keeps updating.
+  const [streamingChats, setStreamingChats] = React.useState<Set<string>>(
+    () => new Set(),
+  );
+  const streamControllersRef = React.useRef<Map<string, AbortController>>(
+    new Map(),
+  );
   const loadedThreadsRef = React.useRef<Set<string>>(new Set());
   // Initial-load gate. Tracks chats whose messages fetch has resolved (success
   // or failure), whether the URL→state effect has picked an active chat, and
@@ -596,6 +604,7 @@ export function App() {
   const messages = threads[activeChatId] || [];
   const isEmpty = activeChatId === "__empty__" || messages.length === 0;
   const noProjects = projectsLoaded && projects.length === 0;
+  const activeChatStreaming = streamingChats.has(activeChatId);
 
   // Chats considered "empty / unused": a freshly created chat the user
   // hasn't sent the first message in. Used to gate the "+ Neuer Chat"
@@ -878,9 +887,43 @@ export function App() {
       [chatId]: [...(prev[chatId] || []), { role: "user", content: text }],
     }));
 
-    setStreaming(true);
+    // First user message in a fresh chat: paint the title with the first
+    // ~40 chars of the prompt right away so the sidebar reflects something
+    // meaningful before the AI title (2-3 words, can take seconds) lands.
+    const currentChat = projects
+      .find((p) => p.chats.some((c) => c.id === chatId))
+      ?.chats.find((c) => c.id === chatId);
+    const isFirstTurn =
+      !!currentChat &&
+      (currentChat.title === "Neuer Chat" || currentChat.title === "New chat");
+    if (isFirstTurn) {
+      const trimmed = text.trim();
+      const placeholder =
+        trimmed.length <= 40 ? trimmed : trimmed.slice(0, 40).trimEnd() + "…";
+      setProjects((prev) =>
+        prev.map((p) => ({
+          ...p,
+          chats: p.chats.map((c) => (c.id === chatId ? { ...c, title: placeholder } : c)),
+        })),
+      );
+      api(`/api/chats/${chatId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: placeholder }),
+      }).catch(() => {});
+      // Kick off the AI title (2-3 words) in parallel with the chat stream.
+      // The title call is independent — no need to wait for the message
+      // generation to finish before we know what to call this chat.
+      void generateChatTitle(chatId, text);
+    }
+
     const controller = new AbortController();
-    streamRef.current.controller = controller;
+    streamControllersRef.current.set(chatId, controller);
+    setStreamingChats((prev) => {
+      const next = new Set(prev);
+      next.add(chatId);
+      return next;
+    });
 
     setThreads((prev) => ({
       ...prev,
@@ -906,10 +949,7 @@ export function App() {
       const res = await api(`/api/chats/${chatId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text,
-          projektanalyse_template: parseTemplate(loadTemplate()),
-        }),
+        body: JSON.stringify({ text }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
@@ -1094,69 +1134,73 @@ export function App() {
         pushToast("Streaming abgebrochen.", "warn");
       }
     } finally {
-      setStreaming(false);
-      streamRef.current.controller = null;
+      streamControllersRef.current.delete(chatId);
+      setStreamingChats((prev) => {
+        if (!prev.has(chatId)) return prev;
+        const next = new Set(prev);
+        next.delete(chatId);
+        return next;
+      });
     }
 
-    const proj = projects.find((p) => p.chats.some((c) => c.id === chatId));
-    const chat = proj?.chats.find((c) => c.id === chatId);
-    if (chat && (chat.title === "Neuer Chat" || chat.title === "New chat")) {
-      // Clear the title so the streamed tokens are the only thing shown.
-      setProjects((prev) =>
-        prev.map((p) => ({
-          ...p,
-          chats: p.chats.map((c) => (c.id === chatId ? { ...c, title: "" } : c)),
-        })),
-      );
-      try {
-        const res = await api(`/api/chats/${chatId}/title`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ first_message: text }),
-        });
-        if (res.ok && res.body) {
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          let acc = "";
-          outer: while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() ?? "";
-            for (const line of lines) {
-              if (!line.startsWith("data: ")) continue;
-              const data = line.slice(6);
-              if (data === "[DONE]") break outer;
-              try {
-                const { delta } = JSON.parse(data) as { delta?: string };
-                if (!delta) continue;
-                acc += delta;
-                setProjects((prev) =>
-                  prev.map((p) => ({
-                    ...p,
-                    chats: p.chats.map((c) =>
-                      c.id === chatId ? { ...c, title: acc } : c,
-                    ),
-                  })),
-                );
-              } catch {
-                /* ignore malformed line */
-              }
-            }
+  };
+
+  // Background AI title generation. Runs in parallel with the chat stream so
+  // the sidebar swaps from the prompt-slice placeholder to a 2-3-word title
+  // as soon as the title model is done — independent of how long the answer
+  // takes. Errors swallowed: placeholder stays as the worst case.
+  const generateChatTitle = async (chatId: string, firstMessage: string) => {
+    try {
+      const res = await api(`/api/chats/${chatId}/title`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ first_message: firstMessage }),
+      });
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let acc = "";
+      outer: while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6);
+          if (data === "[DONE]") break outer;
+          try {
+            const { delta } = JSON.parse(data) as { delta?: string };
+            if (delta) acc += delta;
+          } catch {
+            /* ignore malformed line */
           }
         }
-      } catch {
-        /* best-effort title generation; leave whatever's accumulated */
       }
+      const finalTitle = acc.trim().replace(/^["']+|["']+$/g, "").trim();
+      if (finalTitle) {
+        setProjects((prev) =>
+          prev.map((p) => ({
+            ...p,
+            chats: p.chats.map((c) =>
+              c.id === chatId ? { ...c, title: finalTitle } : c,
+            ),
+          })),
+        );
+      }
+    } catch {
+      /* best-effort title generation; leave the placeholder in place */
     }
   };
 
   const onStop = () => {
-    streamRef.current.controller?.abort();
-    streamRef.current.controller = null;
-    setStreaming(false);
+    if (!activeChatId) return;
+    const ctrl = streamControllersRef.current.get(activeChatId);
+    if (ctrl) ctrl.abort();
+    // The sendMessage finally-block clears the controller + streamingChats
+    // entry once the abort propagates; no manual cleanup needed here.
   };
 
   const splash = (
@@ -1331,7 +1375,7 @@ export function App() {
                 if (hiddenFileInputRef.current) hiddenFileInputRef.current.click();
               }}
             />
-            <Composer onSend={sendMessage} streaming={streaming} onStop={onStop} />
+            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} />
           </>
         ) : (
           <>
@@ -1354,7 +1398,7 @@ export function App() {
                   <Message
                     key={i}
                     msg={m}
-                    streaming={streaming && i === messages.length - 1 && m.role === "assistant"}
+                    streaming={activeChatStreaming && i === messages.length - 1 && m.role === "assistant"}
                     onCiteClick={(c) => {
                       // Web citations open in a new tab; PDFs open the
                       // in-app GCS-backed viewer.
@@ -1368,7 +1412,7 @@ export function App() {
                 ))}
               </div>
             </div>
-            <Composer onSend={sendMessage} streaming={streaming} onStop={onStop} />
+            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} />
           </>
         )}
       </main>

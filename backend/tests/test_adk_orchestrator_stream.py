@@ -234,7 +234,7 @@ async def test_basic_stream_emits_delta_meta_done(monkeypatch, chat_stub):
             text="hi",
             chat_id="chat-1",
             user_id="u1",
-            template=None,
+            
         )
     )
     parsed = _parse_sse(frames)
@@ -274,7 +274,7 @@ async def test_filters_subagent_text(monkeypatch, chat_stub):
 
     frames = await _collect(
         chats_module._send_message_stream(
-            chat=chat_stub, text="hi", chat_id="chat-1", user_id="u1", template=None,
+            chat=chat_stub, text="hi", chat_id="chat-1", user_id="u1",
         )
     )
     parsed = _parse_sse(frames)
@@ -284,53 +284,13 @@ async def test_filters_subagent_text(monkeypatch, chat_stub):
 
 
 @pytest.mark.asyncio
-async def test_v2_handoff_aborts_orchestrator_stream(monkeypatch, chat_stub):
-    sb = _SupabaseStub()
-    monkeypatch.setattr(chats_module, "supabase", lambda: sb)
-
-    fake_app = _FakeApp(
-        events=[
-            _model_text("preamble"),
-            _tool_response("run_projektanalyse_v2", {"hand_off": "projektanalyse_v2"}),
-            _model_text("SHOULD NOT APPEAR"),
-        ],
-    )
-
-    async def fake_get_or_build(_corpus):
-        return fake_app
-
-    async def fake_seed(*, app, user_id, chat_id):
-        return _FakeSession()
-
-    async def fake_v2(*, template, chat_id, user_id):
-        yield "data: " + json.dumps({"type": "delta", "content": "v2-output"}) + "\n\n"
-        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
-
-    monkeypatch.setattr(chats_module, "get_or_build_app", fake_get_or_build)
-    monkeypatch.setattr(chats_module, "seed_session", fake_seed)
-    monkeypatch.setattr(chats_module, "stream_projektanalyse_v2", fake_v2)
-
-    frames = await _collect(
-        chats_module._send_message_stream(
-            chat=chat_stub, text="vollanalyse", chat_id="chat-1", user_id="u1",
-            template=["q?"],
-        )
-    )
-    parsed = _parse_sse(frames)
-    contents = [p.get("content") for p in parsed if p["type"] == "delta"]
-    assert "preamble" in contents
-    assert "v2-output" in contents
-    assert "SHOULD NOT APPEAR" not in contents
-
-
-@pytest.mark.asyncio
 async def test_no_corpus_friendly_notice(monkeypatch, chat_stub):
     sb = _SupabaseStub(corpus_name=None)
     monkeypatch.setattr(chats_module, "supabase", lambda: sb)
 
     frames = await _collect(
         chats_module._send_message_stream(
-            chat=chat_stub, text="hi", chat_id="chat-1", user_id="u1", template=None,
+            chat=chat_stub, text="hi", chat_id="chat-1", user_id="u1",
         )
     )
     parsed = _parse_sse(frames)
@@ -376,7 +336,7 @@ async def test_citations_dedupe_renumbers_refs(monkeypatch, chat_stub):
 
     frames = await _collect(
         chats_module._send_message_stream(
-            chat=chat_stub, text="hi", chat_id="chat-1", user_id="u1", template=None,
+            chat=chat_stub, text="hi", chat_id="chat-1", user_id="u1",
         )
     )
     parsed = _parse_sse(frames)
@@ -577,7 +537,7 @@ async def test_thought_parts_do_not_leak_into_user_stream(monkeypatch, chat_stub
 
     frames = await _collect(
         chats_module._send_message_stream(
-            chat=chat_stub, text="hi", chat_id="chat-1", user_id="u1", template=None,
+            chat=chat_stub, text="hi", chat_id="chat-1", user_id="u1",
         )
     )
     parsed = _parse_sse(frames)

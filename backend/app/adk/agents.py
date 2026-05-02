@@ -10,7 +10,7 @@ Tree shape:
       tool: web_researcher (StreamingAgentTool)
         tool: web_google_search (StreamingAgentTool)
         tool: web_url_fetcher (StreamingAgentTool)
-      tool: run_projektanalyse_v2 (FunctionTool)
+      tool: run_projektanalyse (FunctionTool, fan-out der User-Vorlage)
 
 Why managed retrieval: the previous custom `search_project_documents`
 FunctionTool forced exactly one retrieval per ADK round-trip — the model
@@ -30,10 +30,9 @@ from google.adk.tools.retrieval.vertex_ai_rag_retrieval import VertexAiRagRetrie
 from google.genai import types as genai_types
 from vertexai.preview import rag
 
-from app.projektanalyse_v2_tool import run_projektanalyse_v2_tool
-
 from .dispatch_rag_questions_tool import make_dispatch_rag_questions_tool
 from .instructions import CHAT_ORCHESTRATOR_INSTRUCTION, RAG_SPECIALIST_INSTRUCTION
+from .projektanalyse_tool import make_run_projektanalyse_tool
 from .streaming_agent_tool import StreamingAgentTool
 
 
@@ -264,8 +263,8 @@ web_researcher = LlmAgent(
 def make_chat_orchestrator(corpus_name: str) -> LlmAgent:
     """Top-level chat agent. Builds a fresh rag_specialist (corpus-bound)
     and wires it alongside the corpus-independent web_researcher, the
-    dispatch_rag_questions fan-out tool, and the run_projektanalyse_v2
-    hand-off tool.
+    dispatch_rag_questions fan-out tool, and the run_projektanalyse
+    template-fan-out tool.
 
     rag_specialist is constructed ONCE per orchestrator and shared by both
     the single-question StreamingAgentTool path and the multi-question
@@ -286,7 +285,7 @@ def make_chat_orchestrator(corpus_name: str) -> LlmAgent:
             "entscheidet ueber das Routing (rag_specialist fuer eine einzelne "
             "Projektfrage, dispatch_rag_questions fuer 2+ unabhaengige "
             "Projektfragen, web_researcher fuer externe Recherche, "
-            "run_projektanalyse_v2 nur auf explizite Anfrage, Direktantwort "
+            "run_projektanalyse fuer die hinterlegte Vorlage, Direktantwort "
             "bei Smalltalk und reinen Folgefragen) und fasst Sub-Agent-"
             "Antworten zu einer kohaerenten Antwort zusammen."
         ),
@@ -306,8 +305,8 @@ def make_chat_orchestrator(corpus_name: str) -> LlmAgent:
             # does unreliably). See dispatch_rag_questions_tool.py for the
             # empirical justification.
             make_dispatch_rag_questions_tool(rag_specialist),
+            make_run_projektanalyse_tool(rag_specialist),
             StreamingAgentTool(agent=web_researcher),
-            run_projektanalyse_v2_tool,
         ],
         generate_content_config=_retry_with_orchestrator_thinking(),
     )

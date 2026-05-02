@@ -27,8 +27,7 @@ const MD_PROSE =
   "[&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_td]:align-top";
 
 const SUGGESTIONS = [
-  { title: "Projektanalyse erstellen", desc: "Strukturierte Auswertung über alle Dokumente (file_search)" },
-  { title: "Projektanalyse v2 erstellen", desc: "Volltext-Analyse — Dokumente komplett im Modell-Kontext" },
+  { title: "Projektanalyse erstellen", desc: "Beantwortet alle Fragen aus deiner Vorlage parallel über die Projektdokumente" },
 ];
 
 function linkifyCitations(text: string, citations: Citation[]): string {
@@ -247,7 +246,7 @@ export function EmptyState({
       <div className="font-display text-[28px] font-medium tracking-[-0.02em] text-text text-center">
         Hallo, {userName}. <span className="text-text-tertiary">Was kann ich für dich heraussuchen?</span>
       </div>
-      <div className="grid grid-cols-[repeat(2,minmax(0,280px))] gap-2.5 w-full max-w-[600px]">
+      <div className="flex flex-wrap justify-center gap-2.5 w-full max-w-[600px]">
         {SUGGESTIONS.map((s) => (
           <button
             key={s.title}
@@ -460,6 +459,16 @@ export function Composer({
               </>
             )}
           </Dropdown>
+
+          <button
+            type="button"
+            disabled={streaming}
+            onClick={() => onSend("Projektanalyse erstellen")}
+            title="Beantwortet alle Fragen aus deiner Vorlage parallel"
+            className="h-7 inline-flex items-center gap-1.5 px-2.5 rounded-md bg-transparent border border-transparent text-text-secondary text-xs font-medium whitespace-nowrap transition-[background-color,color,border-color,opacity] duration-150 hover:bg-bg-hover hover:text-text hover:border-border disabled:opacity-45 disabled:cursor-not-allowed [&_svg]:text-text-tertiary"
+          >
+            <Icon.Sparkles /> Projektanalyse erstellen
+          </button>
 
           <Dropdown
             trigger={

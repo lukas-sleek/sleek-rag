@@ -1,18 +1,17 @@
-"""Chat endpoints — ADK multi-agent edition (plan 19.0).
+"""Chat endpoints — ADK multi-agent edition.
 
 A chat turn = one orchestrator-driven AdkApp run. The orchestrator
-(gemini-2.5-pro) routes to:
-  - rag_specialist (per-question Flash worker) — Projektfragen
+(gemini-2.5-flash) routes to:
+  - rag_specialist (per-question Flash worker) — einzelne Projektfrage
+  - dispatch_rag_questions (FunctionTool) — 2+ unabhaengige Projektfragen
+  - run_projektanalyse (FunctionTool) — Vorlage des Nutzers durchgehen
   - web_researcher (Flash + Google search + UrlContext) — externe Fragen
-  - run_projektanalyse_v2 — explicit user-elected handoff to v2 streamer
 
 Per-turn lifecycle:
   1. Persist user message to chat_messages.
   2. Resolve corpus -> get-or-build a per-corpus AdkApp (LRU-cached).
   3. Seed a fresh in-memory ADK session with replayed Supabase history.
   4. Stream events; forward orchestrator model_text deltas to SSE.
-     If the orchestrator emits a run_projektanalyse_v2 tool_response,
-     abort and resume from stream_projektanalyse_v2.
   5. Read state["citations"], dedupe + globally renumber, persist.
 
 SSE shape unchanged from 18.3: delta -> meta -> done.
@@ -40,14 +39,12 @@ from app.adk.event_translator import (
     event_state_delta,
     event_text,
     event_thought_text,
-    is_v2_handoff,
 )
 from app.adk.history import seed_session
 from app.auth import current_user_id
 from app.config import settings
 from app.db import supabase
 from app.gemini_client import gemini_client_untraced
-from app.projektanalyse import stream_projektanalyse_v2
 
 log = logging.getLogger(__name__)
 
@@ -481,7 +478,6 @@ class ChatOut(BaseModel):
 
 class MessageIn(BaseModel):
     text: str
-    projektanalyse_template: list[str] | None = None
 
 
 class TitleIn(BaseModel):
@@ -639,9 +635,8 @@ async def _send_message_stream(
     text: str,
     chat_id: str,
     user_id: str,
-    template: list[str] | None,
 ):
-    """ADK-driven streaming chat turn (plan 19.0)."""
+    """ADK-driven streaming chat turn."""
     import time as _time
     t_chain_start = _time.time()
     project_id = chat["project_id"]
@@ -680,7 +675,6 @@ async def _send_message_stream(
 
     answer_parts: list[str] = []
     web_response_texts: list[str] = []
-    handed_off = False
     trace_id = 0
     # Per-turn high-water mark for sub-agent activity. StreamingAgentTool
     # writes into session state["agent_trace"] (thoughts + tool_calls +
@@ -869,21 +863,6 @@ async def _send_message_stream(
                         {"type": "delta", "content": piece}
                     ) + "\n\n"
 
-            elif kind == "tool_response" and is_v2_handoff(event):
-                handed_off = True
-                # v2 hand-off bypasses the rest of this function — cancel
-                # the dispatch pump and reset the contextvar before we
-                # surrender control to stream_projektanalyse_v2.
-                for _t in (adk_task, disp_task):
-                    if not _t.done():
-                        _t.cancel()
-                DISPATCH_PROGRESS_CHAN.reset(_chan_token)
-                async for sse in stream_projektanalyse_v2(
-                    template=template, chat_id=chat_id, user_id=user_id
-                ):
-                    yield sse
-                return
-
             # Capture web_researcher tool_response text so we can parse the
             # mandated Quellen: block into citation records after the run.
             # The orchestrator forwards web's local [N] markers verbatim, so
@@ -926,9 +905,6 @@ async def _send_message_stream(
             if not _t.done():
                 _t.cancel()
         DISPATCH_PROGRESS_CHAN.reset(_chan_token)
-
-    if handed_off:
-        return
 
     # 4. Build citation records from grounding metadata. With native vertex_
     # rag_store retrieval, the rag_specialist's tool_context.state no longer
@@ -1014,7 +990,6 @@ async def send_message(
             text=body.text,
             chat_id=chat_id,
             user_id=user_id,
-            template=body.projektanalyse_template,
         ),
         media_type="text/event-stream",
     )

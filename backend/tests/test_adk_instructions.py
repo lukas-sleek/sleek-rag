@@ -19,8 +19,7 @@ def test_rag_specialist_instruction_contains_required_clauses():
 def test_rag_specialist_instruction_drops_orchestrator_clauses():
     for forbidden in [
         "SMALLTALK",
-        "NO-V2-ESCALATION",
-        "PROJEKTANALYSE-TOOLS",
+        "PROJEKTANALYSE-VORLAGE",
     ]:
         assert forbidden not in RAG_SPECIALIST_INSTRUCTION, (
             f"unexpected clause: {forbidden}"
@@ -36,7 +35,7 @@ def test_chat_orchestrator_instruction_contains_required_clauses():
         "MEHRFACH-FRAGEN",
         "COMPOUND-FOLGEFRAGE",
         "WIEDERHOLTE 'NICHT ANGEGEBEN'",
-        "NO-V2-ESCALATION",
+        "PROJEKTANALYSE-VORLAGE",
         "ASCII-Spelling",
         "KONTEXT-INTELLIGENZ",
         "NO-SELF-DERIVATION",

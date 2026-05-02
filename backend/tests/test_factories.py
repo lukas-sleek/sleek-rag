@@ -38,12 +38,17 @@ def test_two_specialists_isolate_corpora():
     assert s2.tools[0].vertex_rag_store.rag_resources[0].rag_corpus == "c2"
 
 
-def test_chat_orchestrator_uses_flash_and_three_tools():
+def test_chat_orchestrator_uses_flash_and_four_tools():
     orch = make_chat_orchestrator("c1")
     assert orch.name == "chat_orchestrator"
     assert orch.model == "gemini-2.5-flash"
     tool_names = [t.name for t in orch.tools]
-    assert tool_names == ["rag_specialist", "web_researcher", "run_projektanalyse_v2"]
+    assert tool_names == [
+        "rag_specialist",
+        "dispatch_rag_questions",
+        "run_projektanalyse",
+        "web_researcher",
+    ]
 
 
 def test_orchestrator_propagates_grounding_metadata_for_rag_specialist():

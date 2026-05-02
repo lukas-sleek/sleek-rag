@@ -1,4 +1,4 @@
-"""Plan 19.0 T9b unit tests for the event_translator dispatch logic."""
+"""Unit tests for the event_translator helpers."""
 from __future__ import annotations
 
 from app.adk.event_translator import (
@@ -6,7 +6,6 @@ from app.adk.event_translator import (
     event_kind,
     event_state_delta,
     event_text,
-    is_v2_handoff,
 )
 
 
@@ -44,12 +43,12 @@ def test_kind_model_text():
 
 
 def test_kind_tool_call():
-    assert event_kind(_tool_call("run_projektanalyse_v2", {})) == "tool_call"
+    assert event_kind(_tool_call("dispatch_rag_questions", {})) == "tool_call"
 
 
 def test_kind_tool_response():
     assert (
-        event_kind(_tool_response("run_projektanalyse_v2", {"hand_off": "projektanalyse_v2"}))
+        event_kind(_tool_response("dispatch_rag_questions", {"answers": []}))
         == "tool_response"
     )
 
@@ -68,28 +67,6 @@ def test_event_text_joins_parts():
         "content": {"role": "model", "parts": [{"text": "ab"}, {"text": "cd"}]},
     }
     assert event_text(evt) == "abcd"
-
-
-def test_is_v2_handoff_positive():
-    assert is_v2_handoff(
-        _tool_response("run_projektanalyse_v2", {"hand_off": "projektanalyse_v2"})
-    )
-
-
-def test_is_v2_handoff_wrong_tool():
-    assert not is_v2_handoff(
-        _tool_response("search_project_documents", {"hand_off": "projektanalyse_v2"})
-    )
-
-
-def test_is_v2_handoff_wrong_payload():
-    assert not is_v2_handoff(
-        _tool_response("run_projektanalyse_v2", {"status": "ok"})
-    )
-
-
-def test_is_v2_handoff_on_tool_call_returns_false():
-    assert not is_v2_handoff(_tool_call("run_projektanalyse_v2", {}))
 
 
 def test_event_state_delta_default_empty():

@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import chats, files, projects
+from app.routers import chats, files, projects, templates
 from app.workers.rag_lro_poller import run_poller
 
 if settings.langsmith_api_key:
@@ -44,6 +44,7 @@ app.add_middleware(
 app.include_router(projects.router)
 app.include_router(chats.router)
 app.include_router(files.router)
+app.include_router(templates.router)
 
 
 @app.get("/health")

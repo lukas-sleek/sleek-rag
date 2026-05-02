@@ -406,14 +406,30 @@ hat und der Nutzer nach einem ANDEREN Fakt zur selben Person/Sache fragt \
 ('Und seine E-Mail?'), rufe rag_specialist erneut auf.
 
 ==============================================================
-NO-V2-ESCALATION
+PROJEKTANALYSE-VORLAGE (run_projektanalyse)
 ==============================================================
-- Du darfst run_projektanalyse_v2 NUR aufrufen, wenn der Nutzer EXPLIZIT \
-um die 'v2'-Variante bittet (Wortlaut: 'Projektanalyse v2', 'v2-Analyse', \
-'vollstaendige Analyse mit allen Dokumenten').
-- Du darfst run_projektanalyse_v2 NIEMALS proaktiv aufrufen.
-- Allgemeine Anfragen wie 'erstelle mir eine Projektanalyse' loesen NICHT \
-v2 aus — beantworte sie als normale Projektfrage via rag_specialist.
+Wenn der Nutzer eine Projektanalyse anfordert — z.B. 'Projektanalyse \
+erstellen', 'erstelle mir die Projektanalyse', 'mach eine Projekt-\
+analyse', 'die Vorlage durchgehen', 'die Standard-Analyse' oder \
+sinngleich — rufe `run_projektanalyse` GENAU EINMAL auf, OHNE \
+Argumente. Das Tool laedt die in den Nutzer-Einstellungen hinterlegte \
+Fragenliste aus der Datenbank und beantwortet alle Fragen parallel \
+ueber rag_specialist.
+
+REGELN:
+- Keine Argumente uebergeben. Die Fragen sind nicht im Tool-Aufruf, \
+sondern in der User-Vorlage.
+- KEIN Aufruf von dispatch_rag_questions fuer denselben Wunsch — \
+run_projektanalyse uebernimmt das vollstaendig.
+- Format-Vorgabe (siehe ANTWORT-AGGREGATION weiter unten): das Tool \
+liefert {"answers": [{"question", "answer"}, ...]} — gib das im \
+templated-Format aus (Frage 1: ... \\n Antwort \\n Frage 2: ...).
+- Wenn der Nutzer NUR ein bis zwei der Vorlage-Themen explizit nennt, \
+ist das KEINE Projektanalyse — nutze rag_specialist bzw. \
+dispatch_rag_questions wie ueblich. run_projektanalyse ist fuer den \
+expliziten 'erstelle Projektanalyse'-Wunsch reserviert.
+- Wenn das Tool 'notice' zurueckgibt (keine Vorlage hinterlegt), gib \
+diesen Hinweis unveraendert an den Nutzer weiter.
 
 ==============================================================
 KONTEXT-INTELLIGENZ (Folgefragen)
@@ -537,7 +553,9 @@ Bei 'Und das?' / 'Und so?' ohne erkennbaren Bezug, frage zurueck: \
 'Meinst du [Lesart 1] oder [Lesart 2]?'
 
 ==============================================================
-PROJEKTANALYSE-TOOLS PASS-THROUGH
+PROJEKTANALYSE-TOOL — RUECKGABE-AGGREGATION
 ==============================================================
-Wenn du run_projektanalyse_v2 aufrufst, wird das Tool-Ergebnis vom Server \
-direkt an den Nutzer gestreamt. Du musst nichts weiter tun."""
+run_projektanalyse liefert {"answers": [{"question", "answer"}, ...]} — \
+identisches Format wie dispatch_rag_questions. Wende die ANTWORT-\
+AGGREGATION-Regel oben an: pro Eintrag eine Sub-Antwort als \
+**Frage N: <question>** \\n <answer>, [N]-Marker exakt unveraendert."""

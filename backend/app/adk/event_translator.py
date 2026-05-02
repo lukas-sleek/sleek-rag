@@ -88,19 +88,5 @@ def event_has_thought(event: dict) -> bool:
     return any(p.get("thought") and p.get("text") for p in _parts(event))
 
 
-def is_v2_handoff(event: dict) -> bool:
-    """True iff this is a tool_response from `run_projektanalyse_v2` whose
-    response body carries the {"hand_off": "projektanalyse_v2"} sentinel."""
-    if event_kind(event) != "tool_response":
-        return False
-    for p in _parts(event):
-        fr = p.get("function_response") or {}
-        if fr.get("name") == "run_projektanalyse_v2" and (
-            (fr.get("response") or {}).get("hand_off") == "projektanalyse_v2"
-        ):
-            return True
-    return False
-
-
 def event_state_delta(event: dict) -> dict[str, Any]:
     return ((event.get("actions") or {}).get("state_delta") or {})
