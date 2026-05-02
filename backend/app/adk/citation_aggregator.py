@@ -20,7 +20,13 @@ _REF_RE = re.compile(r"\[(\d+)\]")
 def _dedupe_key(c: dict) -> tuple:
     """Per-record dedupe key. Web vs file collapse independently:
     - web: (kind, url)  — same URL cited twice = one chip
-    - file: (kind, file_id, chunk_id) — same Vertex chunk = one chip
+    - file: (kind, file_id) — all chunks from the same file collapse to
+      one chip. Rationale: the user-facing citation list shows filenames,
+      not chunk excerpts; surfacing 7 numbered chips that all read
+      'HO_Teil_B...pdf' just because Vertex returned 7 chunks from that
+      file is misleading. Chunk-level snippets stay accessible via the
+      activity panel's `Treffer` rendering — the citation footer shows
+      one entry per cited file.
     """
     kind = c.get("kind") or "file"
     if kind == "web":
@@ -28,7 +34,6 @@ def _dedupe_key(c: dict) -> tuple:
     return (
         "file",
         c.get("file_id"),
-        c.get("chunk_id"),
     )
 
 

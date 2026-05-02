@@ -973,6 +973,15 @@ async def _send_message_stream(
     # globals). Empirically observed on Q9/Q11 of the 2026-05-02 11-question
     # judge run.
     annotated = _dedupe_repeated_paragraphs(annotated)
+    # Backstop: when the orchestrator skips retrieval entirely and answers
+    # from history, it can still emit [N] markers it remembers from prior
+    # turns. Those indices are meaningless in this turn (final_citations is
+    # empty -> no chip list shown), so strip them rather than ship a text
+    # peppered with dead [5]/[10] references that the user has no way to
+    # resolve. The instruction-level fix (KONTEXT-INTELLIGENZ Pflicht-Test)
+    # tries to prevent this upstream; this is the safety net.
+    if not final_citations:
+        annotated = re.sub(r"\s*\[\d+\]", "", annotated)
 
     yield "data: " + json.dumps(
         {"type": "meta", "citations": final_citations, "content": annotated}
