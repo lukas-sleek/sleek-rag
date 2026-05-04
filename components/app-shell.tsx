@@ -197,12 +197,18 @@ export function App() {
         res = await api("/api/projects", { signal: ctrl.signal });
       } catch (err) {
         if ((err as Error).name === "AbortError") return;
-        pushToast("Projekte konnten nicht geladen werden.", "warn");
+        const msg = (err as Error).message || "network error";
+        pushToast(`Projekte konnten nicht geladen werden: ${msg}`, "warn");
         setProjectsLoaded(true);
         return;
       }
       if (!res.ok) {
-        pushToast("Projekte konnten nicht geladen werden.", "warn");
+        let detail = `${res.status}`;
+        try {
+          const body = await res.clone().json();
+          if (body?.detail) detail = `${res.status}: ${body.detail}`;
+        } catch {}
+        pushToast(`Projekte konnten nicht geladen werden (${detail}).`, "warn");
         setProjectsLoaded(true);
         return;
       }
