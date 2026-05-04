@@ -245,16 +245,24 @@ export function AgentActivity({
   steps: TraceStep[];
   streaming: boolean;
 }) {
-  const [open, setOpen] = React.useState(streaming);
-  // Auto-expand on first stream, leave alone after — once the run is done,
-  // respect the user's collapsed state.
-  React.useEffect(() => {
-    if (streaming) setOpen(true);
-  }, [streaming]);
+  // Default collapsed even during streaming — the per-step status pill on
+  // the header bar already conveys live progress; the user opts in if they
+  // want to drill into individual frames.
+  const [open, setOpen] = React.useState(false);
 
   if (!steps.length) return null;
   const stepCount = steps.length;
-  const lastAuthor = AGENT_LABEL[steps[steps.length - 1].author] ?? steps[steps.length - 1].author;
+  // Aggregate header status: streaming → läuft; finished with any errored
+  // step → fehler; otherwise → fertig. Mirrors the per-step pill semantics
+  // so users get the same signal at a glance from the collapsed header.
+  const hasErroredStep = steps.some(
+    (s) => s.kind === "tool_response" && s.status === "error",
+  );
+  const headerPhase: "start" | "done" | "error" = streaming
+    ? "start"
+    : hasErroredStep
+      ? "error"
+      : "done";
 
   return (
     <div className="mb-3 rounded-[10px] border border-border bg-bg-elevated overflow-hidden">
@@ -278,9 +286,21 @@ export function AgentActivity({
         <Badge variant="secondary" className="font-mono text-[10px] py-0 px-1.5">
           {stepCount} {stepCount === 1 ? "Schritt" : "Schritte"}
         </Badge>
-        {streaming && (
-          <span className="text-[11px] text-text-tertiary">
-            {lastAuthor} laeuft...
+        {headerPhase === "start" && (
+          <span className="ml-auto inline-flex items-center gap-1 text-[10.5px] uppercase tracking-wider text-amber-300">
+            <Loader2Icon className="size-3 animate-spin" />
+            laeuft
+          </span>
+        )}
+        {headerPhase === "done" && (
+          <span className="ml-auto inline-flex items-center gap-1 text-[10.5px] uppercase tracking-wider text-emerald-300">
+            <CheckCircle2Icon className="size-3" />
+            fertig
+          </span>
+        )}
+        {headerPhase === "error" && (
+          <span className="ml-auto text-[10.5px] uppercase tracking-wider text-rose-300">
+            fehler
           </span>
         )}
       </button>
