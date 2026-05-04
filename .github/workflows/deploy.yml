@@ -1,0 +1,87 @@
+name: Deploy to production
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
+
+# Deploy strategy: production lives at /home/lukasthomas/sleek-rag (same tree
+# the user develops in). The workflow does NOT use actions/checkout — it
+# updates that tree in-place via git, then builds and restarts services.
+# This keeps the systemd WorkingDirectory stable and avoids drift between
+# what the runner builds and what `next start` actually serves.
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    timeout-minutes: 20
+
+    env:
+      APP_DIR: /home/lukasthomas/sleek-rag
+      NODE: /home/lukasthomas/.nvm/versions/node/v20.20.0/bin/node
+      NPM:  /home/lukasthomas/.nvm/versions/node/v20.20.0/bin/npm
+
+    steps:
+      - name: Verify clean working tree at APP_DIR
+        run: |
+          cd "$APP_DIR"
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "::error::Uncommitted changes in $APP_DIR — aborting deploy."
+            git status --short
+            exit 1
+          fi
+
+      - name: Pull latest master
+        run: |
+          cd "$APP_DIR"
+          git fetch --prune origin master
+          git reset --hard origin/master
+          git log -1 --oneline
+
+      - name: Frontend — install deps
+        run: |
+          cd "$APP_DIR"
+          "$NPM" ci
+
+      - name: Frontend — typecheck
+        run: |
+          cd "$APP_DIR"
+          "$NPM" run typecheck
+
+      - name: Frontend — build
+        env:
+          NODE_ENV: production
+        run: |
+          cd "$APP_DIR"
+          "$NPM" run build
+
+      - name: Backend — install deps
+        run: |
+          cd "$APP_DIR/backend"
+          if [ ! -d venv ]; then python3 -m venv venv; fi
+          ./venv/bin/pip install --upgrade pip
+          ./venv/bin/pip install -r requirements.txt
+
+      - name: Restart services
+        run: |
+          systemctl --user daemon-reload
+          systemctl --user restart sleek-rag-backend.service
+          systemctl --user restart sleek-rag-frontend.service
+
+      - name: Health check
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS http://localhost:8000/health >/dev/null && curl -fsS http://localhost:3001/ >/dev/null; then
+              echo "Both services healthy."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Health check failed."
+          journalctl --user -u sleek-rag-backend.service -n 50 --no-pager || true
+          journalctl --user -u sleek-rag-frontend.service -n 50 --no-pager || true
+          exit 1
