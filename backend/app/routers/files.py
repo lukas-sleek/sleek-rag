@@ -1,5 +1,6 @@
 import asyncio
 import datetime as _dt
+import logging
 import shutil
 import tempfile
 import uuid
@@ -54,7 +55,21 @@ async def _convert_office_to_pdf(data: bytes, ext: str) -> bytes:
             proc.kill()
             raise HTTPException(504, "office→pdf conversion timed out")
         if proc.returncode != 0:
-            msg = (stderr or stdout or b"").decode("utf-8", "replace")[:300]
+            full_err = (stderr or b"").decode("utf-8", "replace")
+            full_out = (stdout or b"").decode("utf-8", "replace")
+            # Log the full output so we can diagnose silent LibreOffice failures.
+            logging.getLogger("sleek_rag.files").warning(
+                "soffice rc=%s\nstderr:\n%s\nstdout:\n%s",
+                proc.returncode, full_err, full_out,
+            )
+            # The "javaldx" line is a benign warning — strip it so the toast
+            # surfaces the actual error. Keep the *last* 400 chars of the
+            # remaining stderr (real errors come after warnings).
+            cleaned = "\n".join(
+                line for line in full_err.splitlines()
+                if "javaldx" not in line
+            ).strip()
+            msg = (cleaned or full_out or "<no output>")[-400:]
             raise HTTPException(502, f"office→pdf conversion failed: {msg}")
         out_path = Path(tmp) / "input.pdf"
         if not out_path.exists():
