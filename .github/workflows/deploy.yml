@@ -22,8 +22,9 @@ jobs:
 
     env:
       APP_DIR: /home/lukasthomas/sleek-rag
-      NODE: /home/lukasthomas/.nvm/versions/node/v20.20.0/bin/node
-      NPM:  /home/lukasthomas/.nvm/versions/node/v20.20.0/bin/npm
+      # Prepend nvm Node 20 to PATH so npm's `#!/usr/bin/env node` shebang
+      # resolves to v20 (system /usr/bin/node is v12 — too old for Next 16).
+      PATH: /home/lukasthomas/.nvm/versions/node/v20.20.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
     steps:
       - name: Stash any local diffs and reset to origin/master
@@ -42,19 +43,19 @@ jobs:
       - name: Frontend — install deps
         run: |
           cd "$APP_DIR"
-          "$NPM" ci
+          npm ci
 
       - name: Frontend — typecheck
         run: |
           cd "$APP_DIR"
-          "$NPM" run typecheck
+          npm run typecheck
 
       - name: Frontend — build
         env:
           NODE_ENV: production
         run: |
           cd "$APP_DIR"
-          "$NPM" run build
+          npm run build
 
       - name: Backend — install deps
         run: |
