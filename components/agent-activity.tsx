@@ -162,33 +162,38 @@ function ChunkRow({ chunk }: { chunk: RetrievalChunk }) {
 
 function StepBody({ step }: { step: TraceStep }) {
   // search_project_documents responses get a structured chunk list with
-  // confidence badges instead of the truncated-JSON preview.
-  if (step.chunks && step.chunks.length > 0) {
-    return (
-      <div className="px-3 pb-3 space-y-2">
-        <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1 flex items-center gap-2">
-          <span>Treffer</span>
-          <span className="text-text-tertiary">·</span>
-          <span>{step.chunks.length}</span>
-          <span className="text-text-tertiary normal-case tracking-normal italic ml-auto">
-            Konfidenz ↑ besser
-          </span>
-          {step.status && step.status !== "ok" && (
-            <span className="text-text-tertiary italic">({step.status})</span>
-          )}
+  // confidence badges instead of the truncated-JSON preview. Only show
+  // chunks the model actually grounded an answer span on (score != null);
+  // unscored chunks were retrieved as top-k context but never used to
+  // back a claim, so surfacing them as "Treffer" is misleading.
+  if (step.chunks) {
+    const grounded = step.chunks.filter((c) => c.score != null);
+    if (grounded.length > 0) {
+      return (
+        <div className="px-3 pb-3 space-y-2">
+          <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1 flex items-center gap-2">
+            <span>Treffer</span>
+            <span className="text-text-tertiary">·</span>
+            <span>{grounded.length}</span>
+            <span className="text-text-tertiary normal-case tracking-normal italic ml-auto">
+              Konfidenz ↑ besser
+            </span>
+            {step.status && step.status !== "ok" && (
+              <span className="text-text-tertiary italic">({step.status})</span>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            {grounded.map((c) => (
+              <ChunkRow key={`${step.id}-${c.idx}`} chunk={c} />
+            ))}
+          </div>
         </div>
-        <div className="space-y-1.5">
-          {step.chunks.map((c) => (
-            <ChunkRow key={`${step.id}-${c.idx}`} chunk={c} />
-          ))}
-        </div>
-      </div>
-    );
-  }
-  if (step.chunks && step.chunks.length === 0) {
+      );
+    }
     return (
       <div className="text-[12px] text-text-tertiary px-3 pb-3 italic">
-        Keine Treffer{step.status ? ` (${step.status})` : ""}.
+        Keine grundenden Treffer
+        {step.status && step.status !== "ok" ? ` (${step.status})` : ""}.
       </div>
     );
   }
