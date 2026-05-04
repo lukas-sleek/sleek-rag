@@ -15,6 +15,12 @@ from __future__ import annotations
 import re
 
 _REF_RE = re.compile(r"\[(\d+)\]")
+# German-style multi-cite: `[1, 2]`, `[1,2,3]`, `[1 , 2]`. Models tend to
+# emit this form even when the prompt asks for `[1][2]`. Without expansion,
+# the single-ref regex below skips it and rewrite_refs leaves the in-text
+# markers untouched while dedupe collapses the chips below — so the prose
+# references chip [2] that doesn't exist in the chip strip.
+_MULTI_REF_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)+)\]")
 
 
 def _dedupe_key(c: dict) -> tuple:
@@ -66,6 +72,13 @@ def _dedupe_marker_run(run: str) -> str:
     return "".join(f"[{n}]" for n in seen)
 
 
+def _expand_multi_ref(m: re.Match) -> str:
+    """`[1, 2, 3]` -> `[1][2][3]`. Lets the existing single-ref pipeline
+    apply the remap and adjacent-run collapse to multi-cite forms uniformly."""
+    parts = [p.strip() for p in m.group(1).split(",")]
+    return "".join(f"[{p}]" for p in parts if p.isdigit())
+
+
 def rewrite_refs(text: str, remap: dict[int, int]) -> str:
     """Apply the dedupe-and-renumber remap to all `[N]` markers in `text`,
     then collapse adjacent duplicate markers (e.g. `[2][2]` -> `[2]`).
@@ -77,7 +90,10 @@ def rewrite_refs(text: str, remap: dict[int, int]) -> str:
     source. Either way the duplicate marker is pure noise — the underlying
     chip is the same — so we drop it before persisting / streaming the
     annotated answer."""
+    # First expand `[N, M]` -> `[N][M]` so the rest of the pipeline doesn't
+    # have to special-case the comma form.
+    expanded = _MULTI_REF_RE.sub(_expand_multi_ref, text)
     renumbered = _REF_RE.sub(
-        lambda m: f"[{remap.get(int(m.group(1)), m.group(1))}]", text
+        lambda m: f"[{remap.get(int(m.group(1)), m.group(1))}]", expanded
     )
     return _REF_RUN_RE.sub(lambda m: _dedupe_marker_run(m.group(0)), renumbered)
