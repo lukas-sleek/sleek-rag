@@ -61,6 +61,53 @@ def _friendly_gemini_error(_exc: Exception) -> str:
     )
 
 
+def _dump_rag_state(corpus_name: str | None, project_id: str) -> dict:
+    """Snapshot the RAG state from BOTH our DB and Vertex's view, so error
+    logs make it obvious whether a Google-side rejection lines up with our
+    'ready' bookkeeping or contradicts it. Never raises — best-effort."""
+    out: dict = {"corpus_name": corpus_name, "project_id": project_id}
+    # Our DB view: project_files statuses.
+    try:
+        rows = (
+            supabase()
+            .table("project_files")
+            .select("id,filename,status,ingest_error,rag_file_name,page_count")
+            .eq("project_id", project_id)
+            .execute()
+        )
+        out["db_files"] = [
+            {
+                "id": r["id"],
+                "filename": r.get("filename"),
+                "status": r.get("status"),
+                "page_count": r.get("page_count"),
+                "rag_file_name": r.get("rag_file_name"),
+                "ingest_error": r.get("ingest_error"),
+            }
+            for r in (rows.data or [])
+        ]
+    except Exception as e:
+        out["db_files_error"] = f"{type(e).__name__}: {e}"
+    # Vertex's view: list_files on the corpus + state.
+    if corpus_name:
+        try:
+            from vertexai import rag
+            from app.rag_corpus import _init_vertex
+            _init_vertex()
+            vfiles = list(rag.list_files(corpus_name=corpus_name))
+            out["vertex_files"] = [
+                {
+                    "name": getattr(f, "name", None),
+                    "display": getattr(f, "display_name", None),
+                    "state": getattr(f, "rag_file_state", None) or getattr(f, "state", None),
+                }
+                for f in vfiles
+            ]
+        except Exception as e:
+            out["vertex_files_error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
 # Trace SSE emission is gated to debug accounts so production users don't see
 # raw agent internals (and pay the bandwidth tax for events we'd otherwise
 # discard). Set DEBUG_TRACE_USER_EMAILS to a comma-separated list to expand.
@@ -914,6 +961,18 @@ async def _send_message_stream(
         log.warning(
             "adk stream failed: %s: %s", type(exc).__name__, exc, exc_info=True
         )
+        # Snapshot RAG state so we can correlate "we say ready" vs "Vertex says
+        # X" without having to repro. Best-effort — never raises.
+        try:
+            rag_state = await asyncio.to_thread(
+                _dump_rag_state, corpus_name, project_id
+            )
+            log.warning(
+                "adk stream failed — rag state for chat=%s:\n%s",
+                chat_id, json.dumps(rag_state, indent=2, default=str),
+            )
+        except Exception as dump_exc:  # noqa: BLE001
+            log.warning("rag state dump failed: %s", dump_exc)
         notice = _friendly_gemini_error(exc)
         if answer_parts:
             yield "data: " + json.dumps(
