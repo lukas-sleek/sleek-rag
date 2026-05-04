@@ -380,10 +380,12 @@ export function Composer({
   onSend,
   streaming,
   onStop,
+  filesProcessing = false,
 }: {
   onSend: (text: string) => void;
   streaming: boolean;
   onStop: () => void;
+  filesProcessing?: boolean;
 }) {
   const [value, setValue] = React.useState("");
   const [temp, setTemp] = React.useState(0.7);
@@ -588,7 +590,7 @@ export function Composer({
 
   const submit = () => {
     const v = value.trim();
-    if (!v || streaming) return;
+    if (!v || streaming || filesProcessing) return;
     onSend(v);
     setValue("");
     setAttachments([]);
@@ -646,12 +648,18 @@ export function Composer({
             ref={ref}
             rows={1}
             placeholder={
-              transcribing ? "Transkribiere…" : listening ? "" : "Frag etwas…"
+              transcribing
+                ? "Transkribiere…"
+                : listening
+                ? ""
+                : filesProcessing
+                ? "Dateien werden noch verarbeitet…"
+                : "Frag etwas…"
             }
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={onKey}
-            disabled={listening || transcribing}
+            disabled={listening || transcribing || filesProcessing}
             className={
               "w-full bg-transparent border-none [outline:none] text-text text-sm leading-[1.55] resize-none min-h-[24px] max-h-[208px] [font-family:inherit] placeholder:text-text-tertiary disabled:cursor-not-allowed " +
               (listening ? "opacity-0 pointer-events-none" : "")
@@ -700,9 +708,9 @@ export function Composer({
         <div className="flex items-center gap-1 px-3 py-2 rounded-b-[11px]">
           <button
             type="button"
-            disabled={streaming}
+            disabled={streaming || filesProcessing}
             onClick={() => onSend("Projektanalyse erstellen")}
-            title="Beantwortet alle Fragen aus deiner Vorlage parallel"
+            title={filesProcessing ? "Dateien werden noch verarbeitet…" : "Beantwortet alle Fragen aus deiner Vorlage parallel"}
             className="h-7 inline-flex items-center gap-1.5 px-2.5 rounded-md bg-transparent border border-transparent text-text-secondary text-xs font-medium whitespace-nowrap transition-[background-color,color,border-color,opacity] duration-150 hover:bg-bg-hover hover:text-text hover:border-border disabled:opacity-45 disabled:cursor-not-allowed [&_svg]:text-text-tertiary"
           >
             <Icon.Sparkles /> Projektanalyse erstellen

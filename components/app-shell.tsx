@@ -499,6 +499,16 @@ export function App() {
     return null;
   }, [projects, activeChatId]);
 
+  // True while any file in the active project is mid-ingest. Blocks the
+  // composer so users can't ask questions about a file the index hasn't
+  // seen yet.
+  const filesProcessing = React.useMemo(() => {
+    if (!activeProjectId) return false;
+    const files = projectFiles[activeProjectId];
+    if (!files) return false;
+    return files.some((f) => f.status === "analyzing");
+  }, [projectFiles, activeProjectId]);
+
   const formatBytes = (bytes: number | null | undefined) => {
     if (!bytes && bytes !== 0) return "—";
     return bytes / 1024 / 1024 < 1
@@ -1407,7 +1417,8 @@ export function App() {
             <span className="w-1.5 h-1.5 rounded-full bg-accent" />
             EAG LLM
           </div>
-          {activeChat?.projectHasFiles && (
+          {(activeChat?.projectHasFiles ||
+            (activeProjectId && (projectFiles[activeProjectId]?.length ?? 0) > 0)) && (
             <button
               className="icon-btn"
               title="Projektdateien"
@@ -1433,7 +1444,7 @@ export function App() {
                 if (hiddenFileInputRef.current) hiddenFileInputRef.current.click();
               }}
             />
-            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} />
+            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} filesProcessing={filesProcessing} />
           </>
         ) : (
           <>
@@ -1470,7 +1481,7 @@ export function App() {
                 ))}
               </div>
             </div>
-            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} />
+            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} filesProcessing={filesProcessing} />
           </>
         )}
       </main>
