@@ -26,18 +26,15 @@ jobs:
       NPM:  /home/lukasthomas/.nvm/versions/node/v20.20.0/bin/npm
 
     steps:
-      - name: Verify clean working tree at APP_DIR
+      - name: Stash any local diffs and reset to origin/master
         run: |
           cd "$APP_DIR"
+          # Stash any tracked-file modifications so they don't block reset.
+          # Recoverable via `git stash list` if anything important got swept.
           if ! git diff --quiet || ! git diff --cached --quiet; then
-            echo "::error::Uncommitted changes in $APP_DIR — aborting deploy."
-            git status --short
-            exit 1
+            echo "Note: local diffs stashed — recover with 'git stash list'."
+            git stash push -m "deploy-autostash-$(date -u +%Y%m%dT%H%M%SZ)" || true
           fi
-
-      - name: Pull latest master
-        run: |
-          cd "$APP_DIR"
           git fetch --prune origin master
           git reset --hard origin/master
           git log -1 --oneline

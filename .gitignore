@@ -15,3 +15,4 @@ backend/**/__pycache__/
 scripts/benchmark/venv/
 scripts/benchmark/output/
 scripts/benchmark/**/__pycache__/
+.claude/scheduled_tasks.lock
