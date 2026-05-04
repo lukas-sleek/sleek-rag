@@ -12,7 +12,7 @@ let drag: Drag = null;
 const setDragRef = (d: Drag) => { drag = d; };
 const getDrag = (): Drag => drag;
 
-export type LoginUser = { email: string };
+export type LoginUser = { email: string; displayName?: string };
 
 function ContextMenu({
   open,
@@ -582,10 +582,10 @@ export function Sidebar({
             (collapsed ? "justify-center py-1.5" : "px-2 py-1.5 text-left")
           }
         >
-          <div className="avatar">{(user.email[0] || "A").toUpperCase()}</div>
+          <div className="avatar">{((user.displayName || user.email)[0] || "A").toUpperCase()}</div>
           {!collapsed && (
             <div className="flex flex-col flex-1 min-w-0">
-              <div className="text-[13px] font-medium text-text">{user.email.split("@")[0]}</div>
+              <div className="text-[13px] font-medium text-text">{user.displayName || user.email.split("@")[0]}</div>
               <div className="text-[11px] text-text-tertiary whitespace-nowrap overflow-hidden text-ellipsis">{user.email}</div>
             </div>
           )}

@@ -90,6 +90,12 @@ export type Message = {
   id?: string;
   citations?: Citation[] | null;
   traces?: TraceStep[] | null;
+  // Set on assistant rows. 'streaming' means generation is still running on
+  // the backend (independent of any client connection); 'done' is terminal
+  // success; 'error' is terminal failure (with `error` populated). User
+  // messages are always 'done'.
+  status?: "streaming" | "done" | "error";
+  error?: string | null;
 };
 
 export const SAMPLE_THREAD: Record<string, Message[]> = {

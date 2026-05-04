@@ -22,7 +22,12 @@ import {
   type Project,
 } from "./fixtures";
 import { createClient } from "@/lib/supabase/client";
-import { subscribeToFileStatus } from "@/lib/supabase/realtime";
+import {
+  attachToAssistantStream,
+  subscribeToFileStatus,
+  type AssistantTerminal,
+  type DeltaPayload,
+} from "@/lib/supabase/realtime";
 import { api } from "@/lib/api";
 
 type Toast = { id: string; message: string; kind: string };
@@ -82,9 +87,11 @@ export function App() {
   const [streamingChats, setStreamingChats] = React.useState<Set<string>>(
     () => new Set(),
   );
-  const streamControllersRef = React.useRef<Map<string, AbortController>>(
-    new Map(),
-  );
+  // Generation runs as a backend background task; the frontend just
+  // subscribes to chat_message_deltas via Realtime. Keyed by assistant
+  // message id so chat switches and tab reopens can resume in-flight turns
+  // without spawning a duplicate subscription.
+  const streamUnsubsRef = React.useRef<Map<string, () => void>>(new Map());
   const loadedThreadsRef = React.useRef<Set<string>>(new Set());
   // Initial-load gate. Tracks chats whose messages fetch has resolved (success
   // or failure), whether the URL→state effect has picked an active chat, and
@@ -321,6 +328,21 @@ export function App() {
       if (ctrl.signal.aborted) return;
       setThreads((prev) => ({ ...prev, [activeChatId]: msgs }));
       markLoaded(activeChatId);
+      // Resume any in-flight assistant turns that were generating when the
+      // tab closed / user switched chats. attachAssistantStream is
+      // idempotent — it no-ops if a subscription for this message id
+      // already exists.
+      for (const m of msgs) {
+        if (m.role === "assistant" && m.status === "streaming" && m.id) {
+          setStreamingChats((prev) => {
+            if (prev.has(activeChatId)) return prev;
+            const next = new Set(prev);
+            next.add(activeChatId);
+            return next;
+          });
+          attachAssistantStream(activeChatId, m.id);
+        }
+      }
     })();
     return () => {
       // On strict-mode remount, drop the dedup entry too so the second
@@ -927,8 +949,6 @@ export function App() {
       void generateChatTitle(chatId, text);
     }
 
-    const controller = new AbortController();
-    streamControllersRef.current.set(chatId, controller);
     setStreamingChats((prev) => {
       const next = new Set(prev);
       next.add(chatId);
@@ -937,7 +957,10 @@ export function App() {
 
     setThreads((prev) => ({
       ...prev,
-      [chatId]: [...(prev[chatId] || []), { role: "assistant", content: "" }],
+      [chatId]: [
+        ...(prev[chatId] || []),
+        { role: "assistant", content: "", status: "streaming" },
+      ],
     }));
 
     requestAnimationFrame(() => {
@@ -955,205 +978,208 @@ export function App() {
       });
     });
 
+    let assistantId: string | null = null;
     try {
       const res = await api(`/api/chats/${chatId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
-        signal: controller.signal,
       });
-      if (!res.ok || !res.body) {
+      if (!res.ok) {
         pushToast("Nachricht konnte nicht gesendet werden.", "warn");
+        setStreamingChats((prev) => {
+          if (!prev.has(chatId)) return prev;
+          const next = new Set(prev);
+          next.delete(chatId);
+          return next;
+        });
         return;
       }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      outer: while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const data = line.slice(6);
-          if (data === "[DONE]") break outer;
-          try {
-            const payload = JSON.parse(data) as {
-              type?: "meta" | "delta" | "done" | "trace";
-              content?: string;
-              citations?: import("./fixtures").Citation[];
-              message_id?: string;
-              delta?: string;
-              progress?: { done: number; total: number; question?: string };
-              // trace fields (debug accounts only)
-              id?: string;
-              author?: string;
-              kind?: import("./fixtures").TraceStep["kind"];
-              name?: string;
-              args?: string;
-              response?: string;
-              text?: string;
-              chunks?: import("./fixtures").RetrievalChunk[];
-              status?: string;
-            };
-            if (payload.progress) {
-              const { done, total, question } = payload.progress;
-              const tail = question ? ` — zuletzt: ${question.slice(0, 80)}` : "";
-              setThreads((prev) => {
-                const arr = [...(prev[chatId] || [])];
-                arr[arr.length - 1] = {
-                  role: "assistant",
-                  content: `_Projektanalyse läuft… ${done}/${total}${tail}_`,
-                };
-                return { ...prev, [chatId]: arr };
-              });
-              continue;
-            }
-            switch (payload.type) {
-              case "trace": {
-                // Debug-only frame: backend gates emission to allowlisted
-                // user emails. Append the step to the in-progress assistant
-                // turn's traces array and let the chat.tsx Message render
-                // the activity panel.
-                if (!payload.id || !payload.author || !payload.kind) break;
-                const step: import("./fixtures").TraceStep = {
-                  id: payload.id,
-                  author: payload.author,
-                  kind: payload.kind,
-                  name: payload.name ?? null,
-                  args: payload.args ?? null,
-                  response: payload.response ?? null,
-                  text: payload.text ?? null,
-                  chunks: payload.chunks ?? null,
-                  status: payload.status ?? null,
-                };
-                setThreads((prev) => {
-                  const arr = [...(prev[chatId] || [])];
-                  const last = arr[arr.length - 1];
-                  if (last?.role !== "assistant") return prev;
-                  const existing = last.traces ?? [];
-                  // Upsert by id: per-batched-question dispatch frames
-                  // emit the SAME id (e.g. `dispatch-3`) for the start
-                  // (`laeuft`) and done (`fertig`) phases — we replace
-                  // the existing row in place so the activity panel
-                  // shows one row per question that flips status
-                  // rather than two separate rows.
-                  const existingIdx = existing.findIndex(
-                    (t) => t.id === step.id
-                  );
-                  const nextTraces =
-                    existingIdx >= 0
-                      ? existing.map((t, i) =>
-                          i === existingIdx ? step : t
-                        )
-                      : [...existing, step];
-                  arr[arr.length - 1] = {
-                    ...last,
-                    traces: nextTraces,
-                  };
-                  return { ...prev, [chatId]: arr };
-                });
-                break;
-              }
-              case "meta": {
-                if (process.env.NODE_ENV !== "production") {
-                  // eslint-disable-next-line no-console
-                  console.debug("citations", payload.citations);
-                }
-                // Backend sends an annotated `content` string alongside
-                // citations — the streamed deltas don't carry the [N] ref
-                // markers (those come from grounding_supports, which are
-                // only available after the stream completes). Swap the
-                // streamed content for the annotated version when present
-                // so chat.tsx's [N] linkifier can match.
-                setThreads((prev) => {
-                  const arr = [...(prev[chatId] || [])];
-                  const last = arr[arr.length - 1];
-                  if (last?.role === "assistant") {
-                    arr[arr.length - 1] = {
-                      ...last,
-                      content: payload.content ?? last.content,
-                      citations: payload.citations ?? [],
-                    };
-                  }
-                  return { ...prev, [chatId]: arr };
-                });
-                break;
-              }
-              case "delta": {
-                const piece = payload.content ?? "";
-                if (!piece) break;
-                setThreads((prev) => {
-                  const arr = [...(prev[chatId] || [])];
-                  const last = arr[arr.length - 1];
-                  const isProgressPlaceholder = last?.content?.startsWith(
-                    "_Projektanalyse läuft",
-                  );
-                  arr[arr.length - 1] = {
-                    ...last,
-                    role: "assistant",
-                    content: isProgressPlaceholder ? piece : (last?.content ?? "") + piece,
-                  };
-                  return { ...prev, [chatId]: arr };
-                });
-                break;
-              }
-              case "done": {
-                if (payload.message_id) {
-                  setThreads((prev) => {
-                    const arr = [...(prev[chatId] || [])];
-                    const last = arr[arr.length - 1];
-                    if (last?.role === "assistant") {
-                      arr[arr.length - 1] = { ...last, id: payload.message_id };
-                    }
-                    return { ...prev, [chatId]: arr };
-                  });
-                }
-                break;
-              }
-              default: {
-                // Backward-compat: legacy frames that just carry {delta: "..."}.
-                if (payload.delta !== undefined) {
-                  setThreads((prev) => {
-                    const arr = [...(prev[chatId] || [])];
-                    const last = arr[arr.length - 1];
-                    const isProgressPlaceholder = last?.content?.startsWith(
-                      "_Projektanalyse läuft",
-                    );
-                    arr[arr.length - 1] = {
-                      ...last,
-                      role: "assistant",
-                      content: isProgressPlaceholder
-                        ? payload.delta!
-                        : (last?.content ?? "") + payload.delta!,
-                    };
-                    return { ...prev, [chatId]: arr };
-                  });
-                }
-              }
-            }
-          } catch {
-            /* ignore malformed line */
-          }
+      const json = (await res.json()) as {
+        user_message_id: string;
+        assistant_message_id: string;
+      };
+      assistantId = json.assistant_message_id;
+      // Stamp the optimistic assistant placeholder with its real id so the
+      // Realtime subscription can be scoped and we can detect duplicates on
+      // chat reopen.
+      setThreads((prev) => {
+        const arr = [...(prev[chatId] || [])];
+        const last = arr[arr.length - 1];
+        if (last?.role === "assistant") {
+          arr[arr.length - 1] = { ...last, id: assistantId! };
         }
-      }
-    } catch (err) {
-      if ((err as Error).name !== "AbortError") {
-        pushToast("Streaming abgebrochen.", "warn");
-      }
-    } finally {
-      streamControllersRef.current.delete(chatId);
+        return { ...prev, [chatId]: arr };
+      });
+    } catch {
+      pushToast("Nachricht konnte nicht gesendet werden.", "warn");
       setStreamingChats((prev) => {
         if (!prev.has(chatId)) return prev;
         const next = new Set(prev);
         next.delete(chatId);
         return next;
       });
+      return;
     }
 
+    attachAssistantStream(chatId, assistantId);
   };
+
+  // Apply one streaming-delta payload to the in-thread assistant placeholder
+  // for `chatId`. Mirrors the SSE switch we used to run inline in sendMessage,
+  // but is now also reached on chat-load resume so a single helper covers
+  // both code paths.
+  const applyDeltaToThread = React.useCallback(
+    (chatId: string, assistantId: string, payload: DeltaPayload) => {
+      // progress envelope: replaces content with a transient running
+      // placeholder while batched RAG fan-out is in flight.
+      if ("progress" in payload && payload.progress) {
+        const { done, total, question } = payload.progress;
+        const tail = question ? ` — zuletzt: ${question.slice(0, 80)}` : "";
+        setThreads((prev) => {
+          const arr = [...(prev[chatId] || [])];
+          const idx = arr.findIndex((m) => m.id === assistantId);
+          if (idx < 0) return prev;
+          arr[idx] = {
+            ...arr[idx],
+            role: "assistant",
+            content: `_Projektanalyse läuft… ${done}/${total}${tail}_`,
+          };
+          return { ...prev, [chatId]: arr };
+        });
+        return;
+      }
+      if (!("type" in payload)) return;
+      switch (payload.type) {
+        case "trace": {
+          // Debug-only frame: backend gates emission to allowlisted user
+          // emails. Append/upsert the step in the assistant turn's traces
+          // array; chat.tsx renders the activity panel from that.
+          const step: import("./fixtures").TraceStep = {
+            id: payload.id,
+            author: payload.author,
+            kind: payload.kind,
+            name: payload.name ?? null,
+            args: payload.args ?? null,
+            response: payload.response ?? null,
+            text: payload.text ?? null,
+            chunks: payload.chunks ?? null,
+            status: payload.status ?? null,
+          };
+          setThreads((prev) => {
+            const arr = [...(prev[chatId] || [])];
+            const idx = arr.findIndex((m) => m.id === assistantId);
+            if (idx < 0) return prev;
+            const target = arr[idx];
+            const existing = target.traces ?? [];
+            // Upsert by id: per-question dispatch frames emit the SAME id
+            // (e.g. `dispatch-3`) for the start (`laeuft`) and done
+            // (`fertig`) phases — replace in place so the activity panel
+            // shows one row per question that flips status rather than
+            // two separate rows.
+            const existingIdx = existing.findIndex((t) => t.id === step.id);
+            const nextTraces =
+              existingIdx >= 0
+                ? existing.map((t, i) => (i === existingIdx ? step : t))
+                : [...existing, step];
+            arr[idx] = { ...target, traces: nextTraces };
+            return { ...prev, [chatId]: arr };
+          });
+          return;
+        }
+        case "meta": {
+          // Backend sends an annotated `content` string alongside citations
+          // — the streamed deltas don't carry [N] ref markers (those come
+          // from grounding_supports, only available post-generation). Swap
+          // the streamed content for the annotated version so chat.tsx's
+          // [N] linkifier can match.
+          setThreads((prev) => {
+            const arr = [...(prev[chatId] || [])];
+            const idx = arr.findIndex((m) => m.id === assistantId);
+            if (idx < 0) return prev;
+            arr[idx] = {
+              ...arr[idx],
+              content: payload.content ?? arr[idx].content,
+              citations: payload.citations ?? [],
+            };
+            return { ...prev, [chatId]: arr };
+          });
+          return;
+        }
+        case "delta": {
+          const piece = payload.content ?? "";
+          if (!piece) return;
+          setThreads((prev) => {
+            const arr = [...(prev[chatId] || [])];
+            const idx = arr.findIndex((m) => m.id === assistantId);
+            if (idx < 0) return prev;
+            const target = arr[idx];
+            const isProgressPlaceholder = target.content?.startsWith(
+              "_Projektanalyse läuft",
+            );
+            arr[idx] = {
+              ...target,
+              role: "assistant",
+              content: isProgressPlaceholder ? piece : (target.content ?? "") + piece,
+            };
+            return { ...prev, [chatId]: arr };
+          });
+          return;
+        }
+        case "done":
+          // The chat_messages UPDATE handler (onTerminal) is the
+          // authoritative end-of-turn signal — `done` deltas are advisory.
+          return;
+      }
+    },
+    [],
+  );
+
+  const applyTerminalToThread = React.useCallback(
+    (chatId: string, assistantId: string, terminal: AssistantTerminal) => {
+      setThreads((prev) => {
+        const arr = [...(prev[chatId] || [])];
+        const idx = arr.findIndex((m) => m.id === assistantId);
+        if (idx < 0) return prev;
+        arr[idx] = {
+          ...arr[idx],
+          role: "assistant",
+          content: terminal.content || arr[idx].content,
+          citations: terminal.citations ?? arr[idx].citations ?? [],
+          status: terminal.status,
+          error: terminal.error ?? null,
+        };
+        return { ...prev, [chatId]: arr };
+      });
+      setStreamingChats((prev) => {
+        if (!prev.has(chatId)) return prev;
+        const next = new Set(prev);
+        next.delete(chatId);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const attachAssistantStream = React.useCallback(
+    (chatId: string, assistantId: string) => {
+      // Idempotent: chat reopen during a still-running turn must not stack
+      // multiple subscriptions for the same message.
+      if (streamUnsubsRef.current.has(assistantId)) return;
+      const unsubscribe = attachToAssistantStream(
+        assistantId,
+        (payload) => applyDeltaToThread(chatId, assistantId, payload),
+        (terminal) => {
+          applyTerminalToThread(chatId, assistantId, terminal);
+          const u = streamUnsubsRef.current.get(assistantId);
+          streamUnsubsRef.current.delete(assistantId);
+          u?.();
+        },
+      );
+      streamUnsubsRef.current.set(assistantId, unsubscribe);
+    },
+    [applyDeltaToThread, applyTerminalToThread],
+  );
 
   // Background AI title generation. Runs in parallel with the chat stream so
   // the sidebar swaps from the prompt-slice placeholder to a 2-3-word title
@@ -1207,10 +1233,17 @@ export function App() {
 
   const onStop = () => {
     if (!activeChatId) return;
-    const ctrl = streamControllersRef.current.get(activeChatId);
-    if (ctrl) ctrl.abort();
-    // The sendMessage finally-block clears the controller + streamingChats
-    // entry once the abort propagates; no manual cleanup needed here.
+    // Find the in-flight assistant message for the active chat. Generation
+    // runs as a backend background task — to actually stop the model we
+    // need to ask the backend to cancel it; the Realtime UPDATE that
+    // follows the cancellation flips status='error' and triggers the
+    // local cleanup via applyTerminalToThread.
+    const arr = threads[activeChatId] || [];
+    const inFlight = [...arr].reverse().find(
+      (m) => m.role === "assistant" && m.status === "streaming" && m.id,
+    );
+    if (!inFlight?.id) return;
+    void api(`/api/chats/messages/${inFlight.id}/cancel`, { method: "POST" });
   };
 
   const splash = (
@@ -1302,7 +1335,7 @@ export function App() {
         }}
         onToggleProject={onToggleProject}
         emptyChatIds={emptyChatIds}
-        user={{ email: session.user.email ?? "" }}
+        user={{ email: session.user.email ?? "", displayName }}
         onOpenTemplate={() => setShowTemplate(true)}
         onLogout={() => {
           setConfirmDialog({

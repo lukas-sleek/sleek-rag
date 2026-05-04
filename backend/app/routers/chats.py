@@ -113,30 +113,6 @@ def _dump_rag_state(corpus_name: str | None, project_id: str) -> dict:
     return out
 
 
-# Trace SSE emission is gated to debug accounts so production users don't see
-# raw agent internals (and pay the bandwidth tax for events we'd otherwise
-# discard). Set DEBUG_TRACE_USER_EMAILS to a comma-separated list to expand.
-_DEBUG_TRACE_USER_EMAILS = {"test@test.com"}
-_user_email_cache: dict[str, str | None] = {}
-
-
-def _is_debug_user(user_id: str) -> bool:
-    """Look up the user's email in Supabase Auth, cache the result, return
-    True iff it's in the debug allow-list. Cache is process-local, never
-    invalidated — email changes are rare and a stale negative just means
-    no traces for one session."""
-    cached = _user_email_cache.get(user_id)
-    if cached is None and user_id not in _user_email_cache:
-        try:
-            res = supabase().auth.admin.get_user_by_id(user_id)
-            email = getattr(res.user, "email", None) if res and res.user else None
-        except Exception as exc:  # noqa: BLE001
-            log.debug("debug-user lookup failed for %s: %s", user_id, exc)
-            email = None
-        _user_email_cache[user_id] = email
-        cached = email
-    return (cached or "").lower() in _DEBUG_TRACE_USER_EMAILS
-
 
 _TRACE_TEXT_PREVIEW_LIMIT = 600
 _TRACE_ARGS_PREVIEW_LIMIT = 400
@@ -567,9 +543,13 @@ class TitleIn(BaseModel):
 
 
 class MessageOut(BaseModel):
+    id: str
     role: str
     content: str
     citations: list[dict] | None = None
+    traces: list[dict] | None = None
+    status: str = "done"
+    error: str | None = None
 
 
 def _load_chat(chat_id: str, user_id: str) -> dict:
@@ -587,8 +567,8 @@ def _load_chat(chat_id: str, user_id: str) -> dict:
     return res.data[0]
 
 
-def _persist_user_message(chat_id: str, user_id: str, text: str) -> None:
-    (
+def _persist_user_message(chat_id: str, user_id: str, text: str) -> dict:
+    res = (
         supabase()
         .table("chat_messages")
         .insert(
@@ -597,15 +577,19 @@ def _persist_user_message(chat_id: str, user_id: str, text: str) -> None:
                 "user_id": user_id,
                 "role": "user",
                 "content": text,
+                "status": "done",
             }
         )
         .execute()
     )
+    return res.data[0]
 
 
-def _persist_assistant_message(
-    chat_id: str, user_id: str, text: str, citations: list[dict]
-) -> dict:
+def _create_streaming_assistant(chat_id: str, user_id: str) -> dict:
+    """Insert the assistant row up front with status='streaming' so the turn
+    has a stable id the frontend can subscribe to via Realtime. Content stays
+    empty until _finalize_assistant_message rewrites it with the annotated
+    final answer."""
     res = (
         supabase()
         .table("chat_messages")
@@ -614,13 +598,70 @@ def _persist_assistant_message(
                 "chat_id": chat_id,
                 "user_id": user_id,
                 "role": "assistant",
-                "content": text,
-                "citations": citations,
+                "content": "",
+                "citations": [],
+                "status": "streaming",
             }
         )
         .execute()
     )
     return res.data[0]
+
+
+def _insert_delta(
+    *,
+    message_id: str,
+    chat_id: str,
+    user_id: str,
+    seq: int,
+    payload: dict,
+) -> None:
+    """Append one event payload to chat_message_deltas. The frontend
+    subscribes via Realtime and replays missed events by message_id."""
+    (
+        supabase()
+        .table("chat_message_deltas")
+        .insert(
+            {
+                "message_id": message_id,
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "seq": seq,
+                "payload": payload,
+            }
+        )
+        .execute()
+    )
+
+
+def _finalize_assistant_message(
+    *,
+    message_id: str,
+    content: str,
+    citations: list[dict],
+    traces: list[dict] | None,
+    error: str | None,
+) -> None:
+    """Update the streaming assistant row to its terminal state. status flips
+    to 'done' (success) or 'error'; content + citations + traces carry the
+    final annotated answer + activity-panel snapshot the frontend renders on
+    chat reopen / hard reload."""
+    status = "error" if error else "done"
+    (
+        supabase()
+        .table("chat_messages")
+        .update(
+            {
+                "content": content,
+                "citations": citations,
+                "traces": traces,
+                "status": status,
+                "error": error,
+            }
+        )
+        .eq("id", message_id)
+        .execute()
+    )
 
 
 def _load_corpus_name(project_id: str) -> str | None:
@@ -696,7 +737,7 @@ def list_messages(chat_id: str, user_id: str = Depends(current_user_id)):
     res = (
         supabase()
         .table("chat_messages")
-        .select("role,content,citations")
+        .select("id,role,content,citations,traces,status,error")
         .eq("chat_id", chat_id)
         .eq("user_id", user_id)
         .order("created_at")
@@ -704,41 +745,44 @@ def list_messages(chat_id: str, user_id: str = Depends(current_user_id)):
     )
     return [
         MessageOut(
-            role=r["role"], content=r["content"], citations=r.get("citations")
+            id=r["id"],
+            role=r["role"],
+            content=r["content"],
+            citations=r.get("citations"),
+            traces=r.get("traces"),
+            status=r.get("status") or "done",
+            error=r.get("error"),
         )
         for r in (res.data or [])
     ]
 
 
 @traceable(run_type="chain", name="chats.send_message")
-async def _send_message_stream(
+async def _assistant_turn_events(
     *,
     chat: dict,
     text: str,
     chat_id: str,
     user_id: str,
 ):
-    """ADK-driven streaming chat turn."""
+    """ADK-driven assistant turn. Yields payload dicts (delta / trace /
+    progress / meta / done). The caller is responsible for persisting the
+    user message and routing payloads to chat_message_deltas + finalizing
+    the assistant row — this generator no longer touches chat_messages."""
     import time as _time
     t_chain_start = _time.time()
     project_id = chat["project_id"]
-    debug_trace = await asyncio.to_thread(_is_debug_user, user_id)
 
-    # 1. Persist user message.
-    await asyncio.to_thread(_persist_user_message, chat_id, user_id, text)
-
-    # 2. Resolve corpus.
+    # 1. Resolve corpus.
     corpus_name = await asyncio.to_thread(_load_corpus_name, project_id)
     log.info("chat[%s]: corpus=%s (resolve %.2fs)", chat_id, corpus_name, _time.time() - t_chain_start)
     if not corpus_name:
-        yield "data: " + json.dumps(
-            {"type": "delta", "content": "_Bitte zuerst Dokumente hochladen._"}
-        ) + "\n\n"
-        yield "data: " + json.dumps({"type": "meta", "citations": []}) + "\n\n"
-        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+        yield {"type": "delta", "content": "_Bitte zuerst Dokumente hochladen._"}
+        yield {"type": "meta", "citations": [], "content": "_Bitte zuerst Dokumente hochladen._"}
+        yield {"type": "done"}
         return
 
-    # 3. Get-or-build the per-corpus AdkApp; seed a fresh session with replayed history.
+    # 2. Get-or-build the per-corpus AdkApp; seed a fresh session with replayed history.
     try:
         t_app = _time.time()
         app = await get_or_build_app(corpus_name)
@@ -748,11 +792,10 @@ async def _send_message_stream(
         log.info("chat[%s]: session seeded (%.2fs); starting stream", chat_id, _time.time() - t_seed)
     except Exception as exc:  # noqa: BLE001
         log.exception("adk session build failed: %s", exc)
-        yield "data: " + json.dumps(
-            {"type": "delta", "content": _friendly_gemini_error(exc)}
-        ) + "\n\n"
-        yield "data: " + json.dumps({"type": "meta", "citations": []}) + "\n\n"
-        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+        notice = _friendly_gemini_error(exc)
+        yield {"type": "delta", "content": notice}
+        yield {"type": "meta", "citations": [], "content": notice}
+        yield {"type": "done"}
         return
 
     answer_parts: list[str] = []
@@ -896,17 +939,17 @@ async def _send_message_stream(
                 row_id = f"dispatch-{idx}"
                 args_blob = json.dumps({"question": question}, ensure_ascii=False)
                 if phase == "start":
-                    yield "data: " + json.dumps({
+                    yield {
                         "type": "trace",
                         "id": row_id,
                         "author": "rag_specialist",
                         "kind": "tool_call",
                         "name": step_label,
                         "args": args_blob,
-                    }) + "\n\n"
+                    }
                 elif phase == "done":
                     answer = envelope.get("answer") or ""
-                    yield "data: " + json.dumps({
+                    yield {
                         "type": "trace",
                         "id": row_id,
                         "author": "rag_specialist",
@@ -918,9 +961,9 @@ async def _send_message_stream(
                             ensure_ascii=False,
                         ),
                         "status": "ok",
-                    }) + "\n\n"
+                    }
                 elif phase == "error":
-                    yield "data: " + json.dumps({
+                    yield {
                         "type": "trace",
                         "id": row_id,
                         "author": "rag_specialist",
@@ -932,7 +975,7 @@ async def _send_message_stream(
                             ensure_ascii=False,
                         ),
                         "status": "error",
-                    }) + "\n\n"
+                    }
                 continue
 
             # `etype == "adk"` from here on.
@@ -961,33 +1004,29 @@ async def _send_message_stream(
                     _finish, _block,
                 )
 
-            # Debug-only: emit one trace frame per function_call /
-            # function_response part (parallel fan-out is encoded as N parts
-            # within a single ADK event), plus one per model_text event.
-            # Frontend gates display behind the same debug flag, but we
-            # keep the bytes off the wire for prod accounts to avoid
-            # leaking agent internals.
-            if debug_trace:
-                # Order matters for the activity panel:
-                # 1) sub-agent thoughts FIRST so they render BEFORE the
-                #    tool_response that delivered them (chronologically the
-                #    sub-agent thought before producing its result).
-                # 2) then the event's own trace frames (which already
-                #    include the orchestrator's own thoughts inline via
-                #    `_build_trace_frames`'s prelude — those land before
-                #    the tool_call/model_text frame in the same event).
-                sub_frames, seen_trace_seqs = _build_sub_agent_trace_frames(
-                    event_state_delta(event),
-                    seen=seen_trace_seqs,
-                    next_id=trace_id + 1,
-                )
-                for f in sub_frames:
-                    trace_id += 1
-                    yield "data: " + json.dumps(f) + "\n\n"
-                frames = _build_trace_frames(event, next_id=trace_id + 1)
-                for f in frames:
-                    trace_id += 1
-                    yield "data: " + json.dumps(f) + "\n\n"
+            # Emit one trace frame per function_call / function_response
+            # part (parallel fan-out is encoded as N parts within a single
+            # ADK event), plus one per model_text event. Order matters for
+            # the activity panel:
+            # 1) sub-agent thoughts FIRST so they render BEFORE the
+            #    tool_response that delivered them (chronologically the
+            #    sub-agent thought before producing its result).
+            # 2) then the event's own trace frames (which already include
+            #    the orchestrator's own thoughts inline via
+            #    `_build_trace_frames`'s prelude — those land before the
+            #    tool_call/model_text frame in the same event).
+            sub_frames, seen_trace_seqs = _build_sub_agent_trace_frames(
+                event_state_delta(event),
+                seen=seen_trace_seqs,
+                next_id=trace_id + 1,
+            )
+            for f in sub_frames:
+                trace_id += 1
+                yield f
+            frames = _build_trace_frames(event, next_id=trace_id + 1)
+            for f in frames:
+                trace_id += 1
+                yield f
 
             # Forward only orchestrator model-text events; sub-agent
             # intermediate output stays inside the agent tree.
@@ -995,9 +1034,7 @@ async def _send_message_stream(
                 piece = event_text(event)
                 if piece:
                     answer_parts.append(piece)
-                    yield "data: " + json.dumps(
-                        {"type": "delta", "content": piece}
-                    ) + "\n\n"
+                    yield {"type": "delta", "content": piece}
 
             # Capture web_researcher tool_response text so we can parse the
             # mandated Quellen: block into citation records after the run.
@@ -1034,15 +1071,13 @@ async def _send_message_stream(
             log.warning("rag state dump failed: %s", dump_exc)
         notice = _friendly_gemini_error(exc)
         if answer_parts:
-            yield "data: " + json.dumps(
-                {"type": "delta", "content": "\n\n" + notice}
-            ) + "\n\n"
+            yield {"type": "delta", "content": "\n\n" + notice}
+            final_text = "".join(answer_parts) + "\n\n" + notice
         else:
-            yield "data: " + json.dumps(
-                {"type": "delta", "content": notice}
-            ) + "\n\n"
-        yield "data: " + json.dumps({"type": "meta", "citations": []}) + "\n\n"
-        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+            yield {"type": "delta", "content": notice}
+            final_text = notice
+        yield {"type": "meta", "citations": [], "content": final_text}
+        yield {"type": "done"}
         return
     else:
         # Success path: cancel the dispatch pump and reset the contextvar.
@@ -1107,40 +1142,198 @@ async def _send_message_stream(
     if not final_citations:
         annotated = re.sub(r"\s*\[\d+\]", "", annotated)
 
-    yield "data: " + json.dumps(
-        {"type": "meta", "citations": final_citations, "content": annotated}
-    ) + "\n\n"
+    yield {"type": "meta", "citations": final_citations, "content": annotated}
+    yield {"type": "done"}
 
-    persisted = annotated.strip()
-    if persisted:
-        msg = await asyncio.to_thread(
-            _persist_assistant_message,
-            chat_id,
-            user_id,
-            persisted,
-            final_citations,
+
+# Background tasks that outlive the HTTP request. Keyed by assistant
+# message_id so /cancel can target a specific in-flight turn; the task is
+# also held strongly here so the GC doesn't tear it down when the originating
+# request finishes. Entries auto-removed via add_done_callback.
+_BACKGROUND_TURNS: dict[str, asyncio.Task] = {}
+
+
+async def _run_assistant_turn(
+    *,
+    chat: dict,
+    text: str,
+    chat_id: str,
+    user_id: str,
+    assistant_message_id: str,
+) -> None:
+    """Drive _assistant_turn_events as a detached task: write each yielded
+    payload to chat_message_deltas (so any client subscribed via Realtime
+    sees them), and finalize the assistant chat_messages row when the
+    generator completes. Independent of the HTTP request that started it —
+    closing the tab does not cancel this task."""
+    seq = 0
+    final_content = ""
+    final_citations: list[dict] = []
+    # Snapshot of every trace frame seen this turn, upserted by id so the
+    # dispatch start/done pair collapses into one row (mirrors the frontend
+    # applyDeltaToThread upsert). Persisted onto chat_messages.traces at
+    # finalize so the activity collapsibles survive a hard reload.
+    trace_index: dict[str, dict] = {}
+    trace_order: list[str] = []
+    try:
+        async for payload in _assistant_turn_events(
+            chat=chat, text=text, chat_id=chat_id, user_id=user_id,
+        ):
+            ptype = payload.get("type")
+            if ptype == "meta":
+                # Last writer wins: an error meta after partial deltas
+                # overrides earlier metas (the generator only emits one).
+                final_content = payload.get("content") or final_content
+                final_citations = payload.get("citations") or []
+            elif ptype == "trace":
+                tid = payload.get("id")
+                if tid:
+                    if tid not in trace_index:
+                        trace_order.append(tid)
+                    trace_index[tid] = payload
+            seq += 1
+            try:
+                await asyncio.to_thread(
+                    _insert_delta,
+                    message_id=assistant_message_id,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    seq=seq,
+                    payload=payload,
+                )
+            except Exception as ins_exc:  # noqa: BLE001
+                # A delta-insert failure must not abort the rest of the
+                # turn; the final UPDATE on chat_messages still carries the
+                # complete answer. Log and continue.
+                log.warning(
+                    "delta insert failed (msg=%s seq=%s): %s",
+                    assistant_message_id, seq, ins_exc,
+                )
+        final_traces = [trace_index[t] for t in trace_order] or None
+        await asyncio.to_thread(
+            _finalize_assistant_message,
+            message_id=assistant_message_id,
+            content=final_content,
+            citations=final_citations,
+            traces=final_traces,
+            error=None,
         )
-        yield "data: " + json.dumps(
-            {"type": "done", "message_id": msg["id"]}
-        ) + "\n\n"
-    else:
-        yield "data: " + json.dumps({"type": "done"}) + "\n\n"
+    except asyncio.CancelledError:
+        # Process shutdown — try to mark the row so the frontend doesn't
+        # spin forever if the user reloads after a backend restart.
+        try:
+            await asyncio.to_thread(
+                _finalize_assistant_message,
+                message_id=assistant_message_id,
+                content=_friendly_gemini_error(RuntimeError("cancelled")),
+                citations=[],
+                traces=_terminate_inflight_traces(
+                    trace_index, trace_order, "cancelled"
+                ),
+                error="cancelled",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("assistant turn failed (msg=%s): %s", assistant_message_id, exc)
+        try:
+            await asyncio.to_thread(
+                _finalize_assistant_message,
+                message_id=assistant_message_id,
+                content=final_content or _friendly_gemini_error(exc),
+                citations=final_citations,
+                traces=_terminate_inflight_traces(
+                    trace_index, trace_order, type(exc).__name__
+                ),
+                error=f"{type(exc).__name__}: {str(exc)[:480]}",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "failed to finalize errored assistant msg %s", assistant_message_id
+            )
 
 
-@router.post("/{chat_id}/messages")
+def _terminate_inflight_traces(
+    trace_index: dict[str, dict],
+    trace_order: list[str],
+    reason: str,
+) -> list[dict] | None:
+    """On cancel / error, walk the per-id trace snapshot and flip any frame
+    still parked on kind='tool_call' to a synthetic terminated tool_response
+    so the activity panel renders an interrupted row instead of a forever-
+    spinner on reload."""
+    if not trace_order:
+        return None
+    frames: list[dict] = []
+    for tid in trace_order:
+        frame = dict(trace_index[tid])
+        if frame.get("kind") == "tool_call":
+            frame["kind"] = "tool_response"
+            frame["status"] = "error"
+            frame["response"] = json.dumps(
+                {"error": f"interrupted: {reason}"}, ensure_ascii=False
+            )
+        frames.append(frame)
+    return frames
+
+
+class SendMessageOut(BaseModel):
+    user_message_id: str
+    assistant_message_id: str
+
+
+@router.post("/{chat_id}/messages", response_model=SendMessageOut)
 async def send_message(
     chat_id: str, body: MessageIn, user_id: str = Depends(current_user_id)
 ):
     chat = _load_chat(chat_id, user_id)
-    return StreamingResponse(
-        _send_message_stream(
+    user_msg = await asyncio.to_thread(
+        _persist_user_message, chat_id, user_id, body.text
+    )
+    asst_msg = await asyncio.to_thread(
+        _create_streaming_assistant, chat_id, user_id
+    )
+    task = asyncio.create_task(
+        _run_assistant_turn(
             chat=chat,
             text=body.text,
             chat_id=chat_id,
             user_id=user_id,
-        ),
-        media_type="text/event-stream",
+            assistant_message_id=asst_msg["id"],
+        )
     )
+    msg_id = asst_msg["id"]
+    _BACKGROUND_TURNS[msg_id] = task
+    task.add_done_callback(lambda _t: _BACKGROUND_TURNS.pop(msg_id, None))
+    return SendMessageOut(
+        user_message_id=user_msg["id"],
+        assistant_message_id=msg_id,
+    )
+
+
+@router.post("/messages/{message_id}/cancel")
+async def cancel_message(
+    message_id: str, user_id: str = Depends(current_user_id)
+):
+    """User-initiated stop. Cancels the background turn (if still running);
+    _run_assistant_turn's CancelledError handler finalizes the row to
+    status='error' so the Realtime UPDATE drives the frontend cleanup. If
+    the task already finished, the row is already terminal — no-op."""
+    res = (
+        supabase()
+        .table("chat_messages")
+        .select("id,user_id,status")
+        .eq("id", message_id)
+        .limit(1)
+        .execute()
+    )
+    if not res.data or res.data[0]["user_id"] != user_id:
+        raise HTTPException(404, "message not found")
+    task = _BACKGROUND_TURNS.get(message_id)
+    if task and not task.done():
+        task.cancel()
+    return {"cancelled": message_id}
 
 
 def _title_stream(*, first_message: str, chat_id: str, user_id: str):
