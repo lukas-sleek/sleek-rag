@@ -790,19 +790,92 @@ async def _send_message_stream(
     # `error` envelope.
     merged_q: asyncio.Queue = asyncio.Queue()
 
+    # Vertex's Managed Vector Search (the serverless RAG Engine backing) sometimes
+    # rejects retrieval calls with `URL_REJECTED Reason: 54` /
+    # `harpoon-vertex-rag-managed-vertex-vector-search` and a misleading
+    # "QPS or BW…" event message. Confirmed Google-side flakiness in the shared
+    # serving fleet — the same query reliably succeeds after a few seconds. We
+    # silently retry the WHOLE turn before any output reaches the client; the
+    # frontend keeps showing its loading dots, never a "could not generate"
+    # toast for transient cases. See
+    # `.agent/incidents/2026-05-04_vertex_url_rejected_reason_54.md`.
+    HARPOON_FINGERPRINTS = (
+        "URL_REJECTED",
+        "harpoon-vertex-rag-managed",
+        "Harpoon FetchReply",
+        "Failed to process Rag Managed Vertex Vector Search response",
+    )
+    MAX_HARPOON_ATTEMPTS = 6
+    HARPOON_BASE_DELAY = 1.5
+
+    def _is_harpoon_transient(exc: Exception) -> bool:
+        s = str(exc)
+        return any(fp in s for fp in HARPOON_FINGERPRINTS)
+
     async def _pump_adk_events():
-        try:
-            async for ev in app.async_stream_query(
-                message=text,
-                session_id=session.id,
-                user_id=user_id,
-                run_config=_run_config,
-            ):
-                await merged_q.put({"_type": "adk", "event": ev})
-        except Exception as exc:  # noqa: BLE001
-            await merged_q.put({"_type": "error", "exc": exc})
-        finally:
-            await merged_q.put({"_type": "end"})
+        nonlocal session
+        # Track if we've handed any ADK event off to the consumer for THIS
+        # turn. Once the model has emitted into the SSE stream, retrying
+        # would double up content, so we only retry when nothing has shipped.
+        emitted_any = False
+        last_exc: Exception | None = None
+        for attempt in range(MAX_HARPOON_ATTEMPTS):
+            try:
+                async for ev in app.async_stream_query(
+                    message=text,
+                    session_id=session.id,
+                    user_id=user_id,
+                    run_config=_run_config,
+                ):
+                    emitted_any = True
+                    await merged_q.put({"_type": "adk", "event": ev})
+                last_exc = None
+                break  # success
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if emitted_any:
+                    log.warning(
+                        "chat[%s]: stream errored after emitting events; not retrying. %s: %s",
+                        chat_id, type(exc).__name__, exc,
+                    )
+                    break
+                if not _is_harpoon_transient(exc):
+                    break
+                if attempt + 1 >= MAX_HARPOON_ATTEMPTS:
+                    log.warning(
+                        "chat[%s]: harpoon retries exhausted (%d/%d); giving up. %s",
+                        chat_id, attempt + 1, MAX_HARPOON_ATTEMPTS, exc,
+                    )
+                    break
+                # Exponential backoff with jitter. Total worst-case wait at
+                # MAX_HARPOON_ATTEMPTS=6: ≈ 1.5+3+6+12+24 ≈ 47s — within the
+                # frontend's stream patience and well under uvicorn timeouts.
+                import random as _random
+                delay = HARPOON_BASE_DELAY * (2 ** attempt) + _random.uniform(0, 0.5)
+                log.warning(
+                    "chat[%s]: harpoon transient error; retry %d/%d in %.1fs. detail=%s",
+                    chat_id, attempt + 1, MAX_HARPOON_ATTEMPTS, delay,
+                    str(exc).split("Events {")[0][:200],
+                )
+                await asyncio.sleep(delay)
+                # Re-seed the session so the retry starts from a clean ADK
+                # state. seed_session replays history from Supabase and drops
+                # the trailing user row (already passed via `message=text`),
+                # so this is idempotent — the model sees identical input.
+                try:
+                    session = await seed_session(
+                        app=app, user_id=user_id, chat_id=chat_id
+                    )
+                except Exception as seed_exc:  # noqa: BLE001
+                    log.warning(
+                        "chat[%s]: re-seed failed during harpoon retry: %s",
+                        chat_id, seed_exc,
+                    )
+                    last_exc = seed_exc
+                    break
+        if last_exc is not None:
+            await merged_q.put({"_type": "error", "exc": last_exc})
+        await merged_q.put({"_type": "end"})
 
     async def _pump_dispatch_progress():
         while True:
