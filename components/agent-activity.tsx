@@ -95,25 +95,25 @@ function StepHeader({ step }: { step: TraceStep }) {
   );
 }
 
-// Vertex `RagContext.score` for the default RagManagedVertexVectorSearch
-// backend is a vector-DISTANCE (lower = more relevant), not a similarity.
-// The presence of `vector_distance_threshold` in the retrieval config —
-// which "returns contexts smaller than the threshold" — is the giveaway.
-// So our thresholds invert the usual similarity-style colouring:
-//   <= 0.30  → green (top-of-corpus match for normalised cosine distance)
-//   <= 0.50  → amber
-//   >  0.50  → rose
-function distanceBadgeProps(distance: number): {
+// Confidence on retrieved chunks comes from Vertex's grounding metadata —
+// specifically the per-chunk maximum across grounding_supports.confidence_
+// scores (the same number Agent Builder displays). It's a similarity-style
+// signal in [0, 1] where higher = the model leaned harder on this chunk
+// when grounding the answer.
+//   >= 0.70  → green (high-confidence grounding)
+//   >= 0.40  → amber (medium)
+//   <  0.40  → rose (low)
+function confidenceBadgeProps(confidence: number): {
   variant: "default" | "secondary" | "outline";
   className: string;
 } {
-  if (distance <= 0.30) {
+  if (confidence >= 0.70) {
     return {
       variant: "default",
       className: "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30",
     };
   }
-  if (distance <= 0.50) {
+  if (confidence >= 0.40) {
     return {
       variant: "secondary",
       className: "bg-amber-500/15 text-amber-300 border border-amber-500/30",
@@ -136,7 +136,7 @@ function ChunkRow({ chunk }: { chunk: RetrievalChunk }) {
           variant: "outline" as const,
           className: "border border-border text-text-tertiary",
         }
-      : distanceBadgeProps(chunk.score);
+      : confidenceBadgeProps(chunk.score);
   return (
     <div className="rounded-md border border-border bg-bg-input p-2.5">
       <div className="flex items-center gap-2 mb-1.5">
@@ -147,7 +147,7 @@ function ChunkRow({ chunk }: { chunk: RetrievalChunk }) {
         </span>
         <Badge
           variant={badgeProps.variant}
-          title="Vektor-Distanz (niedriger = relevanter)"
+          title="Konfidenz aus grounding_supports (höher = relevanter)"
           className={"font-mono text-[10px] py-0 px-1.5 " + badgeProps.className}
         >
           {scoreText}
@@ -171,7 +171,7 @@ function StepBody({ step }: { step: TraceStep }) {
           <span className="text-text-tertiary">·</span>
           <span>{step.chunks.length}</span>
           <span className="text-text-tertiary normal-case tracking-normal italic ml-auto">
-            Distanz ↓ besser
+            Konfidenz ↑ besser
           </span>
           {step.status && step.status !== "ok" && (
             <span className="text-text-tertiary italic">({step.status})</span>

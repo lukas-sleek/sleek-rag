@@ -402,6 +402,27 @@ class StreamingAgentTool(AgentTool):
         collide on the same id.
         """
         chunks = getattr(gm, "grounding_chunks", None) or []
+        # Vertex grounding_metadata exposes confidence at the claim → chunk
+        # level (grounding_supports.confidence_scores aligned to
+        # grounding_chunk_indices) — the same surface Agent Builder
+        # displays. There's no flat per-chunk score on the grounding chunk
+        # itself in the agent flow, so we summarise as "highest confidence
+        # the model placed in this chunk while grounding any answer span"
+        # — i.e. max across all supports that referenced it. Chunks that
+        # were retrieved but didn't end up grounding a claim get None.
+        supports = getattr(gm, "grounding_supports", None) or []
+        chunk_confidence: dict[int, float] = {}
+        for s in supports:
+            idxs = list(getattr(s, "grounding_chunk_indices", []) or [])
+            scores = list(getattr(s, "confidence_scores", []) or [])
+            for ci, score in zip(idxs, scores):
+                try:
+                    f = float(score)
+                except (TypeError, ValueError):
+                    continue
+                if ci not in chunk_confidence or f > chunk_confidence[ci]:
+                    chunk_confidence[ci] = f
+
         rendered: list[dict] = []
         for i, c in enumerate(chunks):
             rc = getattr(c, "retrieved_context", None)
@@ -415,9 +436,7 @@ class StreamingAgentTool(AgentTool):
             rendered.append({
                 "idx": i + 1,
                 "filename": filename,
-                # Vertex managed retrieval doesn't expose a per-chunk score
-                # in grounding_metadata; ChunkRow renders null as "—".
-                "score": None,
+                "score": chunk_confidence.get(i),  # 0..1, higher = better
                 "text": text,
             })
 
