@@ -248,7 +248,11 @@ def _citations_from_grounding(chunks: list[dict]) -> list[dict]:
             "file_id": file_id,
             "project_id": project_id,
             "chunk_id": chunk_id,
-            "score": None,  # native retrieval doesn't surface a per-chunk score
+            # Per-chunk confidence aggregated from grounding_supports
+            # (StreamingAgentTool._per_chunk_confidence). Higher = better;
+            # None means the chunk was retrieved but never grounded a
+            # claim in the final answer.
+            "score": c.get("confidence"),
             "uri": uri,
             "title": title,
         })

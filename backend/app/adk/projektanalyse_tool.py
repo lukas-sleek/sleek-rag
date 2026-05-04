@@ -90,7 +90,8 @@ def make_run_projektanalyse_tool(rag_specialist: LlmAgent) -> FunctionTool:
                 text = StreamingAgentTool._annotate_with_grounding_supports(
                     text, gm, idx_offset=offset
                 )
-                for c in gm.grounding_chunks or []:
+                chunk_confidence = StreamingAgentTool._per_chunk_confidence(gm)
+                for ci, c in enumerate(gm.grounding_chunks or []):
                     rc = getattr(c, "retrieved_context", None)
                     if rc is None:
                         continue
@@ -99,6 +100,7 @@ def make_run_projektanalyse_tool(rag_specialist: LlmAgent) -> FunctionTool:
                         "text": getattr(rc, "text", "") or "",
                         "title": getattr(rc, "title", "") or "",
                         "uri": getattr(rc, "uri", "") or "",
+                        "confidence": chunk_confidence.get(ci),
                     }
                     rag_chunk = getattr(rc, "rag_chunk", None)
                     if rag_chunk is not None:

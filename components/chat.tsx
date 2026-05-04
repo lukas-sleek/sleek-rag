@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import { Icon } from "./icons";
 import type { Citation, Message as Msg } from "./fixtures";
 import { CitationChip } from "./citation-chip";
+import { CitationHover } from "./citation-hover";
 import { AgentActivity } from "./agent-activity";
 import { api } from "@/lib/api";
 
@@ -193,17 +194,12 @@ export function Message({
                 const c = visibleCitations[idx];
                 if (c) {
                   return (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        onCiteClick?.(c);
-                      }}
-                      title={c.snippet}
-                      className="font-mono tabular-nums text-[12px] text-accent hover:text-accent-hover underline underline-offset-2 align-baseline px-px"
+                    <CitationHover
+                      citation={c}
+                      onClick={() => onCiteClick?.(c)}
                     >
                       {children}
-                    </button>
+                    </CitationHover>
                   );
                 }
               }

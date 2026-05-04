@@ -348,12 +348,33 @@ class StreamingAgentTool(AgentTool):
             tool_context.state["agent_trace"] = existing
 
     @staticmethod
+    def _per_chunk_confidence(gm) -> dict[int, float]:
+        """Aggregate Vertex grounding_supports confidence_scores per chunk
+        index — max across every claim-level support that referenced the
+        chunk. Same number Agent Builder displays. Chunks that were
+        retrieved but never grounded a claim aren't in the dict (caller
+        falls back to None)."""
+        out: dict[int, float] = {}
+        for s in (getattr(gm, "grounding_supports", None) or []):
+            idxs = list(getattr(s, "grounding_chunk_indices", []) or [])
+            scores = list(getattr(s, "confidence_scores", []) or [])
+            for ci, score in zip(idxs, scores):
+                try:
+                    f = float(score)
+                except (TypeError, ValueError):
+                    continue
+                if ci not in out or f > out[ci]:
+                    out[ci] = f
+        return out
+
+    @staticmethod
     def _append_grounding_chunks(tool_context: ToolContext, gm) -> None:
         """Serialise this sub-call's grounding chunks into parent state.
 
         Each chunk lands as one entry under `state["agent_grounding_chunks"]`
         with the shape chats.py expects:
-            {"agent": <sub-agent name>, "text", "title", "uri", "rag_chunk"}
+            {"agent": <sub-agent name>, "text", "title", "uri", "rag_chunk",
+             "confidence"?}
         Multi-question fan-outs produce one StreamingAgentTool call per
         sub-question, so we APPEND rather than overwrite.
         """
@@ -361,8 +382,9 @@ class StreamingAgentTool(AgentTool):
         if not chunks:
             return
         author = "rag_specialist"  # only this agent has grounding wired today
+        chunk_confidence = StreamingAgentTool._per_chunk_confidence(gm)
         existing = list(tool_context.state.get("agent_grounding_chunks", []) or [])
-        for c in chunks:
+        for i, c in enumerate(chunks):
             rc = getattr(c, "retrieved_context", None)
             if rc is None:
                 continue
@@ -371,6 +393,7 @@ class StreamingAgentTool(AgentTool):
                 "text": getattr(rc, "text", None) or "",
                 "title": getattr(rc, "title", None) or "",
                 "uri": getattr(rc, "uri", None) or "",
+                "confidence": chunk_confidence.get(i),
             }
             rag_chunk = getattr(rc, "rag_chunk", None)
             if rag_chunk is not None:
@@ -403,26 +426,9 @@ class StreamingAgentTool(AgentTool):
         """
         chunks = getattr(gm, "grounding_chunks", None) or []
         # Vertex grounding_metadata exposes confidence at the claim → chunk
-        # level (grounding_supports.confidence_scores aligned to
-        # grounding_chunk_indices) — the same surface Agent Builder
-        # displays. There's no flat per-chunk score on the grounding chunk
-        # itself in the agent flow, so we summarise as "highest confidence
-        # the model placed in this chunk while grounding any answer span"
-        # — i.e. max across all supports that referenced it. Chunks that
-        # were retrieved but didn't end up grounding a claim get None.
-        supports = getattr(gm, "grounding_supports", None) or []
-        chunk_confidence: dict[int, float] = {}
-        for s in supports:
-            idxs = list(getattr(s, "grounding_chunk_indices", []) or [])
-            scores = list(getattr(s, "confidence_scores", []) or [])
-            for ci, score in zip(idxs, scores):
-                try:
-                    f = float(score)
-                except (TypeError, ValueError):
-                    continue
-                if ci not in chunk_confidence or f > chunk_confidence[ci]:
-                    chunk_confidence[ci] = f
-
+        # level. We summarise per chunk via the shared helper so the
+        # activity panel and the citation list use the same number.
+        chunk_confidence = StreamingAgentTool._per_chunk_confidence(gm)
         rendered: list[dict] = []
         for i, c in enumerate(chunks):
             rc = getattr(c, "retrieved_context", None)
