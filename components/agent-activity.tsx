@@ -2,7 +2,6 @@
 import * as React from "react";
 import {
   BotIcon,
-  BrainIcon,
   HammerIcon,
   CheckCircle2Icon,
   FileTextIcon,
@@ -36,14 +35,11 @@ const KIND_LABEL: Record<TraceStep["kind"], string> = {
   tool_call: "ruft Tool auf",
   tool_response: "Tool-Ergebnis",
   model_text: "antwortet",
-  model_thought: "denkt laut",
 };
 
 function KindIcon({ kind }: { kind: TraceStep["kind"] }) {
   if (kind === "tool_call") return <HammerIcon className="size-3.5" />;
   if (kind === "tool_response") return <CheckCircle2Icon className="size-3.5" />;
-  if (kind === "model_thought")
-    return <BrainIcon className="size-3.5 text-amber-300" />;
   return <MessageSquareTextIcon className="size-3.5" />;
 }
 
@@ -197,17 +193,10 @@ function StepBody({ step }: { step: TraceStep }) {
     );
   }
 
-  const blocks: Array<{ label: string; body: string; thought?: boolean }> = [];
+  const blocks: Array<{ label: string; body: string }> = [];
   if (step.args) blocks.push({ label: "Argumente", body: prettyJSON(step.args) });
   if (step.response) blocks.push({ label: "Antwort", body: prettyJSON(step.response) });
-  if (step.text) {
-    const isThought = step.kind === "model_thought";
-    blocks.push({
-      label: isThought ? "Gedanke" : "Inhalt",
-      body: step.text,
-      thought: isThought,
-    });
-  }
+  if (step.text) blocks.push({ label: "Inhalt", body: step.text });
   if (blocks.length === 0) {
     return (
       <div className="text-[12px] text-text-tertiary px-3 pb-3 italic">
@@ -219,17 +208,10 @@ function StepBody({ step }: { step: TraceStep }) {
     <div className="px-3 pb-3 space-y-2">
       {blocks.map((b) => (
         <div key={b.label}>
-          <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1 flex items-center gap-1.5">
-            {b.thought && <BrainIcon className="size-3 text-amber-300" />}
+          <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1">
             {b.label}
           </div>
-          <pre
-            className={
-              b.thought
-                ? "bg-amber-500/5 border border-amber-500/20 rounded-md p-2.5 text-[11.5px] leading-[1.55] text-amber-100/80 italic overflow-x-auto whitespace-pre-wrap break-words max-h-72"
-                : "bg-bg-input border border-border rounded-md p-2.5 text-[11.5px] leading-[1.5] font-mono text-text-secondary overflow-x-auto whitespace-pre-wrap break-words max-h-72"
-            }
-          >
+          <pre className="bg-bg-input border border-border rounded-md p-2.5 text-[11.5px] leading-[1.5] font-mono text-text-secondary overflow-x-auto whitespace-pre-wrap break-words max-h-72">
             {b.body}
           </pre>
         </div>

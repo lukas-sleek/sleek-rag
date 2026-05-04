@@ -69,14 +69,11 @@ export type RetrievalChunk = {
 export type TraceStep = {
   id: string;
   author: string;             // agent name, e.g. "chat_orchestrator"
-  // `model_thought` carries chain-of-thought emitted with
-  // ThinkingConfig.include_thoughts=True; rendered separately from
-  // `model_text` (the agent's user-facing reply).
-  kind: "tool_call" | "tool_response" | "model_text" | "model_thought";
+  kind: "tool_call" | "tool_response" | "model_text";
   name?: string | null;       // tool name on tool_call / tool_response
   args?: string | null;       // truncated JSON of tool_call args
   response?: string | null;   // truncated JSON of tool_response body
-  text?: string | null;       // truncated model text or thought
+  text?: string | null;       // truncated model text
   // Populated for `search_project_documents` tool_responses. When set, the
   // activity panel renders a chunks-with-confidence list instead of the
   // generic JSON-blob preview.

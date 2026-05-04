@@ -300,19 +300,9 @@ class StreamingAgentTool(AgentTool):
         seq = len(existing)
 
         for p in parts:
-            text = getattr(p, "text", None)
-            is_thought = getattr(p, "thought", False)
             fc = getattr(p, "function_call", None)
             fr = getattr(p, "function_response", None)
-            if text and is_thought:
-                existing.append({
-                    "agent": author,
-                    "kind": "model_thought",
-                    "seq": seq,
-                    "text": text,
-                })
-                seq += 1
-            elif fc is not None:
+            if fc is not None:
                 # Capture the function_call.id alongside the call entry so
                 # the matching tool_response can reuse it — chats.py turns
                 # this into a stable trace row id, letting the response

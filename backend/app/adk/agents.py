@@ -62,36 +62,24 @@ _HTTP_OPTIONS = genai_types.HttpOptions(
 _RETRY_CONFIG = genai_types.GenerateContentConfig(http_options=_HTTP_OPTIONS)
 
 
-# Thinking surfaces the model's chain-of-thought as `thought=True` text parts
-# in the event stream. We expose them in the activity panel so debug users can
-# see WHY the agent reached an answer; the streamed user-facing reply still
-# only contains non-thought text.
-#
-# Budget-split rationale (added 2026-05-02 after observing 5-10min orchestrator
-# stalls on 11-question fan-out summarization):
-#   - SUB-AGENT (`rag_specialist`, web tree): keeps `budget=-1` (model decides).
-#     Single-question deep reasoning + retrieval genuinely benefits from
-#     unbounded thinking; latency per call stays in the 10-25s range.
-#   - ORCHESTRATOR: capped at `budget=512`. Its job is routing + pass-through
-#     aggregation per the instructions — NOT synthesis. With `-1` the model
-#     burns thousands of thinking tokens on the post-tool summarization pass
-#     for an 11-answer fan-out, which is a documented Flash failure mode
-#     (cf. ai.google.dev forum: 8k-char HTML refinement -> 400s on Flash).
-#     512 tokens is roughly enough for routing nuance ("dispatch vs single
-#     rag_specialist vs web vs direct answer") but caps summarization-pass
-#     thinking at a few seconds.
+# Sub-agent thinking config: keep unbounded thinking budget (model decides
+# how long to deliberate before producing output — single-question deep
+# reasoning + retrieval genuinely benefits, per-call latency stays in the
+# 10-25s range), but DON'T emit the chain-of-thought to the stream. The
+# activity panel previously rendered these as "denkt laut" rows; removed
+# 2026-05 because the surface added clutter without enough debugging value
+# to justify the bandwidth and rendering cost.
 _THINKING_CONFIG = genai_types.ThinkingConfig(
-    include_thoughts=True,
+    include_thoughts=False,
     thinking_budget=-1,
 )
 
-# Orchestrator: no thinking, no thought emission. Matches the pre-`01a1437`
-# (`24c2534`) branch behavior where the orchestrator ran on plain
-# `_RETRY_CONFIG` and 11-question summaries returned in seconds, not minutes.
-# The orchestrator's instruction is prescriptive ("pass through unchanged")
-# so it doesn't benefit from chain-of-thought; the latency cost was pure
-# loss. Sub-agent (`rag_specialist`) thinking stays on — that's where it
-# legitimately helps.
+# Orchestrator: no thinking at all. Matches the pre-`01a1437` (`24c2534`)
+# branch behavior where the orchestrator ran on plain `_RETRY_CONFIG` and
+# 11-question summaries returned in seconds, not minutes. The orchestrator's
+# instruction is prescriptive ("pass through unchanged") so it doesn't
+# benefit from chain-of-thought; the latency cost was pure loss. Sub-agent
+# (`rag_specialist`) thinking stays on — that's where it legitimately helps.
 _ORCHESTRATOR_THINKING_CONFIG = genai_types.ThinkingConfig(
     include_thoughts=False,
     thinking_budget=0,
@@ -99,7 +87,8 @@ _ORCHESTRATOR_THINKING_CONFIG = genai_types.ThinkingConfig(
 
 
 def _retry_with_thinking() -> genai_types.GenerateContentConfig:
-    """Per-agent generate-content config: retry + chain-of-thought emission."""
+    """Per-agent generate-content config: retry + unbounded thinking budget
+    with no thought-text emission."""
     return genai_types.GenerateContentConfig(
         http_options=_HTTP_OPTIONS,
         thinking_config=_THINKING_CONFIG,
@@ -107,9 +96,8 @@ def _retry_with_thinking() -> genai_types.GenerateContentConfig:
 
 
 def _retry_with_orchestrator_thinking() -> genai_types.GenerateContentConfig:
-    """Orchestrator-only config: same retries + thoughts, but capped budget
-    so post-tool aggregation doesn't run for minutes. See _THINKING_CONFIG
-    block above for rationale."""
+    """Orchestrator-only config: thinking disabled entirely so post-tool
+    aggregation doesn't burn minutes. See _THINKING_CONFIG block above."""
     return genai_types.GenerateContentConfig(
         http_options=_HTTP_OPTIONS,
         thinking_config=_ORCHESTRATOR_THINKING_CONFIG,

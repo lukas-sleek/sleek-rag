@@ -39,11 +39,9 @@ from app.adk._harpoon_retry import (
 from app.adk.dispatch_rag_questions_tool import DISPATCH_PROGRESS_CHAN
 from app.adk.event_translator import (
     event_author,
-    event_has_thought,
     event_kind,
     event_state_delta,
     event_text,
-    event_thought_text,
 )
 from app.adk.history import seed_session
 from app.auth import current_user_id
@@ -352,18 +350,6 @@ def _build_trace_frames(event: dict, *, next_id: int) -> list[dict]:
             "kind": kind,
         }
 
-    # Gemini emits the model's chain-of-thought INLINE with the action it
-    # took: the same event can carry both thought parts and a function_call,
-    # or both thought parts and final text. We extract thoughts first for
-    # ANY model event so they always render before the action they
-    # accompany — this is the orchestrator's "planning" that was previously
-    # invisible because the tool_call branch ignored text parts entirely.
-    if kind in ("tool_call", "model_text") and event_has_thought(event):
-        tf = _new_frame()
-        tf["kind"] = "model_thought"
-        tf["text"] = event_thought_text(event)[:_TRACE_TEXT_PREVIEW_LIMIT]
-        out.append(tf)
-
     if kind == "tool_call":
         for p in parts:
             fc = p.get("function_call")
@@ -471,11 +457,11 @@ def _build_sub_agent_trace_frames(
             "kind": kind,
         }
         if kind == "model_thought":
-            text = entry.get("text") or ""
-            if not text:
-                continue
-            frame["text"] = text[:_TRACE_TEXT_PREVIEW_LIMIT]
-        elif kind == "tool_call":
+            # Sub-agents no longer emit thoughts (see _THINKING_CONFIG in
+            # adk/agents.py); skip any stale entries so the activity panel
+            # stays clean.
+            continue
+        if kind == "tool_call":
             # Stable id from function_call.id (set by StreamingAgentTool's
             # _capture_activity) so the matching tool_response upserts onto
             # this row in the UI. Falls back to the auto evt-id when ADK
