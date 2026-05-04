@@ -406,8 +406,14 @@ def _build_trace_frames(event: dict, *, next_id: int) -> list[dict]:
                 ]
             out.append(f)
     elif kind == "model_text":
-        # Thought parts already emitted in the prelude above; only render the
-        # answer (non-thought) text here.
+        # The orchestrator's model_text is already streamed verbatim into
+        # the chat as the user-facing answer (see the "model_text and author
+        # == chat_orchestrator" branch in _assistant_turn_events). Surfacing
+        # it again as a trace row would be a duplicate. Sub-agent model_text
+        # never reaches the chat surface, so we keep it for the activity
+        # panel.
+        if author == "chat_orchestrator":
+            return out
         answer = event_text(event)
         if answer:
             f = _new_frame()
