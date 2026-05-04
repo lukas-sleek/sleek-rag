@@ -31,6 +31,11 @@ import re
 
 from app.adk.app_factory import get_or_build_app
 from app.adk.citation_aggregator import dedupe_and_renumber, rewrite_refs
+from app.adk._harpoon_retry import (
+    DEFAULT_MAX_ATTEMPTS as _RETRY_MAX_ATTEMPTS,
+    harpoon_backoff_delay as _retry_backoff_delay,
+    is_harpoon_transient as _is_transient_upstream,
+)
 from app.adk.dispatch_rag_questions_tool import DISPATCH_PROGRESS_CHAN
 from app.adk.event_translator import (
     event_author,
@@ -790,36 +795,20 @@ async def _send_message_stream(
     # `error` envelope.
     merged_q: asyncio.Queue = asyncio.Queue()
 
-    # Vertex's Managed Vector Search (the serverless RAG Engine backing) sometimes
-    # rejects retrieval calls with `URL_REJECTED Reason: 54` /
-    # `harpoon-vertex-rag-managed-vertex-vector-search` and a misleading
-    # "QPS or BW…" event message. Confirmed Google-side flakiness in the shared
-    # serving fleet — the same query reliably succeeds after a few seconds. We
-    # silently retry the WHOLE turn before any output reaches the client; the
-    # frontend keeps showing its loading dots, never a "could not generate"
-    # toast for transient cases. See
-    # `.agent/incidents/2026-05-04_vertex_url_rejected_reason_54.md`.
-    HARPOON_FINGERPRINTS = (
-        "URL_REJECTED",
-        "harpoon-vertex-rag-managed",
-        "Harpoon FetchReply",
-        "Failed to process Rag Managed Vertex Vector Search response",
-    )
-    MAX_HARPOON_ATTEMPTS = 6
-    HARPOON_BASE_DELAY = 1.5
-
-    def _is_harpoon_transient(exc: Exception) -> bool:
-        s = str(exc)
-        return any(fp in s for fp in HARPOON_FINGERPRINTS)
+    # Silent retry-with-backoff over the WHOLE turn for transient upstream
+    # failures (Vertex Harpoon FAILED_PRECONDITION, 503 UNAVAILABLE, 429
+    # RESOURCE_EXHAUSTED, 500 INTERNAL, DEADLINE_EXCEEDED, socket resets, …).
+    # Predicate + budget come from `app.adk._harpoon_retry`. Goal: the
+    # frontend keeps showing its loading dots through transient capacity
+    # pressure, never a "could not generate" toast. Retries fire only
+    # before any event has reached the SSE stream — once content has
+    # shipped, retrying would double up, so we bail.
 
     async def _pump_adk_events():
         nonlocal session
-        # Track if we've handed any ADK event off to the consumer for THIS
-        # turn. Once the model has emitted into the SSE stream, retrying
-        # would double up content, so we only retry when nothing has shipped.
         emitted_any = False
         last_exc: Exception | None = None
-        for attempt in range(MAX_HARPOON_ATTEMPTS):
+        for attempt in range(_RETRY_MAX_ATTEMPTS):
             try:
                 async for ev in app.async_stream_query(
                     message=text,
@@ -839,22 +828,19 @@ async def _send_message_stream(
                         chat_id, type(exc).__name__, exc,
                     )
                     break
-                if not _is_harpoon_transient(exc):
+                if not _is_transient_upstream(exc):
                     break
-                if attempt + 1 >= MAX_HARPOON_ATTEMPTS:
+                if attempt + 1 >= _RETRY_MAX_ATTEMPTS:
                     log.warning(
-                        "chat[%s]: harpoon retries exhausted (%d/%d); giving up. %s",
-                        chat_id, attempt + 1, MAX_HARPOON_ATTEMPTS, exc,
+                        "chat[%s]: upstream retries exhausted (%d/%d); giving up. %s",
+                        chat_id, attempt + 1, _RETRY_MAX_ATTEMPTS, exc,
                     )
                     break
-                # Exponential backoff with jitter. Total worst-case wait at
-                # MAX_HARPOON_ATTEMPTS=6: ≈ 1.5+3+6+12+24 ≈ 47s — within the
-                # frontend's stream patience and well under uvicorn timeouts.
-                import random as _random
-                delay = HARPOON_BASE_DELAY * (2 ** attempt) + _random.uniform(0, 0.5)
+                delay = _retry_backoff_delay(attempt)
                 log.warning(
-                    "chat[%s]: harpoon transient error; retry %d/%d in %.1fs. detail=%s",
-                    chat_id, attempt + 1, MAX_HARPOON_ATTEMPTS, delay,
+                    "chat[%s]: upstream transient (%s); retry %d/%d in %.1fs. detail=%s",
+                    chat_id, type(exc).__name__,
+                    attempt + 1, _RETRY_MAX_ATTEMPTS, delay,
                     str(exc).split("Events {")[0][:200],
                 )
                 await asyncio.sleep(delay)
@@ -868,7 +854,7 @@ async def _send_message_stream(
                     )
                 except Exception as seed_exc:  # noqa: BLE001
                     log.warning(
-                        "chat[%s]: re-seed failed during harpoon retry: %s",
+                        "chat[%s]: re-seed failed during retry: %s",
                         chat_id, seed_exc,
                     )
                     last_exc = seed_exc
