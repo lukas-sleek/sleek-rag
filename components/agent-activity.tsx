@@ -211,7 +211,7 @@ function StepBody({ step }: { step: TraceStep }) {
           <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1">
             {b.label}
           </div>
-          <pre className="bg-bg-input border border-border rounded-md p-2.5 text-[11.5px] leading-[1.5] font-mono text-text-secondary overflow-x-auto whitespace-pre-wrap break-words max-h-72">
+          <pre className="bg-bg-input border border-border rounded-md p-2.5 text-[11.5px] leading-[1.5] font-mono text-text-secondary overflow-auto whitespace-pre-wrap break-words max-h-72">
             {b.body}
           </pre>
         </div>
