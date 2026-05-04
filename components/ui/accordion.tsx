@@ -68,7 +68,15 @@ function AccordionContent({
     >
       <div
         className={cn(
-          "h-(--radix-accordion-content-height) pt-0 pb-2.5 [&_a]:underline [&_a]:underline-offset-3 [&_a]:hover:text-foreground [&_p:not(:last-child)]:mb-4",
+          // Inner content grows with its children. Earlier we locked the
+          // height to `--radix-accordion-content-height` (the value Radix
+          // measures once on expand), which clipped the activity panel
+          // when traces upserted in place — the merged step gained an
+          // `Antwort` block after open, but the inner box stayed sized
+          // to its pre-merge height. The Content wrapper still uses the
+          // variable for its open/close keyframes; the inner div is just
+          // padding + child layout.
+          "pt-0 pb-2.5 [&_a]:underline [&_a]:underline-offset-3 [&_a]:hover:text-foreground [&_p:not(:last-child)]:mb-4",
           className
         )}
       >

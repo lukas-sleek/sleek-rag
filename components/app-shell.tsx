@@ -1074,14 +1074,29 @@ export function App() {
             const existing = target.traces ?? [];
             // Upsert by id: per-question dispatch frames emit the SAME id
             // (e.g. `dispatch-3`) for the start (`laeuft`) and done
-            // (`fertig`) phases — replace in place so the activity panel
+            // (`fertig`) phases — merge in place so the activity panel
             // shows one row per question that flips status rather than
-            // two separate rows.
+            // two separate rows. Merging instead of replacing preserves
+            // fields that only the EARLIER frame set: a tool_call carries
+            // `args` (the request), a tool_response carries `response`
+            // (the answer); the backend doesn't re-send `args` on the
+            // response, so a naive replace would drop "Argumente" from
+            // the activity panel once the answer arrives. We skip nullish
+            // fields from the incoming step so absent values can't shadow
+            // values from the prior frame.
             const existingIdx = existing.findIndex((t) => t.id === step.id);
-            const nextTraces =
-              existingIdx >= 0
-                ? existing.map((t, i) => (i === existingIdx ? step : t))
-                : [...existing, step];
+            let nextTraces: typeof existing;
+            if (existingIdx >= 0) {
+              const merged = { ...existing[existingIdx] } as Record<string, unknown>;
+              for (const [k, v] of Object.entries(step)) {
+                if (v !== null && v !== undefined) merged[k] = v;
+              }
+              nextTraces = existing.map((t, i) =>
+                i === existingIdx ? (merged as typeof t) : t,
+              );
+            } else {
+              nextTraces = [...existing, step];
+            }
             arr[idx] = { ...target, traces: nextTraces };
             return { ...prev, [chatId]: arr };
           });

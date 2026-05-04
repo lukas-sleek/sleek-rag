@@ -43,12 +43,19 @@ def _row_to_event(row: dict) -> Event | None:
 def load_history_rows(
     chat_id: str, user_id: str, limit: int = _HISTORY_LIMIT
 ) -> list[dict]:
+    # Filter to status='done' so the in-flight assistant placeholder
+    # (inserted by chats.py:_create_streaming_assistant before this
+    # function runs) doesn't land at the tail of history. If it did, the
+    # trailing-user strip in seed_session() would no-op and the model
+    # would see the just-asked user question both as seeded history AND
+    # as the new turn, prompting "you asked this twice" replies.
     res = (
         supabase()
         .table("chat_messages")
         .select("id,role,content,created_at")
         .eq("chat_id", chat_id)
         .eq("user_id", user_id)
+        .eq("status", "done")
         .order("created_at", desc=True)
         .limit(limit)
         .execute()

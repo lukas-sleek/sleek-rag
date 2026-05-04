@@ -210,13 +210,13 @@ function StepBody({ step }: { step: TraceStep }) {
     );
   }
   return (
-    <div className="px-3 pb-3 space-y-2">
+    <div className="px-3 pb-3 space-y-4">
       {blocks.map((b) => (
         <div key={b.label}>
-          <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1">
+          <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1.5">
             {b.label}
           </div>
-          <pre className="bg-bg-input border border-border rounded-md p-2.5 text-[11.5px] leading-[1.5] font-mono text-text-secondary overflow-auto whitespace-pre-wrap break-words max-h-72">
+          <pre className="bg-bg-input border border-border rounded-md p-2.5 text-[11.5px] leading-[1.5] font-mono text-text-secondary whitespace-pre-wrap break-words">
             {b.body}
           </pre>
         </div>

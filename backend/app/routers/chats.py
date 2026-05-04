@@ -113,7 +113,14 @@ def _dump_rag_state(corpus_name: str | None, project_id: str) -> dict:
 
 
 _TRACE_TEXT_PREVIEW_LIMIT = 600
-_TRACE_ARGS_PREVIEW_LIMIT = 400
+# Cap on tool_call args / tool_response body strings stored in trace
+# frames. Originally 400, which truncated rag_specialist answers
+# (~1-3KB) mid-sentence in the activity panel. Lifted to a generous
+# ceiling so sub-agent results render in full while still bounding
+# pathological payloads (e.g. an LLM that decides to dump a whole
+# document) from blowing up chat_message_deltas + chat_messages.traces
+# row sizes.
+_TRACE_ARGS_PREVIEW_LIMIT = 64_000
 
 
 # Parses one row of web_researcher's mandated Quellen block:
@@ -1186,7 +1193,22 @@ async def _run_assistant_turn(
                 if tid:
                     if tid not in trace_index:
                         trace_order.append(tid)
-                    trace_index[tid] = payload
+                        trace_index[tid] = payload
+                    else:
+                        # Merge instead of overwrite: a tool_call frame
+                        # carries `args`; the matching tool_response
+                        # frame (same id) carries `response` but no
+                        # `args`. Naive replace drops "Argumente" from
+                        # the persisted activity panel after reload.
+                        # Skip nullish fields from the new payload so
+                        # absent values can't shadow values from the
+                        # earlier frame. Mirrors the frontend upsert in
+                        # app-shell.tsx.
+                        merged = dict(trace_index[tid])
+                        for k, v in payload.items():
+                            if v is not None:
+                                merged[k] = v
+                        trace_index[tid] = merged
             seq += 1
             try:
                 await asyncio.to_thread(

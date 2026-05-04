@@ -185,6 +185,93 @@ async def test_seed_session_filters_by_chat_id(monkeypatch):
     assert chat_b_appends == []
 
 
+def test_load_history_rows_filters_streaming_placeholder():
+    """chats.py inserts an assistant placeholder (status='streaming',
+    content='') before seed_session runs. If that row reached
+    seed_session at the tail, the trailing-user strip would no-op and
+    the model would see the current question twice — once seeded, once
+    via async_stream_query(message=...). Regression for the
+    'Du hast die Frage zweimal gestellt' bug. We verify the query
+    pipeline applies status='done' so the placeholder never enters
+    history."""
+    captured: dict = {}
+
+    class _Resp:
+        def __init__(self, data):
+            self.data = data
+
+    class _Q:
+        def __init__(self):
+            self._eqs: list[tuple[str, object]] = []
+
+        def select(self, *_a, **_kw):
+            return self
+
+        def eq(self, col, val):
+            self._eqs.append((col, val))
+            captured.setdefault("eqs", []).append((col, val))
+            return self
+
+        def order(self, *_a, **kw):
+            self._desc = bool(kw.get("desc"))
+            return self
+
+        def limit(self, *_a, **_kw):
+            return self
+
+        def execute(self):
+            # Echo back rows that pass every applied .eq() filter so the
+            # test reflects what Postgres would return.
+            all_rows = [
+                {
+                    "id": "u1", "role": "user", "content": "q1",
+                    "status": "done", "chat_id": "c1", "user_id": "u",
+                },
+                {
+                    "id": "a1", "role": "assistant", "content": "a1",
+                    "status": "done", "chat_id": "c1", "user_id": "u",
+                },
+                {
+                    "id": "u2", "role": "user", "content": "q2",
+                    "status": "done", "chat_id": "c1", "user_id": "u",
+                },
+                {
+                    # The streaming placeholder. Must be filtered out.
+                    "id": "a2", "role": "assistant", "content": "",
+                    "status": "streaming", "chat_id": "c1", "user_id": "u",
+                },
+            ]
+            kept = [
+                r for r in all_rows
+                if all(r.get(col) == val for col, val in self._eqs)
+            ]
+            if getattr(self, "_desc", False):
+                kept = list(reversed(kept))
+            return _Resp(kept)
+
+    class _Tbl:
+        def table(self, *_a, **_kw):
+            return _Q()
+
+    import app.adk.history as h
+    real_supabase = h.supabase
+    h.supabase = lambda: _Tbl()
+    try:
+        rows = h.load_history_rows("c1", "u")
+    finally:
+        h.supabase = real_supabase
+
+    assert ("status", "done") in captured["eqs"], (
+        "load_history_rows must filter status='done' to skip the "
+        "in-flight assistant placeholder"
+    )
+    # No streaming row leaked through, and the trailing row is the
+    # just-asked user question — so seed_session's strip will work.
+    assert all(r["status"] == "done" for r in rows)
+    assert rows[-1]["role"] == "user"
+    assert rows[-1]["content"] == "q2"
+
+
 @pytest.mark.asyncio
 async def test_seed_session_handles_empty_history(monkeypatch):
     """Brand-new chat: the just-persisted user message is the only row, so

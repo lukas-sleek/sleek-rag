@@ -90,12 +90,21 @@ export function attachToAssistantStream(
   type Row = { seq: number; payload: DeltaPayload };
   const buffer: Row[] = [];
   let replayed = false;
-  let maxSeqApplied = 0;
+  // Per-seq dedup. Earlier code used a monotonic `maxSeqApplied` and
+  // dropped anything `<=` it, but that races during catch-up: a live
+  // INSERT for a later seq can fire between `SUBSCRIBED` and the
+  // catch-up SELECT resolving, which advances the watermark and then
+  // silently drops the catch-up's earlier seqs. Symptom: short turns
+  // (~50ms) miss a trace step in the activity panel even though the
+  // delta is in chat_message_deltas. Reload reveals the real shape
+  // because list_messages reads the persisted traces directly. Track
+  // each applied seq instead so order of arrival doesn't matter.
+  const appliedSeqs = new Set<number>();
   let terminalSeen = false;
 
   const apply = (seq: number, payload: DeltaPayload) => {
-    if (seq <= maxSeqApplied) return;
-    maxSeqApplied = seq;
+    if (appliedSeqs.has(seq)) return;
+    appliedSeqs.add(seq);
     onDelta(payload);
   };
 
