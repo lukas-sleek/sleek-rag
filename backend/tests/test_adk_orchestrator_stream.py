@@ -371,8 +371,8 @@ def test_build_trace_frames_search_project_documents_emits_chunks():
     assert "response" not in f
     assert [c["idx"] for c in f["chunks"]] == [1, 2, 3]
     assert [c["score"] for c in f["chunks"]] == [0.82, 0.31, None]
-    # Snippet truncated to ~240 chars regardless of original size
-    assert len(f["chunks"][0]["snippet"]) <= 240
+    # Full chunk text passes through — activity panel renders it verbatim
+    assert f["chunks"][0]["snippet"] == long_text
     assert f["chunks"][2]["filename"] == "c.pdf"
 
 
@@ -464,7 +464,7 @@ def test_build_sub_agent_trace_frames_renders_tool_response_chunks():
     assert f["status"] == "ok"
     assert "response" not in f
     assert [c["score"] for c in f["chunks"]] == [0.91, 0.42]
-    assert len(f["chunks"][0]["snippet"]) <= 240
+    assert f["chunks"][0]["snippet"] == "x" * 600
 
 
 def test_build_sub_agent_trace_frames_no_trace_returns_empty():

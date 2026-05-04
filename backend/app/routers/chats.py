@@ -400,7 +400,7 @@ def _build_trace_frames(event: dict, *, next_id: int) -> list[dict]:
                         "idx": c.get("idx"),
                         "filename": c.get("filename"),
                         "score": c.get("score"),
-                        "snippet": (c.get("text") or "")[:240],
+                        "snippet": c.get("text") or "",
                     }
                     for c in (body.get("chunks") or [])
                 ]
@@ -501,7 +501,7 @@ def _build_sub_agent_trace_frames(
                         "idx": c.get("idx"),
                         "filename": c.get("filename"),
                         "score": c.get("score"),
-                        "snippet": (c.get("text") or "")[:240],
+                        "snippet": c.get("text") or "",
                     }
                     for c in (body.get("chunks") or [])
                 ]
