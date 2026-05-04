@@ -36,6 +36,11 @@ from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.tools import FunctionTool, ToolContext
 from google.genai import types as genai_types
 
+from ._harpoon_retry import (
+    DEFAULT_MAX_ATTEMPTS,
+    harpoon_backoff_delay,
+    is_harpoon_transient,
+)
 from .streaming_agent_tool import StreamingAgentTool
 
 log = logging.getLogger(__name__)
@@ -63,38 +68,74 @@ async def _run_one_rag_specialist(
     Each call gets its own Runner + session — parallel calls cannot share
     state. We accumulate the LAST event with content (mirrors what
     StreamingAgentTool.run_async does upstream).
+
+    Wraps the iteration in Harpoon-retry: parallel sub-calls that hit the
+    Vertex Managed Vector Search transient (URL_REJECTED Reason 54) silently
+    retry up to DEFAULT_MAX_ATTEMPTS times before bubbling the failure to
+    fanout_rag_specialist's per-question fallback. See _harpoon_retry.py.
     """
-    runner = Runner(
-        app_name="dispatch_rag_questions",
-        agent=agent,
-        session_service=InMemorySessionService(),
-        memory_service=InMemoryMemoryService(),
-    )
-    session = await runner.session_service.create_session(
-        app_name="dispatch_rag_questions",
-        user_id=user_id,
-    )
     content = genai_types.Content(
         role="user",
         parts=[genai_types.Part.from_text(text=question)],
     )
-    last_text = ""
-    last_gm = None
-    async for event in runner.run_async(
-        user_id=session.user_id,
-        session_id=session.id,
-        new_message=content,
-    ):
-        if event.content and event.content.parts:
-            text = "\n".join(
-                p.text for p in event.content.parts
-                if p.text and not getattr(p, "thought", False)
+
+    async def _attempt() -> tuple[str, Any]:
+        runner = Runner(
+            app_name="dispatch_rag_questions",
+            agent=agent,
+            session_service=InMemorySessionService(),
+            memory_service=InMemoryMemoryService(),
+        )
+        session = await runner.session_service.create_session(
+            app_name="dispatch_rag_questions",
+            user_id=user_id,
+        )
+        last_text = ""
+        last_gm = None
+        try:
+            async for event in runner.run_async(
+                user_id=session.user_id,
+                session_id=session.id,
+                new_message=content,
+            ):
+                if event.content and event.content.parts:
+                    text = "\n".join(
+                        p.text for p in event.content.parts
+                        if p.text and not getattr(p, "thought", False)
+                    )
+                    if text:
+                        last_text = text
+                        last_gm = (
+                            getattr(event, "grounding_metadata", None) or last_gm
+                        )
+        finally:
+            await runner.close()
+        return (last_text.strip(), last_gm)
+
+    label = f"rag_specialist[{question[:40]!r}]"
+    last_exc: BaseException | None = None
+    for attempt in range(DEFAULT_MAX_ATTEMPTS):
+        try:
+            return await _attempt()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if not is_harpoon_transient(exc):
+                raise
+            if attempt + 1 >= DEFAULT_MAX_ATTEMPTS:
+                log.warning(
+                    "%s: harpoon retries exhausted (%d/%d). detail=%s",
+                    label, attempt + 1, DEFAULT_MAX_ATTEMPTS,
+                    str(exc).split("Events {")[0][:200],
+                )
+                raise
+            delay = harpoon_backoff_delay(attempt)
+            log.warning(
+                "%s: harpoon transient; retry %d/%d in %.1fs.",
+                label, attempt + 1, DEFAULT_MAX_ATTEMPTS, delay,
             )
-            if text:
-                last_text = text
-                last_gm = getattr(event, "grounding_metadata", None) or last_gm
-    await runner.close()
-    return (last_text.strip(), last_gm)
+            await asyncio.sleep(delay)
+    # Unreachable — loop either returns or raises.
+    raise last_exc  # type: ignore[misc]
 
 
 async def fanout_rag_specialist(

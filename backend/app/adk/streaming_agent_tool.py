@@ -1,4 +1,5 @@
-"""AgentTool variant that forwards sub-agent activity up to the parent.
+"""AgentTool variant that forwards sub-agent activity up to the parent (and
+silently retries the Harpoon transient — same as dispatch_rag_questions).
 
 The stock `google.adk.tools.agent_tool.AgentTool` runs the wrapped sub-agent
 in its own internal Runner and returns only the merged non-thought final
@@ -26,6 +27,8 @@ so this is the path of least resistance.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 from google.adk.tools._forwarding_artifact_service import ForwardingArtifactService
@@ -35,6 +38,14 @@ from google.adk.utils._schema_utils import validate_schema
 from google.adk.utils.context_utils import Aclosing
 from google.genai import types
 from typing_extensions import override
+
+from ._harpoon_retry import (
+    DEFAULT_MAX_ATTEMPTS,
+    harpoon_backoff_delay,
+    is_harpoon_transient,
+)
+
+log = logging.getLogger(__name__)
 
 
 class StreamingAgentTool(AgentTool):
@@ -90,50 +101,80 @@ class StreamingAgentTool(AgentTool):
             if self.include_plugins
             else None
         )
-        runner = Runner(
-            app_name=child_app_name,
-            agent=self.agent,
-            artifact_service=ForwardingArtifactService(tool_context),
-            session_service=InMemorySessionService(),
-            memory_service=InMemoryMemoryService(),
-            credential_service=tool_context._invocation_context.credential_service,
-            plugins=plugins,
-        )
-
-        state_dict = {
-            k: v
-            for k, v in tool_context.state.to_dict().items()
-            if not k.startswith("_adk")
-        }
-        session = await runner.session_service.create_session(
-            app_name=child_app_name,
-            user_id=tool_context._invocation_context.user_id,
-            state=state_dict,
-        )
-
         last_content = None
         last_grounding_metadata = None
 
-        async with Aclosing(
-            runner.run_async(
-                user_id=session.user_id,
-                session_id=session.id,
-                new_message=content,
+        # Wrap the runner-creation + iteration in a Harpoon retry loop. On
+        # transient failure (URL_REJECTED Reason 54 from Vertex's Managed
+        # Vector Search), discard runner+session and try again. State writes
+        # from a failed attempt may linger in tool_context.state — this is
+        # an accepted minor UI artifact (the activity panel may show
+        # duplicated trace entries) in exchange for the chat actually
+        # producing an answer instead of failing the whole turn.
+        for _attempt in range(DEFAULT_MAX_ATTEMPTS):
+            runner = Runner(
+                app_name=child_app_name,
+                agent=self.agent,
+                artifact_service=ForwardingArtifactService(tool_context),
+                session_service=InMemorySessionService(),
+                memory_service=InMemoryMemoryService(),
+                credential_service=tool_context._invocation_context.credential_service,
+                plugins=plugins,
             )
-        ) as agen:
-            async for event in agen:
-                if event.actions.state_delta:
-                    tool_context.state.update(event.actions.state_delta)
-                if event.content:
-                    last_content = event.content
-                    last_grounding_metadata = event.grounding_metadata
-                # --- activity capture (the only addition over upstream) ---
-                # Append thought / tool_call / tool_response entries from this
-                # sub-event to parent state so the activity panel can render
-                # the full nested chain in order.
-                self._capture_activity(event, tool_context)
-
-        await runner.close()
+            state_dict = {
+                k: v
+                for k, v in tool_context.state.to_dict().items()
+                if not k.startswith("_adk")
+            }
+            session = await runner.session_service.create_session(
+                app_name=child_app_name,
+                user_id=tool_context._invocation_context.user_id,
+                state=state_dict,
+            )
+            attempt_label = f"streaming_tool[{self.agent.name}]"
+            try:
+                async with Aclosing(
+                    runner.run_async(
+                        user_id=session.user_id,
+                        session_id=session.id,
+                        new_message=content,
+                    )
+                ) as agen:
+                    async for event in agen:
+                        if event.actions.state_delta:
+                            tool_context.state.update(event.actions.state_delta)
+                        if event.content:
+                            last_content = event.content
+                            last_grounding_metadata = event.grounding_metadata
+                        # --- activity capture (the only addition over upstream) ---
+                        # Append thought / tool_call / tool_response entries from
+                        # this sub-event to parent state so the activity panel
+                        # can render the full nested chain in order.
+                        self._capture_activity(event, tool_context)
+                await runner.close()
+                break  # success — leave retry loop
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    await runner.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                if not is_harpoon_transient(exc):
+                    raise
+                if _attempt + 1 >= DEFAULT_MAX_ATTEMPTS:
+                    log.warning(
+                        "%s: harpoon retries exhausted (%d/%d).",
+                        attempt_label, _attempt + 1, DEFAULT_MAX_ATTEMPTS,
+                    )
+                    raise
+                delay = harpoon_backoff_delay(_attempt)
+                log.warning(
+                    "%s: harpoon transient; retry %d/%d in %.1fs.",
+                    attempt_label, _attempt + 1, DEFAULT_MAX_ATTEMPTS, delay,
+                )
+                # Reset locals so a partial accumulation doesn't leak forward.
+                last_content = None
+                last_grounding_metadata = None
+                await asyncio.sleep(delay)
 
         if last_content is None or last_content.parts is None:
             return ""
