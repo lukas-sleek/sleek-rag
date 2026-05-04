@@ -217,6 +217,14 @@ class StreamingAgentTool(AgentTool):
             # citation list. We serialise to plain dicts here so the state
             # stays JSON-friendly when ADK persists it.
             self._append_grounding_chunks(tool_context, last_grounding_metadata)
+            # Surface this call's chunks as a synthetic
+            # search_project_documents tool_response in the activity panel
+            # (rag_specialist now uses Vertex managed retrieval, which runs
+            # server-side and emits no function_call event — without this
+            # the user couldn't see what was retrieved).
+            self._append_retrieval_trace(
+                tool_context, last_grounding_metadata, label_suffix=None,
+            )
 
         return tool_result
 
@@ -373,6 +381,61 @@ class StreamingAgentTool(AgentTool):
                     entry["page_last"] = getattr(page_span, "last_page", None)
             existing.append(entry)
         tool_context.state["agent_grounding_chunks"] = existing
+
+    @staticmethod
+    def _append_retrieval_trace(
+        tool_context: ToolContext,
+        gm,
+        *,
+        label_suffix: str | None = None,
+    ) -> None:
+        """Emit one synthetic agent_trace entry per rag_specialist call so
+        the activity panel renders the chunks the model actually saw.
+
+        Shape mirrors what `_build_sub_agent_trace_frames` already special-
+        cases for `tool_name == "search_project_documents"` (chats.py:486),
+        so no frontend change is needed — the existing ChunkRow renderer
+        picks it up.
+
+        `label_suffix` lets callers (e.g. the dispatch fan-out) namespace
+        per-question rows so parallel rag_specialist invocations don't
+        collide on the same id.
+        """
+        chunks = getattr(gm, "grounding_chunks", None) or []
+        rendered: list[dict] = []
+        for i, c in enumerate(chunks):
+            rc = getattr(c, "retrieved_context", None)
+            if rc is None:
+                continue
+            text = getattr(rc, "text", "") or ""
+            title = getattr(rc, "title", "") or ""
+            uri = getattr(rc, "uri", "") or ""
+            # Filename: prefer title, fall back to the basename of uri.
+            filename = title or (uri.rsplit("/", 1)[-1] if uri else "")
+            rendered.append({
+                "idx": i + 1,
+                "filename": filename,
+                # Vertex managed retrieval doesn't expose a per-chunk score
+                # in grounding_metadata; ChunkRow renders null as "—".
+                "score": None,
+                "text": text,
+            })
+
+        existing = list(tool_context.state.get("agent_trace", []) or [])
+        seq = len(existing)
+        suffix = label_suffix or ""
+        existing.append({
+            "agent": "rag_specialist",
+            "kind": "tool_response",
+            "seq": seq,
+            "name": "search_project_documents",
+            "call_id": f"retrieval-{seq}{suffix}",
+            "response": {
+                "status": "ok" if rendered else "no_results",
+                "chunks": rendered,
+            },
+        })
+        tool_context.state["agent_trace"] = existing
 
 
 def _safe_json(obj) -> str:

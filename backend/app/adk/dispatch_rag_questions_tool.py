@@ -248,7 +248,7 @@ def make_dispatch_rag_questions_tool(rag_specialist: LlmAgent) -> FunctionTool:
             tool_context.state.get("agent_grounding_chunks", []) or []
         )
         answers: list[dict] = []
-        for q, (text, gm) in zip(questions, results):
+        for idx, (q, (text, gm)) in enumerate(zip(questions, results)):
             offset = len(existing_chunks)
             if gm is not None:
                 # StreamingAgentTool's static helper already does the
@@ -276,6 +276,12 @@ def make_dispatch_rag_questions_tool(rag_specialist: LlmAgent) -> FunctionTool:
                             entry["page_first"] = getattr(page_span, "first_page", None)
                             entry["page_last"] = getattr(page_span, "last_page", None)
                     existing_chunks.append(entry)
+                # Activity-panel row per question with the chunks that
+                # backed THIS sub-answer. Suffix prevents id collisions
+                # across the parallel fan-out.
+                StreamingAgentTool._append_retrieval_trace(
+                    tool_context, gm, label_suffix=f"-q{idx}",
+                )
             answers.append({"question": q, "answer": text})
 
         tool_context.state["agent_grounding_chunks"] = existing_chunks
