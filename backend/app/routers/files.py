@@ -38,8 +38,14 @@ async def _convert_office_to_pdf(data: bytes, ext: str) -> bytes:
     with tempfile.TemporaryDirectory(prefix="sleek-conv-") as tmp:
         in_path = Path(tmp) / f"input.{ext}"
         in_path.write_bytes(data)
+        # Per-call UserInstallation. LibreOffice profiles use a single
+        # filesystem lock; two concurrent `soffice --headless` invocations
+        # against the same profile dir collide and one exits non-zero. A
+        # throwaway profile per call keeps batch uploads parallel-safe.
+        profile_dir = Path(tmp) / "lo-profile"
         proc = await asyncio.create_subprocess_exec(
             soffice,
+            f"-env:UserInstallation=file://{profile_dir}",
             "--headless",
             "--convert-to",
             "pdf",
