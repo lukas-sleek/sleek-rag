@@ -63,8 +63,10 @@ function StepHeader({ step }: { step: TraceStep }) {
   // kind=tool_response sharing the same id (function_call.id from Gemini,
   // or `dispatch-<idx>` for batched questions). Render an inline status
   // pill so the user sees at a glance which calls are still running.
-  let dispatchPhase: "start" | "done" | "error" | null = null;
+  let dispatchPhase: "start" | "done" | "error" | "cancelled" | null = null;
   if (step.kind === "tool_call") dispatchPhase = "start";
+  else if (step.kind === "tool_response" && step.status === "cancelled")
+    dispatchPhase = "cancelled";
   else if (step.kind === "tool_response" && step.status === "error")
     dispatchPhase = "error";
   else if (step.kind === "tool_response") dispatchPhase = "done";
@@ -89,6 +91,11 @@ function StepHeader({ step }: { step: TraceStep }) {
       {dispatchPhase === "error" && (
         <span className="ml-auto text-[10.5px] uppercase tracking-wider text-rose-300">
           fehler
+        </span>
+      )}
+      {dispatchPhase === "cancelled" && (
+        <span className="ml-auto text-[10.5px] uppercase tracking-wider text-text-tertiary">
+          abgebrochen
         </span>
       )}
     </div>
@@ -174,6 +181,19 @@ type TraceNode = TraceStep & { children: TraceNode[] };
 // the simple rag_specialist case AND the dispatch_rag_questions
 // fan-out (where parallel rag_specialist runs all nest under the
 // dispatch row that spawned them).
+// Rows that are themselves a rag_specialist invocation and therefore
+// should display a nested `search_project_documents` step. Covers two
+// shapes:
+//   - the orchestrator's direct `rag_specialist` tool call (single
+//     question), where `name === "rag_specialist"`,
+//   - each per-question Frage row inside dispatch_rag_questions, where
+//     the backend emits id=`dispatch-<idx>` (chats.py:942).
+function isRagSpecialistInvocation(node: TraceNode): boolean {
+  if (node.name === "rag_specialist") return true;
+  if (node.id.startsWith("dispatch-")) return true;
+  return false;
+}
+
 function buildTree(steps: TraceStep[]): TraceNode[] {
   const top: TraceNode[] = [];
   let lastTop: TraceNode | null = null;
@@ -190,29 +210,72 @@ function buildTree(steps: TraceStep[]): TraceNode[] {
       top.push(node);
     }
   }
-  // Synthesise a `search_project_documents` placeholder child while a
-  // rag_specialist call is still `laeuft`. The real retrieval trace is
-  // emitted by streaming_agent_tool only AFTER the sub-agent's
-  // grounding metadata is available (at end of inference), so without
-  // this the user sees Argumente land, then a long pause with no sign
-  // that retrieval is in flight, then the chunks pop in. With it,
-  // the nested row appears immediately in `laeuft` state and gets
-  // overwritten by the real chunked row when it arrives.
+  // Dispatch fan-out: search rows (`tool-retrieval-<seq>-q<idx>`) and
+  // Frage rows (`dispatch-<idx>`) both attach to the dispatch parent
+  // in the first pass. Re-parent each search under its matching Frage
+  // sibling using the `-q<idx>` suffix so the per-question retrieval
+  // renders inside that question's row instead of as a flat trailing
+  // sibling.
   for (const parent of top) {
-    if (
-      parent.name === "rag_specialist" &&
-      parent.kind === "tool_call" &&
-      !parent.children.some((c) => c.name === "search_project_documents")
-    ) {
-      parent.children.push({
-        id: `placeholder-search-${parent.id}`,
-        author: "rag_specialist",
-        kind: "tool_call",
-        name: "search_project_documents",
-        children: [],
-      });
+    if (parent.name !== "dispatch_rag_questions") continue;
+    const kept: TraceNode[] = [];
+    for (const child of parent.children) {
+      if (child.name === "search_project_documents") {
+        const m = child.id.match(/-q(\d+)$/);
+        if (m) {
+          const qIdx = parseInt(m[1], 10);
+          const frage = parent.children.find(
+            (c) => c.id === `dispatch-${qIdx}`,
+          );
+          if (frage) {
+            frage.children.push(child);
+            continue;
+          }
+        }
+      }
+      kept.push(child);
+    }
+    parent.children = kept;
+  }
+  // Synthesise a `search_project_documents` placeholder child while a
+  // rag_specialist invocation has no real retrieval row yet. Backend
+  // emits the real one only after grounding metadata is available
+  // (end of sub-agent inference), so without this the panel shows
+  // `Argumente` and then a long blank stretch; with it, the nested
+  // row appears immediately and gets replaced by the real chunked
+  // row when it lands. Recurses one level so dispatch's per-question
+  // Frage rows get their own placeholder too.
+  function injectPlaceholders(nodes: TraceNode[]) {
+    for (const node of nodes) {
+      if (
+        isRagSpecialistInvocation(node) &&
+        !node.children.some((c) => c.name === "search_project_documents")
+      ) {
+        // Mirror the parent's terminal state. If the parent was
+        // cancelled / errored before the real retrieval arrived, the
+        // placeholder should not stay forever-spinning — flip it to
+        // the same status so the activity panel reads `abgebrochen` /
+        // `fehler` consistently top-to-bottom.
+        const parentCancelled = node.status === "cancelled";
+        const parentErrored = node.status === "error";
+        const terminal = parentCancelled || parentErrored;
+        node.children.push({
+          id: `placeholder-search-${node.id}`,
+          author: "rag_specialist",
+          kind: terminal ? "tool_response" : "tool_call",
+          name: "search_project_documents",
+          status: parentCancelled
+            ? "cancelled"
+            : parentErrored
+              ? "error"
+              : null,
+          children: [],
+        });
+      }
+      injectPlaceholders(node.children);
     }
   }
+  injectPlaceholders(top);
   return top;
 }
 
@@ -362,16 +425,22 @@ export function AgentActivity({
   if (!steps.length) return null;
   const stepCount = steps.length;
   // Aggregate header status: streaming → läuft; finished with any errored
-  // step → fehler; otherwise → fertig. Mirrors the per-step pill semantics
-  // so users get the same signal at a glance from the collapsed header.
+  // step → fehler; user-cancelled → abgebrochen; otherwise → fertig.
+  // Mirrors the per-step pill semantics so users get the same signal at
+  // a glance from the collapsed header.
   const hasErroredStep = steps.some(
     (s) => s.kind === "tool_response" && s.status === "error",
   );
-  const headerPhase: "start" | "done" | "error" = streaming
+  const hasCancelledStep = steps.some(
+    (s) => s.kind === "tool_response" && s.status === "cancelled",
+  );
+  const headerPhase: "start" | "done" | "error" | "cancelled" = streaming
     ? "start"
     : hasErroredStep
       ? "error"
-      : "done";
+      : hasCancelledStep
+        ? "cancelled"
+        : "done";
 
   return (
     <div className="mb-3 rounded-[10px] border border-border bg-bg-elevated overflow-hidden">
@@ -410,6 +479,11 @@ export function AgentActivity({
         {headerPhase === "error" && (
           <span className="ml-auto text-[10.5px] uppercase tracking-wider text-rose-300">
             fehler
+          </span>
+        )}
+        {headerPhase === "cancelled" && (
+          <span className="ml-auto text-[10.5px] uppercase tracking-wider text-text-tertiary">
+            abgebrochen
           </span>
         )}
       </button>

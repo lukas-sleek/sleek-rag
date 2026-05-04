@@ -1237,14 +1237,57 @@ async def _run_assistant_turn(
             error=None,
         )
     except asyncio.CancelledError:
-        # Process shutdown — try to mark the row so the frontend doesn't
-        # spin forever if the user reloads after a backend restart.
+        # User-initiated stop via /cancel (or process shutdown). NOT an
+        # error from the user's perspective — they pressed the button.
+        # Keep whatever streamed so far as the visible content; passing
+        # "" lets applyTerminalToThread fall back to the locally-
+        # accumulated text. Don't surface the friendly "couldn't
+        # generate" notice. Traces flip to status='cancelled' so the
+        # activity panel reads `abgebrochen` instead of `laeuft`.
         try:
+            # Emit a cancelled trace delta for every still-in-flight
+            # tool_call BEFORE finalizing the row. The frontend's
+            # subscription receives these via chat_message_deltas
+            # Realtime and upserts by id, flipping the live row from
+            # `laeuft` to `abgebrochen`. Without this, the
+            # chat_messages UPDATE fires the terminal handler and
+            # unsubscribes (app-shell.tsx:1175) before any cancel
+            # signal reaches the live `traces` array, so the panel
+            # stays on `laeuft` until the user reloads.
+            for tid in trace_order:
+                original = trace_index.get(tid)
+                if not original or original.get("kind") != "tool_call":
+                    continue
+                seq += 1
+                cancel_payload = {
+                    "type": "trace",
+                    "id": tid,
+                    "author": original.get("author"),
+                    "kind": "tool_response",
+                    "name": original.get("name"),
+                    "args": original.get("args"),
+                    "status": "cancelled",
+                    "response": json.dumps(
+                        {"cancelled": True}, ensure_ascii=False
+                    ),
+                }
+                try:
+                    await asyncio.to_thread(
+                        _insert_delta,
+                        message_id=assistant_message_id,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        seq=seq,
+                        payload=cancel_payload,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
             await asyncio.to_thread(
                 _finalize_assistant_message,
                 message_id=assistant_message_id,
-                content=_friendly_gemini_error(RuntimeError("cancelled")),
-                citations=[],
+                content=final_content,
+                citations=final_citations,
                 traces=_terminate_inflight_traces(
                     trace_index, trace_order, "cancelled"
                 ),
@@ -1280,18 +1323,26 @@ def _terminate_inflight_traces(
     """On cancel / error, walk the per-id trace snapshot and flip any frame
     still parked on kind='tool_call' to a synthetic terminated tool_response
     so the activity panel renders an interrupted row instead of a forever-
-    spinner on reload."""
+    spinner on reload. User-initiated cancel uses status='cancelled' so the
+    UI reads `abgebrochen`; everything else stays status='error' (`fehler`)."""
     if not trace_order:
         return None
+    is_cancelled = reason == "cancelled"
     frames: list[dict] = []
     for tid in trace_order:
         frame = dict(trace_index[tid])
         if frame.get("kind") == "tool_call":
             frame["kind"] = "tool_response"
-            frame["status"] = "error"
-            frame["response"] = json.dumps(
-                {"error": f"interrupted: {reason}"}, ensure_ascii=False
-            )
+            if is_cancelled:
+                frame["status"] = "cancelled"
+                frame["response"] = json.dumps(
+                    {"cancelled": True}, ensure_ascii=False
+                )
+            else:
+                frame["status"] = "error"
+                frame["response"] = json.dumps(
+                    {"error": f"interrupted: {reason}"}, ensure_ascii=False
+                )
         frames.append(frame)
     return frames
 
