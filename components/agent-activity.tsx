@@ -160,67 +160,189 @@ function ChunkRow({ chunk }: { chunk: RetrievalChunk }) {
   );
 }
 
-function StepBody({ step }: { step: TraceStep }) {
-  // search_project_documents responses get a structured chunk list with
-  // confidence badges instead of the truncated-JSON preview. Only show
-  // chunks the model actually grounded an answer span on (score != null);
-  // unscored chunks were retrieved as top-k context but never used to
-  // back a claim, so surfacing them as "Treffer" is misleading.
-  if (step.chunks) {
-    const grounded = step.chunks.filter((c) => c.score != null);
-    if (grounded.length > 0) {
-      return (
-        <div className="px-3 pb-3 space-y-2">
-          <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1 flex items-center gap-2">
-            <span>Treffer</span>
-            <span className="text-text-tertiary">·</span>
-            <span>{grounded.length}</span>
-            <span className="text-text-tertiary normal-case tracking-normal italic ml-auto">
-              Konfidenz ↑ besser
-            </span>
-            {step.status && step.status !== "ok" && (
-              <span className="text-text-tertiary italic">({step.status})</span>
-            )}
-          </div>
-          <div className="space-y-1.5">
-            {grounded.map((c) => (
-              <ChunkRow key={`${step.id}-${c.idx}`} chunk={c} />
-            ))}
-          </div>
-        </div>
-      );
+type TraceNode = TraceStep & { children: TraceNode[] };
+
+// Build a 1-deep tree from the flat trace stream so sub-agent steps
+// render NESTED inside their parent orchestrator-call's body. The
+// retrieval (search_project_documents) is logically *part of* the
+// rag_specialist invocation — the model thinks → retrieves → thinks
+// → answers in one inference — so the chunk list belongs between the
+// parent's `Argumente` and `Antwort`, not as a sibling row below.
+//
+// Rule: orchestrator-authored frames are top-level. Anything else
+// attaches to the most recent top-level frame above it. That covers
+// the simple rag_specialist case AND the dispatch_rag_questions
+// fan-out (where parallel rag_specialist runs all nest under the
+// dispatch row that spawned them).
+function buildTree(steps: TraceStep[]): TraceNode[] {
+  const top: TraceNode[] = [];
+  let lastTop: TraceNode | null = null;
+  for (const s of steps) {
+    const node: TraceNode = { ...s, children: [] };
+    if (s.author === "chat_orchestrator") {
+      top.push(node);
+      lastTop = node;
+    } else if (lastTop) {
+      lastTop.children.push(node);
+    } else {
+      // No orchestrator frame yet — emit at top level so we never
+      // silently lose a step.
+      top.push(node);
     }
+  }
+  // Synthesise a `search_project_documents` placeholder child while a
+  // rag_specialist call is still `laeuft`. The real retrieval trace is
+  // emitted by streaming_agent_tool only AFTER the sub-agent's
+  // grounding metadata is available (at end of inference), so without
+  // this the user sees Argumente land, then a long pause with no sign
+  // that retrieval is in flight, then the chunks pop in. With it,
+  // the nested row appears immediately in `laeuft` state and gets
+  // overwritten by the real chunked row when it arrives.
+  for (const parent of top) {
+    if (
+      parent.name === "rag_specialist" &&
+      parent.kind === "tool_call" &&
+      !parent.children.some((c) => c.name === "search_project_documents")
+    ) {
+      parent.children.push({
+        id: `placeholder-search-${parent.id}`,
+        author: "rag_specialist",
+        kind: "tool_call",
+        name: "search_project_documents",
+        children: [],
+      });
+    }
+  }
+  return top;
+}
+
+function ChunkBlock({ step }: { step: TraceStep }) {
+  // Render a step's grounded chunks. Only chunks with a non-null
+  // score were actually used to back an answer span — unscored chunks
+  // were just top-k context and would inflate the "Treffer" count.
+  const grounded = (step.chunks || []).filter((c) => c.score != null);
+  if (grounded.length === 0) {
     return (
-      <div className="text-[12px] text-text-tertiary px-3 pb-3 italic">
+      <div className="text-[12px] text-text-tertiary italic">
         Keine grundenden Treffer
         {step.status && step.status !== "ok" ? ` (${step.status})` : ""}.
       </div>
     );
   }
+  return (
+    <div className="space-y-2">
+      <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1 flex items-center gap-2">
+        <span>Treffer</span>
+        <span className="text-text-tertiary">·</span>
+        <span>{grounded.length}</span>
+        <span className="text-text-tertiary normal-case tracking-normal italic ml-auto">
+          Konfidenz ↑ besser
+        </span>
+        {step.status && step.status !== "ok" && (
+          <span className="text-text-tertiary italic">({step.status})</span>
+        )}
+      </div>
+      <div className="space-y-1.5">
+        {grounded.map((c) => (
+          <ChunkRow key={`${step.id}-${c.idx}`} chunk={c} />
+        ))}
+      </div>
+    </div>
+  );
+}
 
-  const blocks: Array<{ label: string; body: string }> = [];
-  if (step.args) blocks.push({ label: "Argumente", body: prettyJSON(step.args) });
-  if (step.response) blocks.push({ label: "Antwort", body: prettyJSON(step.response) });
-  if (step.text) blocks.push({ label: "Inhalt", body: step.text });
-  if (blocks.length === 0) {
+function PreBlock({ label, body }: { label: string; body: string }) {
+  return (
+    <div>
+      <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1.5">
+        {label}
+      </div>
+      <pre className="bg-bg-input border border-border rounded-md p-2.5 text-[11.5px] leading-[1.5] font-mono text-text-secondary whitespace-pre-wrap break-words">
+        {body}
+      </pre>
+    </div>
+  );
+}
+
+function StepRow({ node }: { node: TraceNode }) {
+  return (
+    <AccordionItem value={node.id} className="border-border">
+      <AccordionTrigger className="px-2 py-2 hover:no-underline hover:bg-bg-hover rounded-md">
+        <StepHeader step={node} />
+      </AccordionTrigger>
+      <AccordionContent>
+        <StepBody node={node} />
+      </AccordionContent>
+    </AccordionItem>
+  );
+}
+
+function StepBody({ node }: { node: TraceNode }) {
+  // Leaf-style render: a step that *only* carries chunks (e.g. the
+  // synthesised search_project_documents tool_response) shows its
+  // grounded chunk list and nothing else.
+  const isPureChunkLeaf =
+    node.chunks &&
+    !node.args &&
+    !node.response &&
+    !node.text &&
+    node.children.length === 0;
+  if (isPureChunkLeaf) {
     return (
-      <div className="text-[12px] text-text-tertiary px-3 pb-3 italic">
-        keine Detail-Daten
+      <div className="px-3 pb-3">
+        <ChunkBlock step={node} />
       </div>
     );
   }
+
+  const hasArgs = !!node.args;
+  const hasResponse = !!node.response;
+  const hasText = !!node.text;
+  const hasChunks = !!node.chunks;
+  const hasChildren = node.children.length > 0;
+
+  if (
+    !hasArgs &&
+    !hasResponse &&
+    !hasText &&
+    !hasChunks &&
+    !hasChildren
+  ) {
+    // In-flight placeholder (synthesised search_project_documents row
+    // while retrieval is still running, or any tool_call before its
+    // body has streamed). Reuses the `chat-dot` keyframe defined in
+    // app/globals.css so the dots match the assistant's pre-first-
+    // delta thinking indicator in components/chat.tsx exactly.
+    return (
+      <div
+        className="px-3 pb-3 flex items-center gap-1.5"
+        role="status"
+        aria-label="Schritt laeuft"
+      >
+        <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-[chat-dot_1s_infinite] [animation-delay:0ms]" />
+        <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-[chat-dot_1s_infinite] [animation-delay:150ms]" />
+        <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-[chat-dot_1s_infinite] [animation-delay:300ms]" />
+      </div>
+    );
+  }
+
   return (
     <div className="px-3 pb-3 space-y-4">
-      {blocks.map((b) => (
-        <div key={b.label}>
-          <div className="text-[10.5px] uppercase tracking-wider text-text-tertiary mb-1.5">
-            {b.label}
-          </div>
-          <pre className="bg-bg-input border border-border rounded-md p-2.5 text-[11.5px] leading-[1.5] font-mono text-text-secondary whitespace-pre-wrap break-words">
-            {b.body}
-          </pre>
-        </div>
-      ))}
+      {hasArgs && <PreBlock label="Argumente" body={prettyJSON(node.args)} />}
+      {/* Sub-agent activity (e.g. search_project_documents under
+          rag_specialist) renders chronologically between the parent's
+          input and output — search runs before the answer is formed
+          inside the same inference. */}
+      {hasChildren && (
+        <Accordion type="multiple" className="border border-border rounded-md bg-bg-base px-1">
+          {node.children.map((c) => (
+            <StepRow key={c.id} node={c} />
+          ))}
+        </Accordion>
+      )}
+      {hasChunks && !isPureChunkLeaf && <ChunkBlock step={node} />}
+      {hasResponse && <PreBlock label="Antwort" body={prettyJSON(node.response)} />}
+      {hasText && <PreBlock label="Inhalt" body={node.text!} />}
     </div>
   );
 }
@@ -294,15 +416,8 @@ export function AgentActivity({
       {open && (
         <div className="border-t border-border bg-bg-base">
           <Accordion type="multiple" className="px-1">
-            {steps.map((s) => (
-              <AccordionItem key={s.id} value={s.id} className="border-border">
-                <AccordionTrigger className="px-2 py-2 hover:no-underline hover:bg-bg-hover rounded-md">
-                  <StepHeader step={s} />
-                </AccordionTrigger>
-                <AccordionContent>
-                  <StepBody step={s} />
-                </AccordionContent>
-              </AccordionItem>
+            {buildTree(steps).map((node) => (
+              <StepRow key={node.id} node={node} />
             ))}
           </Accordion>
         </div>
