@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "concurrently -n web,api -c cyan,magenta --kill-others-on-fail \"npm:dev:web\" \"npm:dev:api\"",
     "dev:web": "next dev",
-    "dev:api": "cd backend && ./venv/bin/uvicorn app.main:app --reload --port 8000",
+    "dev:api": "cd backend && ./venv/bin/uvicorn app.main:app --reload --port 8001",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
