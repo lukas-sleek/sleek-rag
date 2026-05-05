@@ -2,7 +2,7 @@
 
 Tree shape:
 
-    chat_orchestrator (gemini-2.5-flash)
+    chat_orchestrator (gemini-3.1-pro-preview, served from `global`)
       tool: rag_specialist (StreamingAgentTool)
         tool: VertexAiRagRetrieval — Gemini-native managed retrieval
               (injected as `Tool(retrieval=...)` for Gemini 2+, lets the
@@ -59,49 +59,83 @@ _HTTP_OPTIONS = genai_types.HttpOptions(
     )
 )
 
-_RETRY_CONFIG = genai_types.GenerateContentConfig(http_options=_HTTP_OPTIONS)
+
+# Sampling — mirror the Vertex Agent Builder export. temperature=1 +
+# top_p=0.95 = native Gemini defaults made explicit. We deliberately do NOT
+# pass max_output_tokens: setting any int (even the 65535 the export shows)
+# becomes a HARD cap that includes thinking tokens. With thinking_level=HIGH
+# on gemini-3.1-pro-preview the thought trace alone routinely runs into the
+# tens of thousands of tokens; capping there makes the model finish thinking
+# mid-deliberation and emit no answer (or a truncated one). Leaving the
+# field unset lets Vertex apply the model's true output ceiling.
+_TEMPERATURE = 1.0
+_TOP_P = 0.95
 
 
-# Sub-agent thinking config: keep unbounded thinking budget (model decides
-# how long to deliberate before producing output — single-question deep
-# reasoning + retrieval genuinely benefits, per-call latency stays in the
-# 10-25s range), but DON'T emit the chain-of-thought to the stream. The
-# activity panel previously rendered these as "denkt laut" rows; removed
-# 2026-05 because the surface added clutter without enough debugging value
-# to justify the bandwidth and rendering cost.
-_THINKING_CONFIG = genai_types.ThinkingConfig(
+# Safety filters disabled across all four categories. Project corpora are
+# Swiss tunnel/rail engineering specs — domain-correct words ("Sprengung",
+# "explosion", harassment-class noise in legal boilerplate) routinely trip
+# default thresholds and silently truncate or 4xx the response. The user's
+# Vertex Agent Builder export ships with the same OFF setting.
+_SAFETY_OFF: list[genai_types.SafetySetting] = [
+    genai_types.SafetySetting(category=cat, threshold="OFF")  # type: ignore[arg-type]
+    for cat in (
+        "HARM_CATEGORY_HATE_SPEECH",
+        "HARM_CATEGORY_DANGEROUS_CONTENT",
+        "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        "HARM_CATEGORY_HARASSMENT",
+    )
+]
+
+
+# Thinking: HIGH on Gemini 3.1 Pro Preview, matching the user's Vertex Agent
+# Builder export. The 3.x API uses `thinking_level` (enum); the 2.5 family
+# silently ignored that field and only honored `thinking_budget` — that's
+# why setting HIGH didn't appear to do anything before the model bump.
+# `include_thoughts=False` keeps the chain-of-thought out of the SSE stream;
+# the activity panel doesn't render it.
+_THINKING_HIGH = genai_types.ThinkingConfig(
     include_thoughts=False,
-    thinking_budget=-1,
+    thinking_level="HIGH",  # type: ignore[arg-type]
 )
 
-# Orchestrator: no thinking at all. Matches the pre-`01a1437` (`24c2534`)
-# branch behavior where the orchestrator ran on plain `_RETRY_CONFIG` and
-# 11-question summaries returned in seconds, not minutes. The orchestrator's
-# instruction is prescriptive ("pass through unchanged") so it doesn't
-# benefit from chain-of-thought; the latency cost was pure loss. Sub-agent
-# (`rag_specialist`) thinking stays on — that's where it legitimately helps.
-_ORCHESTRATOR_THINKING_CONFIG = genai_types.ThinkingConfig(
-    include_thoughts=False,
-    thinking_budget=0,
-)
+
+def _agent_config(
+    thinking: genai_types.ThinkingConfig = _THINKING_HIGH,
+) -> genai_types.GenerateContentConfig:
+    """Generation config applied to every LlmAgent in the tree.
+
+    Bundles: retry on 429/5xx, sampling (temp=1, top_p=0.95), safety OFF,
+    HIGH-thinking. `max_output_tokens` is intentionally omitted — see the
+    block comment above for why a hard cap interacts badly with HIGH
+    thinking on Gemini 3.1.
+    """
+    return genai_types.GenerateContentConfig(
+        http_options=_HTTP_OPTIONS,
+        temperature=_TEMPERATURE,
+        top_p=_TOP_P,
+        safety_settings=_SAFETY_OFF,
+        thinking_config=thinking,
+    )
+
+
+# Backwards-compat shims: existing call sites used three distinct configs.
+# All three now route to the same _agent_config() — the orchestrator's
+# previous "thinking_budget=0" latency optimization is dropped because the
+# user's Vertex Agent Builder export uses HIGH thinking everywhere and we
+# explicitly opted into matching it. If orchestrator latency regresses
+# unacceptably, swap `_agent_config()` for
+# `_agent_config(genai_types.ThinkingConfig(include_thoughts=False, thinking_budget=0))`
+# at the orchestrator call site only.
+_RETRY_CONFIG = _agent_config()
 
 
 def _retry_with_thinking() -> genai_types.GenerateContentConfig:
-    """Per-agent generate-content config: retry + unbounded thinking budget
-    with no thought-text emission."""
-    return genai_types.GenerateContentConfig(
-        http_options=_HTTP_OPTIONS,
-        thinking_config=_THINKING_CONFIG,
-    )
+    return _agent_config()
 
 
 def _retry_with_orchestrator_thinking() -> genai_types.GenerateContentConfig:
-    """Orchestrator-only config: thinking disabled entirely so post-tool
-    aggregation doesn't burn minutes. See _THINKING_CONFIG block above."""
-    return genai_types.GenerateContentConfig(
-        http_options=_HTTP_OPTIONS,
-        thinking_config=_ORCHESTRATOR_THINKING_CONFIG,
-    )
+    return _agent_config()
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +175,7 @@ def make_rag_specialist(corpus_name: str) -> LlmAgent:
     )
     return LlmAgent(
         name="rag_specialist",
-        model="gemini-2.5-flash",
+        model="gemini-3.1-pro-preview",
         description=(
             "Beantwortet GENAU EINE Sachfrage zu den Projektdokumenten "
             "(Schweizer Bahn-/Ingenieurprojekt-Ausschreibungen) ausschliesslich "
@@ -164,7 +198,7 @@ def make_rag_specialist(corpus_name: str) -> LlmAgent:
 
 web_google_search = LlmAgent(
     name="web_google_search",
-    model="gemini-2.5-flash",
+    model="gemini-3.1-pro-preview",
     description=(
         "Findet oeffentlich verfuegbare Quellen im Web zu einer konkreten "
         "Suchanfrage via Google. Gibt Titel, URL und Snippet pro Treffer "
@@ -182,7 +216,7 @@ web_google_search = LlmAgent(
 
 web_url_fetcher = LlmAgent(
     name="web_url_fetcher",
-    model="gemini-2.5-flash",
+    model="gemini-3.1-pro-preview",
     description=(
         "Laedt den Inhalt einer oder mehrerer URLs und gibt den extrahierten "
         "Text zurueck. Wird vom web_researcher aufgerufen, nachdem "
@@ -199,7 +233,7 @@ web_url_fetcher = LlmAgent(
 
 web_researcher = LlmAgent(
     name="web_researcher",
-    model="gemini-2.5-flash",
+    model="gemini-3.1-pro-preview",
     description=(
         "Beantwortet EINE Frage anhand oeffentlicher Web-Quellen. Wird vom "
         "Chat-Agenten nur dann aufgerufen, wenn die Frage explizit nach "
@@ -267,7 +301,7 @@ def make_chat_orchestrator(corpus_name: str) -> LlmAgent:
         # Flash with a tightened instruction (explicit counting rule + worked
         # multi-question examples) handles N-way fan-out reliably and ships
         # 2-3x faster.
-        model="gemini-2.5-flash",
+        model="gemini-3.1-pro-preview",
         description=(
             "Hauptagent im Dialog mit dem Nutzer. Versteht die Nutzeranfrage, "
             "entscheidet ueber das Routing (rag_specialist fuer eine einzelne "

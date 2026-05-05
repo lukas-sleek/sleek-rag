@@ -38,7 +38,10 @@ def _set_genai_env() -> None:
         )
         os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
         os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings.gcp_project_id)
-        os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.gcp_location)
+        # Genai client location = chat-agent serving region. Decoupled from
+        # `gcp_location` (corpus region) so the model can serve from `global`
+        # while corpus ops stay in us-central1. See config.py for rationale.
+        os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.gcp_genai_location)
 
 
 def _credentials():

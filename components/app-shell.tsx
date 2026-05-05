@@ -575,12 +575,37 @@ export function App() {
             body: form,
           });
           if (!res.ok) {
-            let detail = "";
+            let detail: unknown = "";
             try {
-              const body = (await res.json()) as { detail?: string };
-              if (body.detail) detail = String(body.detail);
+              const body = (await res.json()) as { detail?: unknown };
+              detail = body.detail ?? "";
             } catch {}
-            throw new Error(detail || `HTTP ${res.status}`);
+            // 409 with structured detail = content-addressed dedup hit.
+            // Surface a friendly toast and drop the placeholder without the
+            // generic "konnte nicht hochgeladen werden" wording.
+            if (
+              res.status === 409 &&
+              detail &&
+              typeof detail === "object" &&
+              (detail as { error?: string }).error === "duplicate_content"
+            ) {
+              const msg =
+                (detail as { message?: string }).message ||
+                `„${f.name}“ ist bereits im Projekt vorhanden.`;
+              pushToast(msg, "warn");
+              setProjectFiles((prev) => ({
+                ...prev,
+                [projectId]: (prev[projectId] || []).filter(
+                  (existing) => existing.id !== placeholderId,
+                ),
+              }));
+              return;
+            }
+            const msg =
+              typeof detail === "string"
+                ? detail
+                : (detail as { message?: string })?.message || "";
+            throw new Error(msg || `HTTP ${res.status}`);
           }
           const row = (await res.json()) as {
             id: string;

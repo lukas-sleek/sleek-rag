@@ -1,5 +1,6 @@
 import asyncio
 import datetime as _dt
+import hashlib
 import logging
 import shutil
 import tempfile
@@ -153,6 +154,37 @@ async def upload_file(
     contents = await file.read()
     src_ext = (file.filename.rsplit(".", 1)[-1] if "." in (file.filename or "") else "").lower()
 
+    # Content-addressed dedup: hash the *original* uploaded bytes (pre-conversion)
+    # so a re-upload of the same .docx is rejected even though LibreOffice's
+    # PDF output is non-deterministic. Cheap pre-check before the expensive
+    # conversion + GCS round-trip; the partial unique index on
+    # (project_id, content_sha256) is the authoritative race-safe guard.
+    content_sha256 = hashlib.sha256(contents).hexdigest()
+    dup_res = (
+        supabase()
+        .table("project_files")
+        .select("id,filename")
+        .eq("project_id", project_id)
+        .eq("user_id", user_id)
+        .eq("content_sha256", content_sha256)
+        .limit(1)
+        .execute()
+    )
+    if dup_res.data:
+        existing = dup_res.data[0]
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "duplicate_content",
+                "message": (
+                    f"„{file.filename}“ ist inhaltsgleich mit "
+                    f"„{existing.get('filename')}“ und bereits im Projekt vorhanden."
+                ),
+                "existing_file_id": existing["id"],
+                "existing_filename": existing.get("filename"),
+            },
+        )
+
     if src_ext in _OFFICE_EXTS:
         contents = await _convert_office_to_pdf(contents, src_ext)
     elif src_ext != "pdf":
@@ -184,24 +216,66 @@ async def upload_file(
     except Exception as exc:
         raise HTTPException(502, f"corpus init failed: {exc}") from exc
 
-    insert = (
-        supabase()
-        .table("project_files")
-        .insert(
-            {
-                "id": file_id,
-                "project_id": project_id,
-                "user_id": user_id,
-                "filename": file.filename,
-                "size_bytes": size_bytes,
-                "mime_type": mime,
-                "gcs_blob_path": gs_uri,
-                "page_count": page_count,
-                "status": "queued",
-            }
+    try:
+        insert = (
+            supabase()
+            .table("project_files")
+            .insert(
+                {
+                    "id": file_id,
+                    "project_id": project_id,
+                    "user_id": user_id,
+                    "filename": file.filename,
+                    "size_bytes": size_bytes,
+                    "mime_type": mime,
+                    "gcs_blob_path": gs_uri,
+                    "page_count": page_count,
+                    "content_sha256": content_sha256,
+                    "status": "queued",
+                }
+            )
+            .execute()
         )
-        .execute()
-    )
+    except Exception as exc:
+        # Race: a concurrent upload of the same content won the unique index.
+        # Postgres surfaces this as a 23505 unique_violation; the supabase-py
+        # client wraps it as APIError. Treat any insert failure where a dup
+        # row now exists as 409 so the client gets a clean dedup signal.
+        dup = (
+            supabase()
+            .table("project_files")
+            .select("id,filename")
+            .eq("project_id", project_id)
+            .eq("user_id", user_id)
+            .eq("content_sha256", content_sha256)
+            .limit(1)
+            .execute()
+        )
+        if dup.data:
+            # We already uploaded to GCS for this file_id; the row that won the
+            # unique index belongs to a different file_id, so this object is
+            # orphaned. Best-effort delete to keep the bucket tidy.
+            try:
+                bucket_name, key = gs_uri[len("gs://"):].split("/", 1)
+                await asyncio.to_thread(
+                    lambda: storage_client().bucket(bucket_name).blob(key).delete()
+                )
+            except Exception:
+                pass
+            existing = dup.data[0]
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "duplicate_content",
+                    "message": (
+                        f"„{file.filename}“ ist inhaltsgleich mit "
+                        f"„{existing.get('filename')}“ und bereits im Projekt vorhanden."
+                    ),
+                    "existing_file_id": existing["id"],
+                    "existing_filename": existing.get("filename"),
+                },
+            ) from exc
+        raise
     row = insert.data[0]
 
     return FileOut(

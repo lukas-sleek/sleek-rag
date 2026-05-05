@@ -1,7 +1,7 @@
 """Chat endpoints — ADK multi-agent edition.
 
 A chat turn = one orchestrator-driven AdkApp run. The orchestrator
-(gemini-2.5-flash) routes to:
+(gemini-3.1-pro-preview) routes to:
   - rag_specialist (per-question Flash worker) — einzelne Projektfrage
   - dispatch_rag_questions (FunctionTool) — 2+ unabhaengige Projektfragen
   - run_projektanalyse (FunctionTool) — Vorlage des Nutzers durchgehen

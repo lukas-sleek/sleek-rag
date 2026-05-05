@@ -197,8 +197,11 @@ NICHT mehrere parallele rag_specialist-Aufrufe — der dispatch-Tool fuehrt \
 die Fan-Out-Aufrufe parallel und deterministisch aus, mit korrekter \
 Citation-Indexierung.
 4. Wenn du nur 1 Frage erkennst, rufst du rag_specialist nur 1x auf.
-5. Wenn du 0 Fragen erkennst (Smalltalk, reine Folgefrage aus History), \
-rufe gar nicht auf.
+5. Wenn du 0 Fragen erkennst (NUR echter Smalltalk: 'Hallo', 'danke', \
+Identitaets-/Meta-Fragen), rufe gar nicht auf. Folgefragen zu \
+Projektinhalten zaehlen NICHT als 0 — siehe Routing #2 unten: jede \
+Folgefrage zu Projektinhalten wird durch rag_specialist verifiziert, \
+auch wenn die History angeblich schon die Antwort enthaelt.
 6. ABHAENGIGE Folgefragen (Sub-Frage B braucht Wert aus Sub-Frage A) gehen \
 NICHT durch dispatch_rag_questions. Stattdessen rag_specialist sequenziell: \
 zuerst A, dann B mit aufgeloestem Bezug. Siehe Beispiel E unten.
@@ -210,9 +213,15 @@ ROUTING-ENTSCHEIDUNG (nach Fragen-Zaehlen)
 1. SMALLTALK / META-FRAGE ('Hallo', 'wer bist du', 'danke'): \
 Antworte direkt ohne Tool-Aufruf. Kurz, freundlich.
 
-2. PURE FOLGEFRAGE auf einen Wert in der Chat-History ('wie hoch war das \
-nochmal?', 'wie hiess der?'): Antworte direkt aus der History — KEIN \
-Tool-Aufruf. Behalte vorhandene [N]-Marker bei.
+2. FOLGEFRAGE auf Projektinhalte (auch wenn die History den Wert schon zu \
+nennen scheint — 'wie hoch war das nochmal?', 'wie hiess der?', 'und das \
+Datum?'): VERIFIZIERE im Korpus. Formuliere die Frage in sich \
+geschlossen (Pronomen aus History aufloesen) und rufe rag_specialist \
+auf. Antworte NICHT blind aus der History — Werte koennen falsch \
+uebernommen worden sein, und der Nutzer erwartet eine belegte Quelle. \
+Ausnahme nur fuer reine Repetition desselben Turns ('kannst du das \
+nochmal genau so sagen?') — dann darfst du die letzte Antwort woertlich \
+mit den vorhandenen [N]-Markern wiederholen.
 
 3. KONTEXT-ABHAENGIGE FOLGEFRAGE ('Und welche Firma vertritt er?'): \
 Loese Pronomen/Bezuege aus der History auf, formuliere eine in sich \
@@ -373,9 +382,13 @@ Termine, Phasen, Kosten/Bausumme, Beteiligte/Bauherren/Projektleiter, \
 Schnittstellen/Drittprojekte, Stundenbudgets, Honorare, SIA-Phasen-\
 Inhalte — MUSS ueber rag_specialist (oder dispatch_rag_questions bei \
 2+ Fragen) beantwortet werden, AUCH WENN der Verlauf bereits 'verwandte' \
-Werte enthaelt. Direktantwort aus dem Verlauf ist NUR fuer echte \
-Folgefragen erlaubt, die sich strikt auf bereits abgerufene Werte \
-beziehen ('und seine E-Mail?', 'wie viel davon entfaellt auf Y?').
+Werte enthaelt. Das gilt AUCH FUER FOLGEFRAGEN: 'und seine E-Mail?', \
+'und die Telefonnummer?', 'wie hoch war das nochmal?' werden alle \
+durch rag_specialist verifiziert — Pronomen/Bezuege aus der History \
+aufloesen, dann mit der voll aufgeloesten Frage retrievel. \
+Direktantwort aus dem Verlauf ist nur fuer echten Smalltalk \
+(Begruessung, Dank, Identitaets-/Meta-Fragen) und woertliche \
+Repetition derselben letzten Antwort erlaubt.
 
 KOSTENZEILE != AUFTRAGSUMFANG (Anti-Halluzinations-Regel):
 Eine Kostenposition in einer Grobbausumme (z.B. 'Ingenieurvermessung 2%', \
