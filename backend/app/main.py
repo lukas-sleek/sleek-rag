@@ -1,6 +1,36 @@
 import asyncio
+import logging
 import os
+import warnings
 from contextlib import asynccontextmanager
+
+# --- Console noise control --------------------------------------------------
+# By default the dev console is kept readable by silencing chatty third-party
+# output: google-genai's per-turn "non-text parts in the response" warning,
+# Vertex/ADK [EXPERIMENTAL] notices, authlib deprecation, and api_core's
+# Python-version FutureWarnings. Nothing is removed — set VERBOSE_LOGS=1 to
+# switch all of it back on. Must run before the google libs are imported
+# (below, via app.config / app.routers) to catch import-time warnings.
+if os.getenv("VERBOSE_LOGS", "").lower() not in ("1", "true", "yes"):
+    for _cat in (FutureWarning, DeprecationWarning, UserWarning):
+        warnings.filterwarnings("ignore", category=_cat)
+    # authlib forces its deprecation warning to print at import time and ignores
+    # warning filters, so pre-import the offending module inside a recording
+    # context that swallows it (later imports are cached no-ops).
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("ignore")
+        try:
+            import authlib.jose  # noqa: F401
+        except Exception:  # noqa: BLE001
+            pass
+    for _noisy in (
+        "google_genai",
+        "google.genai",
+        "google.api_core",
+        "google.adk",
+        "vertexai",
+    ):
+        logging.getLogger(_noisy).setLevel(logging.ERROR)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
