@@ -45,8 +45,25 @@ export type Citation = {
   project_id?: string | null;
   file_id?: string | null;
   filename: string;
+  // Convenience fields mirroring chunks[0] for older code paths and the
+  // single-chunk hover layout. The authoritative per-chunk data lives in
+  // `chunks` below.
   snippet: string;
   score: number | null;
+  page_first?: number | null;
+  page_last?: number | null;
+  // All distinct chunks of this file that grounded the answer. File-level
+  // dedupe collapses N chunks of the same file to one chip but preserves
+  // each chunk's snippet + confidence here so the hover can list them.
+  // Re-renders to per-chunk citations once Vertex starts populating
+  // page_span on grounding metadata.
+  chunks?: Array<{
+    chunk_id?: string | null;
+    snippet?: string | null;
+    score?: number | null;
+    page_first?: number | null;
+    page_last?: number | null;
+  }>;
   // web fields (only present when kind === "web")
   url?: string | null;
   title?: string | null;

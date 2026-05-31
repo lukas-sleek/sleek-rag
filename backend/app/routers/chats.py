@@ -262,6 +262,11 @@ def _citations_from_grounding(chunks: list[dict]) -> list[dict]:
             "score": c.get("confidence"),
             "uri": uri,
             "title": title,
+            # Page span lets the chip + hover disambiguate multiple chunks
+            # from the same file ('HO.pdf · S. 14' vs '· S. 27') under the
+            # per-chunk citation dedupe (citation_aggregator._dedupe_key).
+            "page_first": c.get("page_first"),
+            "page_last": c.get("page_last"),
         })
     return out
 

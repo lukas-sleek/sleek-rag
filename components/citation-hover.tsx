@@ -44,12 +44,43 @@ export function CitationHover({
   };
   React.useEffect(() => () => cancelClose(), []);
 
-  const tone = confidenceTone(citation.score);
   const isWeb = citation.kind === "web";
   const heading = isWeb
     ? citation.title || citation.domain || citation.url || "Web"
     : citation.filename;
-  const snippet = citation.snippet ?? "";
+  // For web citations the score lives on the citation itself. For file
+  // citations we now have N chunks per file (file-level dedupe), each
+  // with its own score — render them as a list below instead of a single
+  // header tone.
+  const headerTone = isWeb ? confidenceTone(citation.score) : null;
+  // Chunks list: prefer the per-chunk array populated by the dedupe
+  // aggregator; fall back to the legacy single-snippet shape.
+  const chunks: Array<{
+    snippet?: string | null;
+    score?: number | null;
+    page_first?: number | null;
+    page_last?: number | null;
+  }> =
+    citation.chunks && citation.chunks.length > 0
+      ? citation.chunks
+      : [
+          {
+            snippet: citation.snippet,
+            score: citation.score,
+            page_first: citation.page_first,
+            page_last: citation.page_last,
+          },
+        ];
+
+  function pageSuffixFor(c: {
+    page_first?: number | null;
+    page_last?: number | null;
+  }): string {
+    const pf = c.page_first ?? null;
+    const pl = c.page_last ?? null;
+    if (pf == null) return "";
+    return pl != null && pl !== pf ? ` · S. ${pf}–${pl}` : ` · S. ${pf}`;
+  }
 
   return (
     <span
@@ -89,30 +120,75 @@ export function CitationHover({
           }
         >
           <span className="flex items-center gap-2 mb-2">
-            {isWeb ? (
-              <Icon.Globe />
-            ) : (
-              <Icon.FileText />
-            )}
+            {isWeb ? <Icon.Globe /> : <Icon.FileText />}
             <span className="text-[12px] font-medium text-text truncate flex-1">
               {heading}
             </span>
-            <span
-              title="Konfidenz aus grounding_supports (höher = relevanter)"
-              className={
-                "font-mono tabular-nums text-[10.5px] uppercase tracking-wider " +
-                tone.className
-              }
-            >
-              {tone.label}
-            </span>
-          </span>
-          <span className="block max-h-48 overflow-auto text-[11.5px] leading-[1.5] text-text-secondary whitespace-pre-wrap break-words">
-            {snippet || (
-              <span className="italic text-text-tertiary">
-                Keine Vorschau verfügbar.
+            {!isWeb && chunks.length > 1 && (
+              <span className="font-mono tabular-nums text-[10.5px] uppercase tracking-wider text-text-tertiary">
+                {chunks.length} Treffer
               </span>
             )}
+            {headerTone && (
+              <span
+                title="Konfidenz aus grounding_supports (höher = relevanter)"
+                className={
+                  "font-mono tabular-nums text-[10.5px] uppercase tracking-wider " +
+                  headerTone.className
+                }
+              >
+                {headerTone.label}
+              </span>
+            )}
+          </span>
+          <span className="block max-h-64 overflow-auto space-y-2">
+            {chunks.map((c, i) => {
+              const chunkTone = confidenceTone(c.score);
+              const text = c.snippet || "";
+              const ps = pageSuffixFor(c);
+              return (
+                <span
+                  key={i}
+                  className={
+                    "block " +
+                    (i > 0
+                      ? "pt-2 border-t border-border"
+                      : "")
+                  }
+                >
+                  {!isWeb && (
+                    <span className="flex items-center gap-2 mb-1">
+                      {chunks.length > 1 && (
+                        <span className="font-mono tabular-nums text-[10px] text-text-tertiary">
+                          #{i + 1}
+                        </span>
+                      )}
+                      {ps && (
+                        <span className="text-[10.5px] text-text-tertiary">
+                          {ps.replace(/^ · /, "")}
+                        </span>
+                      )}
+                      <span
+                        title="Konfidenz aus grounding_supports (höher = relevanter)"
+                        className={
+                          "ml-auto font-mono tabular-nums text-[10.5px] uppercase tracking-wider " +
+                          chunkTone.className
+                        }
+                      >
+                        {chunkTone.label}
+                      </span>
+                    </span>
+                  )}
+                  <span className="block text-[11.5px] leading-[1.5] text-text-secondary whitespace-pre-wrap break-words">
+                    {text || (
+                      <span className="italic text-text-tertiary">
+                        Keine Vorschau verfügbar.
+                      </span>
+                    )}
+                  </span>
+                </span>
+              );
+            })}
           </span>
         </span>
       )}

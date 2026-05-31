@@ -25,37 +25,61 @@ _MULTI_REF_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)+)\]")
 
 def _dedupe_key(c: dict) -> tuple:
     """Per-record dedupe key. Web vs file collapse independently:
-    - web: (kind, url)  — same URL cited twice = one chip
-    - file: (kind, file_id) — all chunks from the same file collapse to
-      one chip. Rationale: the user-facing citation list shows filenames,
-      not chunk excerpts; surfacing 7 numbered chips that all read
-      'HO_Teil_B...pdf' just because Vertex returned 7 chunks from that
-      file is misleading. Chunk-level snippets stay accessible via the
-      activity panel's `Treffer` rendering — the citation footer shows
-      one entry per cited file.
+    - web: (kind, url) — same URL cited twice = one chip.
+    - file: (kind, file_id) — all chunks of the same file collapse to
+      one chip in the citation footer, but each chunk's snippet + score
+      is preserved on the surviving record's `chunks` array (see
+      `dedupe_and_renumber`). The hover renders that array so the user
+      can see WHICH passages grounded the answer, with their individual
+      confidences. When Vertex starts populating page spans we'll switch
+      back to per-chunk dedupe so each [N] points to a specific page.
     """
     kind = c.get("kind") or "file"
     if kind == "web":
         return ("web", c.get("url") or c.get("uri"))
-    return (
-        "file",
-        c.get("file_id"),
-    )
+    return ("file", c.get("file_id"))
+
+
+def _chunk_view(c: dict) -> dict:
+    """Project a citation record down to the per-chunk fields the hover
+    needs. Used to populate the `chunks` array on the surviving file-level
+    citation."""
+    return {
+        "chunk_id": c.get("chunk_id"),
+        "snippet": c.get("snippet"),
+        "score": c.get("score"),
+        "page_first": c.get("page_first"),
+        "page_last": c.get("page_last"),
+    }
 
 
 def dedupe_and_renumber(raw: list[dict]) -> tuple[list[dict], dict[int, int]]:
     seen: dict[tuple, int] = {}
     final: list[dict] = []
     remap: dict[int, int] = {}
+    chunk_seen: dict[int, set] = {}  # new_idx -> set of chunk_ids already merged
     for c in raw:
         key = _dedupe_key(c)
+        view = _chunk_view(c)
         if key in seen:
-            remap[c["idx"]] = seen[key]
+            new_idx = seen[key]
+            remap[c["idx"]] = new_idx
+            # Append this chunk's data to the surviving record so hover
+            # can show all distinct passages from this file. De-dup by
+            # chunk_id within the array so a multi-question fan-out
+            # citing the same passage twice doesn't double-render it.
+            cid = view["chunk_id"]
+            if cid is None or cid not in chunk_seen[new_idx]:
+                final[new_idx - 1].setdefault("chunks", []).append(view)
+                if cid is not None:
+                    chunk_seen[new_idx].add(cid)
             continue
         new_idx = len(final) + 1
         seen[key] = new_idx
         remap[c["idx"]] = new_idx
-        final.append({**c, "idx": new_idx})
+        survivor = {**c, "idx": new_idx, "chunks": [view]}
+        final.append(survivor)
+        chunk_seen[new_idx] = {view["chunk_id"]} if view["chunk_id"] is not None else set()
     return final, remap
 
 
