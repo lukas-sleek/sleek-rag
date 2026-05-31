@@ -194,7 +194,7 @@ function isRagSpecialistInvocation(node: TraceNode): boolean {
   return false;
 }
 
-function buildTree(steps: TraceStep[]): TraceNode[] {
+function buildTree(steps: TraceStep[], streaming: boolean): TraceNode[] {
   const top: TraceNode[] = [];
   let lastTop: TraceNode | null = null;
   for (const s of steps) {
@@ -210,18 +210,23 @@ function buildTree(steps: TraceStep[]): TraceNode[] {
       top.push(node);
     }
   }
-  // Dispatch fan-out: search rows (`tool-retrieval-<seq>-q<idx>`) and
-  // Frage rows (`dispatch-<idx>`) both attach to the dispatch parent
-  // in the first pass. Re-parent each search under its matching Frage
-  // sibling using the `-q<idx>` suffix so the per-question retrieval
-  // renders inside that question's row instead of as a flat trailing
-  // sibling.
+  // Batch fan-out: per-question search rows and Frage rows (`dispatch-<idx>`)
+  // both attach to the batch-tool parent in the first pass. Re-parent each
+  // search under its matching Frage sibling so the per-question retrieval
+  // renders inside that question's row instead of as a flat trailing sibling.
+  // Two tools fan out, with different suffixes on the retrieval id:
+  //   dispatch_rag_questions -> `tool-retrieval-<seq>-q<idx>`
+  //   run_projektanalyse     -> `tool-retrieval-<seq>-pa<idx>`
   for (const parent of top) {
-    if (parent.name !== "dispatch_rag_questions") continue;
+    if (
+      parent.name !== "dispatch_rag_questions" &&
+      parent.name !== "run_projektanalyse"
+    )
+      continue;
     const kept: TraceNode[] = [];
     for (const child of parent.children) {
       if (child.name === "search_project_documents") {
-        const m = child.id.match(/-q(\d+)$/);
+        const m = child.id.match(/-(?:q|pa)(\d+)$/);
         if (m) {
           const qIdx = parseInt(m[1], 10);
           const frage = parent.children.find(
@@ -251,24 +256,34 @@ function buildTree(steps: TraceStep[]): TraceNode[] {
         isRagSpecialistInvocation(node) &&
         !node.children.some((c) => c.name === "search_project_documents")
       ) {
-        // Mirror the parent's terminal state. If the parent was
-        // cancelled / errored before the real retrieval arrived, the
-        // placeholder should not stay forever-spinning — flip it to
-        // the same status so the activity panel reads `abgebrochen` /
-        // `fehler` consistently top-to-bottom.
+        // The placeholder may only spin (`tool_call` -> laeuft) while this
+        // invocation is genuinely live. It settles to a terminal
+        // `tool_response` once it has a terminal status (cancelled / errored
+        // / ok) OR the whole turn has stopped streaming. Otherwise a question
+        // that produced no grounding row at all (e.g. answer "kommt nicht
+        // vor") would spin forever even though the Frage row reads `fertig`.
+        // The empty `chunks` array makes the terminal body render
+        // "Keine grundenden Treffer" instead of the in-flight dots.
         const parentCancelled = node.status === "cancelled";
         const parentErrored = node.status === "error";
-        const terminal = parentCancelled || parentErrored;
+        const finished =
+          parentCancelled ||
+          parentErrored ||
+          node.status === "ok" ||
+          !streaming;
         node.children.push({
           id: `placeholder-search-${node.id}`,
           author: "rag_specialist",
-          kind: terminal ? "tool_response" : "tool_call",
+          kind: finished ? "tool_response" : "tool_call",
           name: "search_project_documents",
           status: parentCancelled
             ? "cancelled"
             : parentErrored
               ? "error"
-              : null,
+              : finished
+                ? "no_results"
+                : null,
+          chunks: finished ? [] : undefined,
           children: [],
         });
       }
@@ -490,7 +505,7 @@ export function AgentActivity({
       {open && (
         <div className="border-t border-border bg-bg-base">
           <Accordion type="multiple" className="px-1">
-            {buildTree(steps).map((node) => (
+            {buildTree(steps, streaming).map((node) => (
               <StepRow key={node.id} node={node} />
             ))}
           </Accordion>

@@ -510,10 +510,10 @@ export function Sidebar({
           <button
             className="group flex items-center gap-2.5 w-[calc(100%-16px)] mx-2 mb-2 px-3 py-2.5 bg-transparent border border-border rounded-[10px] text-text-secondary text-[13px] font-medium tracking-[-0.01em] text-left transition-[background-color,border-color,color] duration-150 hover:bg-bg-hover hover:border-border-strong hover:text-text"
             onClick={() => onOpenTemplate && onOpenTemplate()}
-            title="Vorlage Projektanalyse bearbeiten"
+            title="Vorlagen verwalten"
           >
             <span className="inline-flex items-center justify-center text-accent flex-shrink-0"><Icon.FileText /></span>
-            <span className="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">Vorlage Analyse</span>
+            <span className="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">Vorlagen</span>
             <span className="inline-flex items-center justify-center text-text-tertiary opacity-0 group-hover:opacity-100 transition-opacity duration-150 flex-shrink-0"><Icon.Edit /></span>
           </button>
 

@@ -10,7 +10,7 @@ import { Composer, EmptyState, Message } from "./chat";
 const LAST_CHAT_KEY = "sleek-rag.last-chat-id";
 import { ProjectFilesModal } from "./project-files-modal";
 import { PdfViewerDialog } from "./pdf-viewer-dialog";
-import { TemplateAnalysisModal } from "./template-modal";
+import { TemplateAnalysisModal, type TemplateSummary } from "./template-modal";
 import {
   ACCEPT_ATTR,
   filterAllowedFiles,
@@ -117,6 +117,25 @@ export function App() {
   }>(null);
   const [showFiles, setShowFiles] = React.useState({ open: false, autoPicker: false });
   const [showTemplate, setShowTemplate] = React.useState(false);
+  const [templates, setTemplates] = React.useState<TemplateSummary[]>([]);
+  const refreshTemplates = React.useCallback(async () => {
+    try {
+      const res = await api("/api/templates");
+      if (!res.ok) return;
+      setTemplates((await res.json()) as TemplateSummary[]);
+    } catch {
+      /* keep last-known list */
+    }
+  }, []);
+  React.useEffect(() => {
+    refreshTemplates();
+  }, [refreshTemplates]);
+  // Empty Vorlagen (no questions) can't be run, so they're hidden from the
+  // composer picker / empty-state suggestions — but stay editable in the modal.
+  const usableTemplates = React.useMemo(
+    () => templates.filter((t) => t.questions.length > 0),
+    [templates]
+  );
   const [viewerCitation, setViewerCitation] = React.useState<Citation | null>(null);
   const [chatDragOver, setChatDragOver] = React.useState(false);
   const [toasts, setToasts] = React.useState<Toast[]>([]);
@@ -1465,11 +1484,13 @@ export function App() {
               hasFiles={activeChat ? activeChat.projectHasFiles !== false : true}
               projectName={activeChat?.projectName}
               userName={displayName}
+              templates={usableTemplates}
+              onOpenTemplate={() => setShowTemplate(true)}
               onAddFiles={() => {
                 if (hiddenFileInputRef.current) hiddenFileInputRef.current.click();
               }}
             />
-            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} filesProcessing={filesProcessing} />
+            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} filesProcessing={filesProcessing} templates={usableTemplates} onOpenTemplate={() => setShowTemplate(true)} />
           </>
         ) : (
           <>
@@ -1506,7 +1527,7 @@ export function App() {
                 ))}
               </div>
             </div>
-            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} filesProcessing={filesProcessing} />
+            <Composer onSend={sendMessage} streaming={activeChatStreaming} onStop={onStop} filesProcessing={filesProcessing} templates={usableTemplates} onOpenTemplate={() => setShowTemplate(true)} />
           </>
         )}
       </main>
@@ -1600,7 +1621,8 @@ export function App() {
       <TemplateAnalysisModal
         open={showTemplate}
         onClose={() => setShowTemplate(false)}
-        onSaved={() => pushToast("Vorlage gespeichert.", "success")}
+        onSaved={() => pushToast("Vorlagen gespeichert.", "success")}
+        onChanged={refreshTemplates}
       />
 
       <PdfViewerDialog

@@ -7,7 +7,15 @@ import type { Citation, Message as Msg } from "./fixtures";
 import { CitationChip } from "./citation-chip";
 import { CitationHover } from "./citation-hover";
 import { AgentActivity } from "./agent-activity";
+import type { TemplateSummary } from "./template-modal";
 import { api } from "@/lib/api";
+
+/** Chat command that the orchestrator parses to run a specific Vorlage.
+ *  Kept human-readable so it also reads well in the chat history. The quoted
+ *  name is the contract with the backend instructions (see instructions.py). */
+export function templateCommand(name: string): string {
+  return `Erstelle die Projektanalyse anhand der Vorlage "${name}"`;
+}
 
 const MD_PROSE =
   "text-[14.5px] leading-[1.65] text-text break-words " +
@@ -27,10 +35,6 @@ const MD_PROSE =
   "[&_table]:border-collapse [&_table]:my-3 [&_table]:text-[13.5px] " +
   "[&_th]:border [&_th]:border-border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-semibold [&_th]:bg-bg-input " +
   "[&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_td]:align-top";
-
-const SUGGESTIONS = [
-  { title: "Projektanalyse erstellen", desc: "Beantwortet alle Fragen aus deiner Vorlage parallel über die Projektdokumente" },
-];
 
 function linkifyCitations(text: string, citations: Citation[]): string {
   return text.replace(/\[(\d+)\]/g, (m, n) => {
@@ -255,6 +259,8 @@ export function EmptyState({
   onAddFiles,
   userName = "Alex",
   noProjects = false,
+  templates = [],
+  onOpenTemplate,
 }: {
   onSuggest: (title: string) => void;
   hasFiles?: boolean;
@@ -262,6 +268,8 @@ export function EmptyState({
   onAddFiles?: () => void;
   userName?: string;
   noProjects?: boolean;
+  templates?: TemplateSummary[];
+  onOpenTemplate?: () => void;
 }) {
   if (noProjects) {
     return (
@@ -304,16 +312,26 @@ export function EmptyState({
         Hallo, {userName}. <span className="text-text-tertiary">Was kann ich für dich heraussuchen?</span>
       </div>
       <div className="flex flex-wrap justify-center gap-2.5 w-full max-w-[600px]">
-        {SUGGESTIONS.map((s) => (
+        {templates.length === 0 ? (
           <button
-            key={s.title}
             className="bg-bg-elevated border border-border rounded-md py-3.5 px-4 text-left text-text flex flex-col gap-1 transition-[border-color,background-color,transform] duration-150 hover:border-border-strong hover:bg-bg-hover active:translate-y-px"
-            onClick={() => onSuggest(s.title)}
+            onClick={() => onOpenTemplate && onOpenTemplate()}
           >
-            <div className="text-[13px] font-medium text-text">{s.title}</div>
-            <div className="text-xs text-text-tertiary">{s.desc}</div>
+            <div className="text-[13px] font-medium text-text">Vorlage anlegen</div>
+            <div className="text-xs text-text-tertiary">Definiere eine Fragenliste, die parallel ueber deine Projektdokumente beantwortet wird</div>
           </button>
-        ))}
+        ) : (
+          templates.map((t) => (
+            <button
+              key={t.id}
+              className="bg-bg-elevated border border-border rounded-md py-3.5 px-4 text-left text-text flex flex-col gap-1 transition-[border-color,background-color,transform] duration-150 hover:border-border-strong hover:bg-bg-hover active:translate-y-px"
+              onClick={() => onSuggest(templateCommand(t.name))}
+            >
+              <div className="text-[13px] font-medium text-text">«{t.name}» erstellen</div>
+              <div className="text-xs text-text-tertiary">Beantwortet alle Fragen dieser Vorlage parallel über die Projektdokumente</div>
+            </button>
+          ))
+        )}
       </div>
     </div>
   );
@@ -381,11 +399,15 @@ export function Composer({
   streaming,
   onStop,
   filesProcessing = false,
+  templates = [],
+  onOpenTemplate,
 }: {
   onSend: (text: string) => void;
   streaming: boolean;
   onStop: () => void;
   filesProcessing?: boolean;
+  templates?: TemplateSummary[];
+  onOpenTemplate?: () => void;
 }) {
   const [value, setValue] = React.useState("");
   const [temp, setTemp] = React.useState(0.7);
@@ -706,15 +728,65 @@ export function Composer({
         )}
 
         <div className="flex items-center gap-1 px-3 py-2 rounded-b-[11px]">
-          <button
-            type="button"
-            disabled={streaming || filesProcessing}
-            onClick={() => onSend("Projektanalyse erstellen")}
-            title={filesProcessing ? "Dateien werden noch verarbeitet…" : "Beantwortet alle Fragen aus deiner Vorlage parallel"}
-            className="h-7 inline-flex items-center gap-1.5 px-2.5 rounded-md bg-transparent border border-transparent text-text-secondary text-xs font-medium whitespace-nowrap transition-[background-color,color,border-color,opacity] duration-150 hover:bg-bg-hover hover:text-text hover:border-border disabled:opacity-45 disabled:cursor-not-allowed [&_svg]:text-text-tertiary"
-          >
-            <Icon.Sparkles /> Projektanalyse erstellen
-          </button>
+          {templates.length === 0 ? (
+            <button
+              type="button"
+              disabled={streaming}
+              onClick={() => onOpenTemplate && onOpenTemplate()}
+              title="Vorlage anlegen, um sie hier auszuwaehlen"
+              className="h-7 inline-flex items-center gap-1.5 px-2.5 rounded-md bg-transparent border border-transparent text-text-secondary text-xs font-medium whitespace-nowrap transition-[background-color,color,border-color,opacity] duration-150 hover:bg-bg-hover hover:text-text hover:border-border disabled:opacity-45 disabled:cursor-not-allowed [&_svg]:text-text-tertiary"
+            >
+              <Icon.Sparkles /> Vorlage anlegen
+            </button>
+          ) : templates.length === 1 ? (
+            <button
+              type="button"
+              disabled={streaming || filesProcessing}
+              onClick={() => onSend(templateCommand(templates[0].name))}
+              title={filesProcessing ? "Dateien werden noch verarbeitet…" : "Beantwortet alle Fragen dieser Vorlage parallel"}
+              className="h-7 inline-flex items-center gap-1.5 px-2.5 rounded-md bg-transparent border border-transparent text-text-secondary text-xs font-medium whitespace-nowrap transition-[background-color,color,border-color,opacity] duration-150 hover:bg-bg-hover hover:text-text hover:border-border disabled:opacity-45 disabled:cursor-not-allowed [&_svg]:text-text-tertiary"
+            >
+              <Icon.Sparkles /> «{templates[0].name}» erstellen
+            </button>
+          ) : (
+            <Dropdown
+              align="start"
+              trigger={
+                <button
+                  type="button"
+                  disabled={streaming || filesProcessing}
+                  title={filesProcessing ? "Dateien werden noch verarbeitet…" : "Vorlage auswaehlen und parallel beantworten"}
+                  className="h-7 inline-flex items-center gap-1.5 px-2.5 rounded-md bg-transparent border border-transparent text-text-secondary text-xs font-medium whitespace-nowrap transition-[background-color,color,border-color,opacity] duration-150 hover:bg-bg-hover hover:text-text hover:border-border disabled:opacity-45 disabled:cursor-not-allowed [&_svg]:text-text-tertiary"
+                >
+                  <Icon.Sparkles /> Vorlage erstellen <Icon.ChevronDownSm />
+                </button>
+              }
+            >
+              {({ close }) => (
+                <>
+                  {templates.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      className={MENU_ITEM}
+                      onClick={() => { close(); onSend(templateCommand(t.name)); }}
+                    >
+                      <Icon.Sparkles /> «{t.name}»
+                    </button>
+                  ))}
+                  {onOpenTemplate && (
+                    <button
+                      type="button"
+                      className={MENU_ITEM + " border-t border-border mt-1 pt-2"}
+                      onClick={() => { close(); onOpenTemplate(); }}
+                    >
+                      <Icon.Edit /> Vorlagen verwalten
+                    </button>
+                  )}
+                </>
+              )}
+            </Dropdown>
+          )}
 
           <button
             type="button"
